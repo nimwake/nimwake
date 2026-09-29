@@ -62,7 +62,7 @@ Phase 1은 아래 PRD 섹션을 구현 대상으로 삼는다.
 | §42 Load Tests                | [Load Tests](../../prd/03-delivery/03-load-tests.md)                         | `v0.0.4` |
 | §43 Lifecycle Stress Test     | [Lifecycle Stress Test](../../prd/03-delivery/04-stress-tests.md)            | `v0.0.5` |
 | §72 Latency Instrumentation   | [Latency Instrumentation](../../prd/03-delivery/05-instrumentation.md)       | `v0.0.4` |
-| §44 CI Strategy               | [CI Strategy](../../prd/03-delivery/06-ci-strategy.md)                       | `v0.0.4` |
+| §44 CI Strategy               | [CI Strategy](../../prd/03-delivery/06-ci-strategy.md)                       | `v0.0.1` PR CI · `v0.0.4` integration · `v0.0.5` release gate |
 | §45 Performance Goals         | [Performance Goals와 Regression](../../prd/03-delivery/07-performance-baseline.md) | `v0.0.4` |
 | §73 Performance Report와 Regression | [Performance Goals와 Regression](../../prd/03-delivery/07-performance-baseline.md) | `v0.0.5` |
 | §64 Development Rules         | [Development Rules](../../prd/06-conventions/01-development-rules.md)        | 전 구간  |

@@ -1,0 +1,68 @@
+# Pull Request — Fast CI
+#
+# 요구사항: .docs/prd/03-delivery/06-ci-strategy.md (PRD §44)
+#
+# 목적: fast feedback + lifecycle correctness.
+# 실제 daemon E2E는 integration CI(v0.0.4), storm/stress는 release gate(v0.0.5)에서 다룬다.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# 같은 브랜치에서 새 push가 오면 이전 실행은 취소한다.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: fmt / clippy / test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # toolchain과 component는 rust-toolchain.toml이 결정한다.
+      # 첫 cargo 호출에서 rustup이 자동으로 설치한다.
+      - name: Show toolchain
+        run: |
+          rustup show active-toolchain
+          cargo --version
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # lifecycle 상태 전이 / stale event / cold-start deduplication을 모두 포함한다.
+      # Nimwake에서 concurrency test는 first-class correctness test다. (PRD §40)
+      - name: Test
+        run: cargo test --workspace --all-features
+
+      # 상한 없는 대기열은 Invariant 9 위반이다. 리뷰에 의존하지 않고 기계로 막는다.
+      - name: Forbid unbounded queues
+        run: |
+          if grep -rn "unbounded_channel" crates/ ; then
+            echo "::error::unbounded channel found — see PRD §69 Backpressure (Invariant 9)"
+            exit 1
+          fi
