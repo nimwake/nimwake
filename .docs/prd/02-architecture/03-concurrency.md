@@ -112,6 +112,11 @@ enum AppCommand {
         reason: StopReason,
     },
 
+    /// 현재 상태 스냅샷 조회. 관측과 테스트에 사용한다.
+    Status {
+        reply: oneshot::Sender<AppStatus>,
+    },
+
     Shutdown,
 }
 ```

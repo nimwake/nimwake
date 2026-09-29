@@ -253,6 +253,18 @@ AppManager mailbox full
 503 Service Unavailable
 ```
 
+### lease 반납은 예외다
+
+mailbox가 가득 찼다고 해서 **lease 반납(`RequestFinished`)을 버려서는 안 된다.**
+
+버리는 순간 `active_request_count`가 0으로 내려가지 못해 해당 application은 영원히 잠들지 못한다.
+새 요청은 거절(`503`)하되, 이미 발급된 lease의 반납은 반드시 전달되어야 한다.
+
+```text
+새 요청        상한 초과 → 거절 (503)
+lease 반납     상한과 무관하게 반드시 전달
+```
+
 MVP는 adaptive queue나 우선순위 큐를 만들지 않는다.
 **"모든 대기열은 bounded"라는 invariant만 처음부터 지키면 된다.**
 

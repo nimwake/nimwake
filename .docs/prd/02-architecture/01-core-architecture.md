@@ -138,14 +138,14 @@ enum AppState {
     Running {
         process: ProcessHandle,
         started_at: Instant,
-        active_requests: usize,
+        leases: HashSet<LeaseId>,
         last_request_at: Instant,
         idle_generation: IdleGeneration,
     },
 
     Stopping {
         operation_id: OperationId,
-        process_id: ProcessId,
+        process: ProcessHandle,
         waiters: Vec<Waiter>,
     },
 
@@ -155,6 +155,11 @@ enum AppState {
     },
 }
 ```
+
+`active_request_count`는 별도 카운터가 아니라 `leases`의 크기다.
+
+집합으로 두는 이유는 **중복 반납과 이미 교체된 process에 대한 반납을 무시**할 수 있어야 하기 때문이다.
+단순 정수 카운터는 같은 lease가 두 번 반납되어도 그대로 감소해 버린다.
 
 각 상태에 필요한 데이터는 반드시 해당 state 안에 위치시킨다.
 

@@ -14,10 +14,20 @@ MVP interface:
 
 ```rust
 trait Runtime {
+    /// 기동하고 readiness까지 확인한 뒤 backend를 돌려준다.
     async fn start(
         &self,
         app: &AppSpec,
     ) -> Result<StartedProcess>;
+
+    /// process가 끝날 때까지 기다린다. 이미 끝났으면 즉시 반환한다.
+    ///
+    /// AppManager는 이 함수를 monitor task에서 호출해 `ProcessExited`를 보고한다.
+    /// `Child`를 AppManager로 넘기지 않기 위한 경계다. (§70)
+    async fn wait(
+        &self,
+        process: &ProcessHandle,
+    ) -> ExitStatus;
 
     async fn stop(
         &self,

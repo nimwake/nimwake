@@ -1,0 +1,116 @@
+//! Core 에러 타입.
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+use thiserror::Error;
+
+/// application lifecycle이 실패한 이유.
+///
+/// startup을 기다리던 모든 waiter에게 복제되어 전달되므로 `Clone`이어야 한다.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AppError {
+    #[error("startup timed out after {0:?}")]
+    StartupTimeout(Duration),
+
+    #[error("runtime failed to start the application: {0}")]
+    StartFailed(String),
+
+    #[error("application process exited unexpectedly ({0})")]
+    ProcessExited(String),
+
+    #[error("application manager is shutting down")]
+    ShuttingDown,
+}
+
+/// `AppHandle::acquire` 실패 이유.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AcquireError {
+    /// mailbox 또는 pending waiter 상한을 초과했다. Gateway는 `503`으로 응답한다.
+    ///
+    /// 요구사항: PRD §69 Backpressure와 Overload.
+    #[error("application is overloaded")]
+    Overloaded,
+
+    #[error("application failed to start: {0}")]
+    StartFailed(#[source] AppError),
+
+    /// AppManager가 이미 종료되어 요청을 받을 수 없다.
+    #[error("application manager is unavailable")]
+    Unavailable,
+}
+
+/// runtime adapter가 보고하는 실패.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{0}")]
+pub struct RuntimeError(pub String);
+
+impl RuntimeError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+/// manifest 파일 처리 실패.
+#[derive(Debug, Error)]
+pub enum ManifestError {
+    #[error("failed to read manifest `{path}`: {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to parse manifest `{path}`: {source}")]
+    Parse {
+        path: PathBuf,
+        // toml 에러는 그 자체로 커서, box하지 않으면 모든 Result가 함께 무거워진다.
+        #[source]
+        source: Box<toml::de::Error>,
+    },
+
+    #[error(transparent)]
+    Invalid(#[from] ValidationError),
+}
+
+/// manifest / registry 검증 실패.
+///
+/// 요구사항: PRD §21 Manifest Validation.
+/// 검증은 daemon 기동 단계에서 수행하며, 하나라도 위반하면 기동을 거부한다.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ValidationError {
+    #[error("app `{app}`: name must not be empty")]
+    EmptyName { app: String },
+
+    #[error("app `{app}`: host must not be empty")]
+    EmptyHost { app: String },
+
+    #[error("app `{app}`: command must not be empty")]
+    EmptyCommand { app: String },
+
+    #[error("app `{app}`: working_dir `{path}` does not exist")]
+    MissingWorkingDir { app: String, path: PathBuf },
+
+    #[error("app `{app}`: {field} must be greater than zero")]
+    NotPositive { app: String, field: &'static str },
+
+    #[error("duplicate app name `{name}`")]
+    DuplicateName { name: String },
+
+    #[error("duplicate host `{host}` used by `{first}` and `{second}`")]
+    DuplicateHost {
+        host: String,
+        first: String,
+        second: String,
+    },
+
+    #[error("duplicate port {port} used by `{first}` and `{second}`")]
+    DuplicatePort {
+        port: u16,
+        first: String,
+        second: String,
+    },
+
+    #[error("app `{app}` uses the gateway port {port}")]
+    GatewayPortConflict { app: String, port: u16 },
+}

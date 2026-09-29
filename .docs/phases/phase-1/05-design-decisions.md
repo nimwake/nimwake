@@ -71,6 +71,26 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 
 ---
 
+## 구현 중 확정 (`v0.0.1`)
+
+문서만으로는 결정되지 않았고, 코드를 쓰면서 확정한 것들. PRD에 반영을 끝냈다.
+
+| #   | 결정                                                        | 이유                                                                                     | 반영 위치                                                   |
+| --- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| D16 | `active_requests: usize` → `leases: HashSet<LeaseId>`        | 정수 카운터는 같은 lease가 두 번 반납돼도 그대로 감소한다. 중복 반납 무시가 불가능하다.   | [§11](../../prd/02-architecture/01-core-architecture.md)     |
+| D17 | `Runtime` trait에 `wait()` 추가                              | `Child`를 AppManager로 넘기지 않고 exit를 감시하려면 runtime 쪽에 대기 지점이 필요하다.   | [§18](../../prd/02-architecture/04-runtime.md)               |
+| D18 | mailbox가 가득 차도 lease 반납은 반드시 전달                 | 반납을 버리면 `active_requests`가 0이 되지 못해 app이 영원히 잠들지 않는다.               | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
+| D19 | `AppCommand::Status` 추가                                    | 상태 관측 경로가 없으면 테스트가 내부 필드를 들여다봐야 한다. 나중에 `nimwake status`로 이어진다. | [§15](../../prd/02-architecture/03-concurrency.md)      |
+
+### 코드 수준 주의사항
+
+- lifecycle 시간 판단은 **`tokio::time::Instant`** 를 쓴다.
+  `std::time::Instant`는 `tokio::time::pause()`의 가상 시계를 따르지 않아 idle timeout 테스트가 실시간에 묶인다.
+- `stop`이 끝나면 `StopCompleted`와 `ProcessExited`가 **둘 다** 도착한다.
+  먼저 온 것이 전이를 수행하고 나중 것은 stale로 무시된다. 테스트는 event 개수를 세지 말고 목표 상태까지 진행시켜야 한다.
+
+---
+
 ## P2 — Core MVP 이후
 
 | #   | 항목                                    | 처리                                                            |
