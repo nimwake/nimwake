@@ -205,10 +205,15 @@ impl Daemon {
 
     /// 기동에 실패할 것으로 기대하는 경우. 종료 코드와 출력을 돌려준다.
     pub fn run_expecting_failure(apps: &Apps) -> (i32, String) {
+        Self::run(&["--apps", &apps.path().display().to_string(), "--port", "0"])
+    }
+
+    /// daemon을 한 번 실행하고 끝날 때까지 기다린다. 종료 코드와 출력을 돌려준다.
+    ///
+    /// 종료 코드는 supervisor가 재기동 여부를 판단하는 근거다. (PRD §74)
+    pub fn run(args: &[&str]) -> (i32, String) {
         let out = Command::new(env!("CARGO_BIN_EXE_nimwaked"))
-            .arg("--apps")
-            .arg(apps.path())
-            .args(["--port", "0"])
+            .args(args)
             .output()
             .expect("nimwaked runs");
 
@@ -219,6 +224,20 @@ impl Daemon {
             String::from_utf8_lossy(&out.stderr),
         );
         (code, text)
+    }
+
+    /// daemon이 알린 실제 listen 주소.
+    pub fn listen_addr(&self) -> String {
+        self.output()
+            .iter()
+            .find_map(|line| {
+                line.split("listening on http://")
+                    .nth(1)?
+                    .split_whitespace()
+                    .next()
+                    .map(ToOwned::to_owned)
+            })
+            .expect("the daemon reports its listen address")
     }
 
     pub const fn port(&self) -> u16 {

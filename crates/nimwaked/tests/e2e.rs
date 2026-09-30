@@ -442,3 +442,145 @@ fn request_traces_are_off_unless_asked_for() {
         "per-request traces must stay off by default",
     );
 }
+
+// 아래는 supervisor가 의존하는 외부 동작이다. 바뀌면 host 쪽이 조용히 깨진다. (PRD §74)
+
+/// 설정 오류는 `78`이다. supervisor는 재기동하지 않고 operator에게 넘긴다.
+#[test]
+fn a_configuration_failure_exits_with_78() {
+    let apps = Apps::new();
+
+    // manifest가 하나도 없다.
+    let (code, output) = Daemon::run_expecting_failure(&apps);
+    assert_eq!(code, 78, "unexpected output: {output}");
+    assert!(output.contains("no manifests found"), "{output}");
+
+    // host/port가 충돌한다.
+    let port = free_port();
+    echo(&apps, "one", port, Lifecycle::default());
+    echo(&apps, "two", port, Lifecycle::default());
+    let (code, output) = Daemon::run_expecting_failure(&apps);
+    assert_eq!(code, 78, "unexpected output: {output}");
+    assert!(output.contains("duplicate port"), "{output}");
+}
+
+/// 잘못된 인자도 설정 오류다.
+#[test]
+fn a_bad_argument_exits_with_78() {
+    let (code, output) = Daemon::run(&["--nonsense"]);
+    assert_eq!(code, 78, "unexpected output: {output}");
+    assert!(output.contains("unknown option"), "{output}");
+}
+
+/// bind 실패는 `69`다. 시간이 해결할 수 있으므로 supervisor는 backoff 후 재시도한다.
+#[test]
+fn a_bind_failure_exits_with_69() {
+    let apps = Apps::new();
+    let app_port = free_port();
+    echo(&apps, "taken", app_port, Lifecycle::default());
+
+    // 먼저 뜬 daemon이 port를 쥐고 있다.
+    let first = Daemon::start(&apps);
+    let gateway = first.port();
+
+    let (code, output) = Daemon::run(&[
+        "--apps",
+        &apps.path().display().to_string(),
+        "--port",
+        &gateway.to_string(),
+    ]);
+
+    assert_eq!(code, 69, "unexpected output: {output}");
+    assert!(output.contains("failed to bind"), "{output}");
+}
+
+/// 기본은 loopback이다. 외부 노출은 opt-in이어야 한다. (PRD §74, §46)
+#[test]
+fn the_gateway_stays_on_loopback_unless_asked() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "local", port, Lifecycle::default());
+
+    let daemon = Daemon::start(&apps);
+    assert!(
+        daemon.listen_addr().starts_with("127.0.0.1:"),
+        "unexpected listen address: {}",
+        daemon.listen_addr(),
+    );
+}
+
+/// `--listen`으로 요청하면 loopback 밖으로 연다.
+#[test]
+fn the_gateway_opens_beyond_loopback_when_asked() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "lan", port, Lifecycle::default());
+
+    let daemon = Daemon::start_with(&apps, &["--listen", "0.0.0.0:0"]);
+
+    assert!(
+        daemon.listen_addr().starts_with("0.0.0.0:"),
+        "unexpected listen address: {}",
+        daemon.listen_addr(),
+    );
+    // loopback으로도 여전히 닿는다.
+    assert_eq!(daemon.get("lan.localhost").status, 200);
+}
+
+/// health probe는 어떤 application의 lifecycle도 건드리지 않아야 한다. (PRD §74)
+///
+/// supervisor가 등록된 Host로 probe하면 그 요청이 `acquire()`를 거쳐 app을 깨우고
+/// idle timer를 계속 리셋한다. **supervisor가 scale-to-zero를 무력화한다.**
+/// 그래서 "미등록 Host 요청은 상태를 바꾸지 않는다"를 계약으로 고정한다.
+#[test]
+fn health_probes_do_not_keep_an_app_awake() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "sleepy", port, Lifecycle::default().idle(1));
+    let daemon = Daemon::start(&apps);
+
+    let awake = daemon.get("sleepy.localhost");
+    assert_eq!(awake.status, 200);
+    assert!(is_listening(port));
+
+    // supervisor가 하듯 짧은 간격으로 계속 probe한다.
+    // 이것이 idle timer를 건드린다면 app은 영원히 잠들지 못한다.
+    let probes = std::thread::spawn({
+        let gateway = daemon.port();
+        move || {
+            let mut seen = Vec::new();
+            for _ in 0..20 {
+                seen.push(harness::get(gateway, "nimwake-health.invalid").map(|r| r.status));
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            seen
+        }
+    });
+
+    wait_for(
+        "the app to sleep while health probes keep arriving",
+        Duration::from_secs(6),
+        || !is_listening(port),
+    );
+
+    let statuses = probes.join().expect("probe thread finished");
+    assert!(
+        statuses.iter().all(|status| matches!(status, Ok(404))),
+        "every probe must be answered with 404: {statuses:?}",
+    );
+}
+
+/// probe는 잠든 app을 깨우지도 않는다.
+#[test]
+fn health_probes_do_not_wake_a_sleeping_app() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "asleep", port, Lifecycle::default());
+    let daemon = Daemon::start(&apps);
+
+    for _ in 0..10 {
+        assert_eq!(daemon.get("nimwake-health.invalid").status, 404);
+    }
+
+    assert!(!is_listening(port), "a health probe woke an application");
+}
