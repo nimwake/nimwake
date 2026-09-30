@@ -100,6 +100,57 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## 실측: 실제 애플리케이션 (`examples/hello-node`)
+
+`v0.0.5`까지의 모든 검증은 133줄짜리 Rust fixture 위에서 돌았다.
+`examples/hello-node`는 저장소에 있었지만 **테스트·CI 어디에서도 실행되지 않았다.**
+
+처음으로 실제 Node.js 앱을 Nimwake로 띄워 재 봤다.
+
+### cold start
+
+```text
+              queue      spawn    readiness      total
+hello-node    0.06ms     1.83ms    105.22ms    107.11ms
+echo-server   0.04ms     0.31ms     52.26ms     52.60ms
+```
+
+**예상이 틀렸다.** "실제 앱이면 수 초"라고 봤지만 bare Node 앱은 107ms다.
+node 런타임이 올라오는 비용은 fixture 대비 약 54ms뿐이다.
+
+PRD §45의 "경량 API 2초 / Next.js 5초"는 **런타임이 아니라 프레임워크**의 비용이다.
+`hello-node`는 `http.createServer` 하나여서 fixture와 같은 급이다.
+프레임워크 앱은 여전히 측정되지 않았다.
+
+### 메모리 — Nimwake는 작고, 앱이 크다
+
+```text
+daemon (앱 없음)        4.8 MB
+daemon (5개 깨어 있음)   5.2 MB
+hello-node 1개          48 MB
+hello-node 5개         236 MB
+```
+
+PRD §45의 "idle daemon 100MB 이하" 목표에 20배 여유가 있다.
+그리고 **자원의 거의 전부가 앱 쪽이다.** scale-to-zero가 답하려는 문제가 숫자로 확인된다.
+
+동시에 공백도 드러난다. 앱 5개가 동시에 깨면 236MB다. 사소한 앱 5개가 그렇다.
+2GB 기기에서 프레임워크 앱이라면 훨씬 적은 수에서 OOM이다.
+**동시 기동을 제한하는 장치가 없다** (자원 관리는 Post-MVP).
+
+### graceful shutdown
+
+`hello-node`는 `SIGTERM` handler를 두고 스스로 나간다.
+daemon 종료가 shutdown timeout(5초)을 쓰지 않고 **8ms**에 끝났고 잔존 프로세스는 0이었다.
+fixture는 기본 signal 동작에 맡기므로 이 경로는 실제 앱으로만 확인된다.
+
+### 남긴 것
+
+E2E에 두 테스트를 넣었다. `node`가 없으면 건너뛰고, CI에는 `setup-node`를 넣어
+반드시 돌게 했다. 예제가 다시 방치되지 않게 하려는 것이다.
+
+---
+
 ## 구현 중 확정 (`v0.0.5`)
 
 | #   | 결정                                             | 이유                                                                                                     | 반영 위치                                                |

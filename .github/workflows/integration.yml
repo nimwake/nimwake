@@ -35,6 +35,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 예제(`examples/hello-node`)를 실제로 띄우는 E2E가 있다.
+      # node가 없으면 그 테스트는 조용히 건너뛰므로, 여기서 반드시 깔아 둔다.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Show toolchain
         run: |
           rustup show active-toolchain

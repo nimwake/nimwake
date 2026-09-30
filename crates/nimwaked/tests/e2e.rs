@@ -584,3 +584,143 @@ fn health_probes_do_not_wake_a_sleeping_app() {
 
     assert!(!is_listening(port), "a health probe woke an application");
 }
+
+// 아래는 fixture가 아니라 **실제 애플리케이션**으로 도는 경로다.
+//
+// 지금까지의 모든 검증은 133줄짜리 Rust fixture 위에서 돌았다. 그것으로는
+// "node 같은 런타임이 올라오는 시간", "앱이 SIGTERM에 스스로 나가는가",
+// "앱 하나가 차지하는 메모리"를 알 수 없다.
+//
+// node가 없는 환경에서는 건너뛴다. 예제를 CI에서만 강제하면 로컬 실행이 막힌다.
+
+/// `node` 실행 파일. `NIMWAKE_NODE`로 지정할 수 있다.
+fn node() -> Option<std::path::PathBuf> {
+    if let Ok(explicit) = std::env::var("NIMWAKE_NODE") {
+        let path = std::path::PathBuf::from(explicit);
+        return path.is_file().then_some(path);
+    }
+
+    let output = std::process::Command::new("sh")
+        .args(["-c", "command -v node"])
+        .output()
+        .ok()?;
+
+    let path = std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    path.is_file().then_some(path)
+}
+
+/// 저장소의 `examples/hello-node`.
+fn hello_node_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/hello-node")
+        .canonicalize()
+        .expect("the example directory exists")
+}
+
+fn hello_node_app(apps: &Apps, port: u16, node: &std::path::Path) {
+    apps.manifest(
+        "hello",
+        &format!(
+            "name = \"hello\"\n\
+             \n\
+             [server]\n\
+             host = \"hello.localhost\"\n\
+             port = {port}\n\
+             \n\
+             [runtime]\n\
+             command = [{:?}, \"server.js\"]\n\
+             working_dir = {:?}\n\
+             \n\
+             [runtime.env]\n\
+             PORT = \"{port}\"\n\
+             \n\
+             [lifecycle]\n\
+             idle_timeout_seconds = 1\n\
+             startup_timeout_seconds = 30\n\
+             shutdown_timeout_seconds = 5\n",
+            node.display().to_string(),
+            hello_node_dir().display().to_string(),
+        ),
+    );
+}
+
+/// `examples/hello-node`가 실제로 Nimwake를 통해 서빙되는지 본다.
+///
+/// 이 테스트가 없으면 예제는 저장소에 있지만 아무도 실행하지 않는 코드가 된다.
+/// 실제로 `v0.0.5`까지 그랬다.
+#[test]
+fn the_node_example_serves_through_nimwake() {
+    let Some(node) = node() else {
+        eprintln!("skipped: `node` not found (set NIMWAKE_NODE to point at it)");
+        return;
+    };
+
+    let apps = Apps::new();
+    let port = free_port();
+    hello_node_app(&apps, port, &node);
+    let daemon = Daemon::start_with(&apps, &["--trace-json"]);
+
+    assert!(!is_listening(port), "the example starts asleep");
+
+    let first = daemon.get("hello.localhost");
+    assert_eq!(first.status, 200, "body: {}", first.body);
+    assert!(
+        first.body.contains("hello from nimwake"),
+        "unexpected body: {}",
+        first.body,
+    );
+
+    // 같은 process를 재사용한다.
+    let second = daemon.get("hello.localhost");
+    assert_eq!(
+        second.body, first.body,
+        "a warm request must reuse the process"
+    );
+
+    // idle timeout으로 잠들고, 다시 깨우면 새 process다.
+    wait_for("the example to sleep", Duration::from_secs(10), || {
+        !is_listening(port)
+    });
+    let third = daemon.get("hello.localhost");
+    assert_eq!(third.status, 200);
+    assert_ne!(
+        third.body, first.body,
+        "waking up again must start a new process"
+    );
+
+    // 실제 런타임의 기동 구간이 기록되어야 한다. (PRD §42)
+    wait_for("the startup trace", Duration::from_secs(5), || {
+        daemon
+            .output()
+            .iter()
+            .any(|line| line.contains("nimwake::startup"))
+    });
+}
+
+/// 실제 앱이 `SIGTERM`에 스스로 나가는지 본다.
+///
+/// fixture는 기본 signal 동작에 맡기지만, 실제 앱은 handler를 둔다.
+/// daemon 종료가 shutdown timeout을 다 쓰지 않아야 정상이다.
+#[test]
+fn the_node_example_shuts_down_gracefully() {
+    let Some(node) = node() else {
+        eprintln!("skipped: `node` not found (set NIMWAKE_NODE to point at it)");
+        return;
+    };
+
+    let apps = Apps::new();
+    let port = free_port();
+    hello_node_app(&apps, port, &node);
+    let mut daemon = Daemon::start(&apps);
+
+    assert_eq!(daemon.get("hello.localhost").status, 200);
+    assert!(is_listening(port));
+
+    let elapsed = daemon.stop();
+
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the app should exit on SIGTERM without waiting for the shutdown timeout, took {elapsed:?}",
+    );
+    assert!(!is_listening(port), "the app outlived the daemon");
+}
