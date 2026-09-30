@@ -60,6 +60,7 @@ pub fn spawn_with_capacity(
         runtime,
         self_tx: tx.clone(),
         machine: Machine::new(Arc::clone(&spec)),
+        idle_timer: None,
     };
 
     tokio::spawn(actor.run(rx));
@@ -73,6 +74,15 @@ struct Actor {
     /// 자기 자신에게 event를 보내기 위한 sender. lease 발급에도 사용한다.
     self_tx: mpsc::Sender<AppCommand>,
     machine: Machine,
+    /// 지금 대기 중인 idle timer. **app 하나에 하나만 둔다.**
+    ///
+    /// 새로 걸 때 이전 것을 반드시 중단시킨다. 그러지 않으면 요청마다 timer가 쌓인다.
+    /// 세대 검사(PRD §29) 덕분에 늦게 도착한 timer는 무시되지만, 무시되기 전까지
+    /// `idle_timeout`만큼 살아 있다. idle timeout이 길수록 더 오래 쌓인다.
+    ///
+    /// 지속 부하 60초(약 113만 요청, idle 1시간)에서 RSS가 30MB 늘던 원인이었다.
+    /// 모든 대기열은 bounded여야 한다. (Invariant 9)
+    idle_timer: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Actor {
@@ -88,19 +98,20 @@ impl Actor {
             }
         }
 
+        self.cancel_idle_timer();
         let effects = self.machine.teardown();
         self.apply(effects);
 
         debug!(app = %self.spec.name, "app manager stopped");
     }
 
-    fn apply(&self, effects: Vec<Effect>) {
+    fn apply(&mut self, effects: Vec<Effect>) {
         for effect in effects {
             self.run_effect(effect);
         }
     }
 
-    fn run_effect(&self, effect: Effect) {
+    fn run_effect(&mut self, effect: Effect) {
         match effect {
             Effect::Start {
                 operation_id,
@@ -206,13 +217,23 @@ impl Actor {
         });
     }
 
-    fn spawn_idle_timer(&self, generation: IdleGeneration) {
+    /// idle timer는 app 하나에 하나만 둔다. 새로 걸기 전에 이전 것을 중단시킨다.
+    fn spawn_idle_timer(&mut self, generation: IdleGeneration) {
         let tx = self.self_tx.clone();
         let delay = self.spec.lifecycle.idle_timeout();
 
-        tokio::spawn(async move {
+        // 이전 timer는 어차피 세대가 달라 무시될 것이다. 살려 둘 이유가 없다.
+        self.cancel_idle_timer();
+
+        self.idle_timer = Some(tokio::spawn(async move {
             tokio::time::sleep(delay).await;
             let _ = tx.send(AppCommand::IdleTimeout { generation }).await;
-        });
+        }));
+    }
+
+    fn cancel_idle_timer(&mut self) {
+        if let Some(timer) = self.idle_timer.take() {
+            timer.abort();
+        }
     }
 }

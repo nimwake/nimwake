@@ -17,10 +17,19 @@ const PORT_SPAN: u16 = 10_000;
 
 static NEXT_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
 
+/// 이미 내준 port. 같은 process 안에서 두 번 내주지 않기 위한 것이다.
+static HANDED_OUT: std::sync::Mutex<std::collections::BTreeSet<u16>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
 /// 비어 있는 loopback port를 고른다.
 ///
 /// 같은 binary 안의 테스트끼리는 원자 counter로, 다른 binary와는 pid로 갈린다.
 /// 실제로 bind되는지까지 확인하고 돌려준다.
+///
+/// 내준 port를 기록해 두는 이유가 있다. counter만으로는 충분하지 않다.
+/// 첫 후보가 막혀 다음 후보로 넘어가면 **옆 호출자의 첫 후보와 같은 번호에 닿는다.**
+/// 실제로 그래서 `crash-server`의 readiness probe가 다른 테스트의 fixture에 붙어,
+/// "기동에 실패해야 한다"는 단언이 간헐적으로 깨졌다.
 ///
 /// # Panics
 ///
@@ -30,9 +39,18 @@ pub fn free_port() -> u16 {
     let seed = u16::try_from(std::process::id() % u32::from(PORT_SPAN)).unwrap_or(0);
     let offset = NEXT_PORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+    let mut handed_out = HANDED_OUT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     for attempt in 0..PORT_SPAN {
         let port = PORT_BASE + seed.wrapping_add(offset).wrapping_add(attempt) % PORT_SPAN;
+
+        if handed_out.contains(&port) {
+            continue;
+        }
         if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            handed_out.insert(port);
             return port;
         }
     }
