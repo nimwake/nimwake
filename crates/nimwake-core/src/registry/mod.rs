@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::app::{self, AppHandle, AppSpec, StopReason};
+use crate::app::{self, AppHandle, AppSpec};
 use crate::error::{ManifestError, ValidationError};
 use crate::runtime::Runtime;
 
@@ -77,12 +77,20 @@ impl AppRegistry {
     /// 모든 application을 정지시키고 actor를 종료한다.
     ///
     /// child process의 수명은 daemon의 수명을 넘지 않는다. (Invariant 10 / PRD §71)
+    ///
+    /// **process가 실제로 사라질 때까지 기다린다.** 정지 요청만 보내고 반환하면
+    /// daemon이 먼저 종료해 stop task가 끝나지 못하고 child가 남는다.
+    /// app 수만큼 순차로 기다리면 종료가 그만큼 느려지므로 동시에 진행한다.
     pub async fn shutdown(&self) {
+        let mut pending = Vec::with_capacity(self.len());
+
         for handle in self.apps() {
-            let _ = handle.stop(StopReason::DaemonShutdown).await;
+            let handle = handle.clone();
+            pending.push(tokio::spawn(async move { handle.shutdown().await }));
         }
-        for handle in self.apps() {
-            handle.shutdown().await;
+
+        for task in pending {
+            let _ = task.await;
         }
     }
 }

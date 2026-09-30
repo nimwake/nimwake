@@ -186,13 +186,16 @@ async fn registry_shutdown_leaves_no_managed_child() {
 
     registry.shutdown().await;
 
+    // 기다리지 않고 곧바로 확인한다.
+    //
+    // `shutdown()`이 정지 요청만 보내고 반환하면 여기서 통과해 버리는 테스트가 되는데,
+    // 실제 daemon은 반환 직후 종료하므로 stop task가 끝나지 못하고 child가 남는다.
+    // 즉 "완료를 기다렸는가"까지 검증하려면 유예를 주면 안 된다.
     for port in ports {
-        wait_for(
-            &format!("port {port} to be released"),
-            Duration::from_secs(5),
-            || !is_listening(port),
-        )
-        .await;
+        assert!(
+            !is_listening(port),
+            "shutdown() returned before port {port} was released",
+        );
     }
 }
 

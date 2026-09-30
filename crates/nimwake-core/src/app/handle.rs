@@ -17,6 +17,9 @@ use super::manager::ACQUIRE_ENQUEUE_TIMEOUT;
 use super::spec::AppSpec;
 use super::state::AppStatus;
 
+/// shutdown ack를 기다리는 여유분. runtime의 SIGTERM→SIGKILL 경로보다 넉넉해야 한다.
+const SHUTDOWN_ACK_MARGIN: std::time::Duration = std::time::Duration::from_secs(2);
+
 #[derive(Debug, Clone)]
 pub struct AppHandle {
     spec: Arc<AppSpec>,
@@ -83,8 +86,28 @@ impl AppHandle {
             .map_err(|_| AcquireError::Unavailable)
     }
 
-    /// actor loop를 종료한다. 실행 중인 process가 있으면 정리한다.
+    /// application을 정지시키고 actor loop를 종료한다.
+    ///
+    /// **process가 실제로 사라질 때까지 기다린다.** daemon 종료 경로에서 이것을 기다리지 않으면
+    /// stop task가 끝나기 전에 daemon이 죽어 child가 남는다. (Invariant 10 / PRD §71)
+    ///
+    /// runtime이 shutdown timeout 뒤 SIGKILL까지 책임지므로 ack는 반드시 온다.
+    /// 그럼에도 상한을 두는 것은 actor가 고장났을 때 daemon이 영원히 멈추지 않게 하기 위해서다.
     pub async fn shutdown(&self) {
-        let _ = self.tx.send(AppCommand::Shutdown).await;
+        let (ack, acked) = oneshot::channel();
+
+        if self.tx.send(AppCommand::Shutdown { ack }).await.is_err() {
+            // actor가 이미 끝났다.
+            return;
+        }
+
+        let deadline = self.spec.lifecycle.shutdown_timeout() * 2 + SHUTDOWN_ACK_MARGIN;
+        if tokio::time::timeout(deadline, acked).await.is_err() {
+            tracing::warn!(
+                app = %self.spec.name,
+                ?deadline,
+                "application did not confirm shutdown in time",
+            );
+        }
     }
 }
