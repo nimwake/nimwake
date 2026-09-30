@@ -29,6 +29,7 @@ use tokio::net::TcpListener;
 use tracing::{debug, info, warn};
 
 use crate::registry::AppRegistry;
+use crate::trace::RequestTrace;
 
 pub use proxy::GatewayBody;
 
@@ -123,33 +124,60 @@ async fn handle(
     registry: Arc<AppRegistry>,
     request: Request<Incoming>,
 ) -> Result<Response<GatewayBody>, Infallible> {
+    let mut trace = RequestTrace::received();
+
     let Some(host) = router::host_of(&request).map(ToOwned::to_owned) else {
-        return Ok(router::text(StatusCode::BAD_REQUEST, "missing Host header"));
+        return Ok(finish(
+            &mut trace,
+            "-",
+            router::text(StatusCode::BAD_REQUEST, "missing Host header"),
+        ));
     };
 
     let Some(app) = registry.resolve(&host) else {
         debug!(%host, "no application is registered for this host");
-        return Ok(router::text(
-            StatusCode::NOT_FOUND,
-            "no application is registered for this host",
+        return Ok(finish(
+            &mut trace,
+            "-",
+            router::text(
+                StatusCode::NOT_FOUND,
+                "no application is registered for this host",
+            ),
         ));
     };
 
     // 상태를 보지 않고 acquire만 한다. SLEEPING이면 여기서 깨어난다. (Invariant 3)
+    trace.acquire_started();
     let lease = match app.acquire().await {
         Ok(lease) => lease,
         Err(error) => {
             let status = router::status_for(&error);
             warn!(app = app.name(), %status, %error, "acquire failed");
-            return Ok(router::text(status, &error.to_string()));
+            let response = router::text(status, &error.to_string());
+            return Ok(finish(&mut trace, app.name(), response));
+        }
+    };
+    trace.acquire_completed();
+
+    trace.proxy_started();
+    let response = match proxy::forward(lease, request).await {
+        Ok(response) => response,
+        Err(error) => {
+            warn!(app = app.name(), %error, "proxy failed");
+            router::text(StatusCode::BAD_GATEWAY, &error.to_string())
         }
     };
 
-    match proxy::forward(lease, request).await {
-        Ok(response) => Ok(response),
-        Err(error) => {
-            warn!(app = app.name(), %error, "proxy failed");
-            Ok(router::text(StatusCode::BAD_GATEWAY, &error.to_string()))
-        }
-    }
+    Ok(finish(&mut trace, app.name(), response))
+}
+
+/// 응답 header가 나가는 시점을 찍고 구간을 흘린다. (PRD §72)
+fn finish(
+    trace: &mut RequestTrace,
+    app: &str,
+    response: Response<GatewayBody>,
+) -> Response<GatewayBody> {
+    trace.response_started();
+    trace.emit(app, response.status().as_u16());
+    response
 }

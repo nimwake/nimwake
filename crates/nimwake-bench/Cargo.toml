@@ -1,0 +1,24 @@
+[package]
+name = "nimwake-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Nimwake performance baseline: warm proxy overhead, cold-start breakdown, concurrency sweep"
+publish = false
+
+# 부하 생성과 리포트 생성만 한다. 판정은 하지 않는다. (PRD §73)
+[dependencies]
+nimwake-fixtures = { path = "../nimwake-fixtures" }
+
+# daemon을 SIGTERM으로 정리한다. (PRD §71)
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "nimwake-bench"
+path = "src/main.rs"

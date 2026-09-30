@@ -45,6 +45,7 @@ fn started(process_id: u64) -> StartedProcess {
     StartedProcess {
         handle: detached_handle(ProcessId::from_raw(process_id)),
         backend: Backend::new(SocketAddr::from(([127, 0, 0, 1], BACKEND_PORT))),
+        timings: crate::trace::StartTimings::instant(),
     }
 }
 
@@ -138,7 +139,7 @@ fn only_start(effects: &[Effect]) -> OperationId {
     let ids: Vec<_> = effects
         .iter()
         .filter_map(|effect| match effect {
-            Effect::Start { operation_id } => Some(*operation_id),
+            Effect::Start { operation_id, .. } => Some(*operation_id),
             _ => None,
         })
         .collect();

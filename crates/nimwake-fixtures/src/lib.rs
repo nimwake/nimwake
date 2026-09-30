@@ -5,6 +5,8 @@
 //!
 //! 의존성을 최소로 유지한다. fixture가 복잡해지면 테스트가 무엇을 증명하는지 흐려진다.
 
+pub mod testing;
+
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 

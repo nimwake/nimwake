@@ -230,6 +230,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nimwake-bench"
+version = "0.0.1"
+dependencies = [
+ "nimwake-fixtures",
+ "nix",
+]
+
+[[package]]
 name = "nimwake-core"
 version = "0.0.1"
 dependencies = [
@@ -253,6 +261,7 @@ name = "nimwake-fixtures"
 version = "0.0.1"
 dependencies = [
  "nimwake-core",
+ "nimwake-fixtures",
  "nix",
  "tokio",
 ]
@@ -262,6 +271,8 @@ name = "nimwaked"
 version = "0.0.1"
 dependencies = [
  "nimwake-core",
+ "nimwake-fixtures",
+ "nix",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -363,6 +374,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "serde_json"
+version = "1.0.151"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
 ]
 
 [[package]]
@@ -572,6 +596,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-serde"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
+dependencies = [
+ "serde",
+ "tracing-core",
+]
+
+[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -581,12 +615,15 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
+ "serde",
+ "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
  "tracing",
  "tracing-core",
  "tracing-log",
+ "tracing-serde",
 ]
 
 [[package]]
@@ -645,3 +682,9 @@ checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "zmij"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"

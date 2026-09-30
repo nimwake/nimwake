@@ -14,11 +14,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::net::TcpStream;
+use tokio::time::Instant;
 use tracing::debug;
 
 use crate::app::AppSpec;
 use crate::error::RuntimeError;
 use crate::id::ProcessIdSeq;
+use crate::trace::StartTimings;
 
 use super::handle::{Backend, ExitStatus, ProcessHandle, StartedProcess};
 use super::Runtime;
@@ -49,7 +51,12 @@ impl Runtime for ProcessRuntime {
     /// 취소되면 여기서 만든 `ProcessHandle`이 drop되고 controller가 child를 정리한다.
     async fn start(&self, spec: &AppSpec) -> Result<StartedProcess, RuntimeError> {
         let process_id = self.process_ids.next_id();
+
+        // 구간 계측. spawn과 readiness는 보통 자릿수가 다르므로 반드시 나눠 재야 한다. (PRD §42)
+        let spawn_started_at = Instant::now();
         let control = controller::spawn(spec, process_id)?;
+        let spawned_at = Instant::now();
+
         let handle = ProcessHandle::new(process_id, control.clone());
 
         let addr = SocketAddr::from(([127, 0, 0, 1], spec.server.port));
@@ -68,6 +75,11 @@ impl Runtime for ProcessRuntime {
             () = probe_until_ready(addr) => Ok(StartedProcess {
                 handle,
                 backend: Backend::new(addr),
+                timings: StartTimings {
+                    spawn_started_at,
+                    spawned_at,
+                    ready_at: Instant::now(),
+                },
             }),
         }
     }

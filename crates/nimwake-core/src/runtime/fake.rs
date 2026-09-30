@@ -15,6 +15,7 @@ use tokio::sync::watch;
 use crate::app::AppSpec;
 use crate::error::RuntimeError;
 use crate::id::{ProcessId, ProcessIdSeq};
+use crate::trace::StartTimings;
 
 use super::handle::{Backend, ExitStatus, ProcessControl, ProcessHandle, StartedProcess};
 use super::Runtime;
@@ -218,6 +219,7 @@ impl Runtime for FakeRuntime {
         Ok(StartedProcess {
             handle: ProcessHandle::new(process_id, process),
             backend: Backend::new(addr),
+            timings: StartTimings::instant(),
         })
     }
 
