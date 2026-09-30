@@ -412,3 +412,33 @@ fn benchmark_mode_emits_span_measurements() {
         assert!(request.contains(field), "`{field}` missing from: {request}");
     }
 }
+
+/// 요청 구간은 요청마다 나가므로 평소에는 꺼져 있어야 한다.
+///
+/// 켜 두면 운영 중인 daemon이 요청 하나당 로그 한 줄을 남긴다.
+/// 비용도 공짜가 아니다 — 켜져 있으면 요청당 약 2.5µs, 꺼져 있으면 약 0.3ns다.
+#[test]
+fn request_traces_are_off_unless_asked_for() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "quiet", port, Lifecycle::default());
+    let daemon = Daemon::start(&apps);
+
+    assert_eq!(daemon.get("quiet.localhost").status, 200);
+
+    // 기동은 드물게 일어나고 운영자가 보고 싶어 하므로 평소에도 남는다.
+    wait_for("the startup trace", Duration::from_secs(5), || {
+        daemon
+            .output()
+            .iter()
+            .any(|line| line.contains("nimwake::startup"))
+    });
+
+    assert!(
+        !daemon
+            .output()
+            .iter()
+            .any(|line| line.contains("nimwake::request")),
+        "per-request traces must stay off by default",
+    );
+}

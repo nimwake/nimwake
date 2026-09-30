@@ -47,9 +47,17 @@ fn main() -> ExitCode {
 ///
 /// 상시 metrics framework를 붙이지 않는다는 결정에 따른 것이다. 수집과 집계는
 /// 이 출력을 읽는 쪽이 한다. (PRD §72)
+///
+/// 요청 구간(`nimwake::request`)은 요청마다 나가므로 평소에는 꺼 둔다.
+/// benchmark mode일 때만 기본 필터를 넓힌다. `RUST_LOG`를 준 쪽이 언제나 우선이다.
 fn init_tracing(json: bool) {
+    let fallback = if json {
+        "info,nimwake::request=debug"
+    } else {
+        "info"
+    };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(fallback));
 
     if json {
         tracing_subscriber::fmt()

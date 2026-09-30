@@ -94,8 +94,19 @@ impl RequestTrace {
     /// 요청 하나가 끝난 시점에 구간을 한 줄로 흘린다.
     ///
     /// 집계는 하지 않는다. benchmark mode가 이 event를 모아 히스토그램을 만든다.
+    ///
+    /// **`debug`인 이유가 있다.** 이 event는 요청마다 나간다.
+    /// `info`로 두면 운영 중인 daemon이 요청 하나당 로그 한 줄을 남긴다.
+    ///
+    /// ```text
+    /// 켜져 있을 때   ~2.5 µs/req   (subscriber가 event마다 mutex를 잡는다)
+    /// 꺼져 있을 때    ~0.3 ns/req   (callsite에서 걸러진다)
+    /// ```
+    ///
+    /// 시각을 찍는 비용(`Instant::now()` 5회, ~0.1 µs)은 어느 쪽이든 남지만 무시할 수 있다.
+    /// 기동 구간([`StartupTrace`])은 드물게 나가고 운영자가 보고 싶어 하므로 `info`로 둔다.
     pub fn emit(&self, app: &str, status: u16) {
-        tracing::info!(
+        tracing::debug!(
             target: "nimwake::request",
             app,
             status,

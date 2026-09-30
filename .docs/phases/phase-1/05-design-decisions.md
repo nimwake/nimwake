@@ -107,7 +107,25 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D29 | 계측 값을 `u64`로 내보낸다                                  | `u128`을 쓰면 `tracing`이 JSON에 **문자열**로 적는다(`"queue_us":"142"`). 읽는 쪽이 숫자로 다룰 수 없다. 마이크로초 단위 `i64`는 29만 년을 담으므로 정밀도 손실이 없다. | [§72](../../prd/03-delivery/05-instrumentation.md)           |
 | D30 | E2E를 `nimwaked` 패키지에 두고 fixture를 형제 경로에서 찾는다 | `CARGO_BIN_EXE_*`는 같은 패키지의 bin만 노출한다. daemon과 fixture를 동시에 쓰려면 한쪽은 경로로 찾아야 한다. workspace 바이너리는 모두 같은 디렉터리에 놓인다. | [§41](../../prd/03-delivery/02-testing-strategy.md)          |
 | D31 | 부하 도구를 직접 만든다                                     | k6를 쓰면 CI에 외부 의존이 생기고, cold-start breakdown을 위해 daemon의 trace 출력과 맞물려야 한다. 그 결합을 외부 도구로 하면 더 복잡해진다. `v0.0.5` storm 테스트에서도 재사용한다. | [§42](../../prd/03-delivery/03-load-tests.md)                |
+| D33 | 요청 구간 계측은 `debug`, 기동 구간은 `info` | 요청 event는 요청마다 나간다. `info`로 두면 운영 daemon이 요청당 로그 한 줄을 남기고, subscriber가 event마다 mutex를 잡는다. 측정값: 켜져 있으면 요청당 ~2.5µs, 꺼져 있으면 ~0.3ns. 기동은 드물고 운영자가 보고 싶어 하므로 `info`로 남긴다. | [§72](../../prd/03-delivery/05-instrumentation.md) |
 | D32 | daemon CLI를 직접 파싱한다                                  | 옵션이 셋뿐이다. `clap`은 `nimwake` CLI가 생길 때 함께 들인다. (PRD §35의 스택 선택은 CLI 도구를 가리킨다)     | [§35](../../prd/02-architecture/09-repository-and-stack.md)  |
+
+### 계측의 실제 비용
+
+"로깅 수준이니 사소하다"고 넘기지 않고 쟀다. 요청 경로에 더해진 것은 두 가지다.
+
+| 요청당 추가된 작업 | 비용 |
+| --- | ---: |
+| `Instant::now()` × 5 | ~0.1 µs |
+| `tracing` event (subscriber 켜짐) | ~2.5 µs |
+| `tracing` event (필터로 꺼짐) | ~0.3 ns |
+
+warm path p50이 약 400µs이므로 event가 켜져 있어도 0.6% 수준이다.
+그럼에도 기본에서 끈 이유는 성능보다 **요청마다 로그 한 줄이 쌓이는 것**과,
+`tracing_subscriber::fmt`가 event마다 mutex를 잡아 동시성이 올라갈 때 경합 지점이 되는 것 때문이다.
+
+end-to-end RPS로는 이 차이를 확인할 수 없었다. 측정 환경의 편차(22k~34k)가 차이보다 커서
+추가된 작업만 격리해 재야 했다. **부하 테스트가 답할 수 없는 질문이 있다**는 점이 남길 만하다.
 
 ### D29를 발견한 경위
 

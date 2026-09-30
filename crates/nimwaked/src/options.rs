@@ -22,6 +22,7 @@ OPTIONS:
     --port <PORT>       gateway listen port (기본: 8080)
                         0을 주면 비어 있는 port를 골라 실제 값을 출력한다
     --trace-json        구간 계측을 JSON 한 줄씩 출력한다 (benchmark mode, PRD §72)
+                        요청 구간은 평소 꺼져 있고 이때만 켜진다
     -h, --help          이 도움말
 ";
 
