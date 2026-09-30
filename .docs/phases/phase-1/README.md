@@ -68,7 +68,8 @@ Phase 1 제외 항목은 PRD가 소유한다.
 명시적으로 미룬 항목: crash-loop backoff, dynamic port allocation, process adoption,
 request body 크기 상한, 상시 metrics exporter → [05. 설계 결정 기록 P2](05-design-decisions.md)
 
-Android 검증은 `v0.1.0` **이후**에 수행한다. → [PRD §49–§51](../../prd/04-platform/02-android.md)
+Android 검증은 `v0.1.0` 이후가 아니라 `v0.0.3` 이후 [`nimwake-android` Phase 1](https://github.com/nimwake/nimwake-android/tree/main/.docs/phases/phase-1)에서 **병렬로** 수행한다.
+결과는 [완료 체크리스트 — Android Device](04-acceptance.md#android-device)로 들어온다. → [PRD §50](../../prd/04-platform/02-android.md), [D42](05-design-decisions.md)
 
 ---
 

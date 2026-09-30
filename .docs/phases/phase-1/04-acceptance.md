@@ -70,6 +70,24 @@
 - [ ] concurrency sweep 결과가 기록됨
 - [ ] performance report artifact가 release마다 생성됨
 
+## Android Device
+
+[`nimwake-android` Phase 1](https://github.com/nimwake/nimwake-android/tree/main/.docs/phases/phase-1)의 검증 리포트로 판정한다.
+
+```text
+Install ✓   Boot recovery ✓   Cold start ✓   Scale-to-zero ✓
+Daemon recovery ✓   Network recovery ✓   24h soak ✓   72h soak ✓
+```
+
+- [ ] Install
+- [ ] Boot recovery
+- [ ] Cold start
+- [ ] Scale-to-zero
+- [ ] Daemon recovery
+- [ ] Network recovery
+- [ ] 24h soak
+- [ ] 72h soak
+
 ---
 
 전 항목이 충족되면 다음으로 태깅한다.
