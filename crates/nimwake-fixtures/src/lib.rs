@@ -1,13 +1,14 @@
-//! `ProcessRuntime` 통합 테스트용 fixture 서버들의 공통 코드.
+//! `ProcessRuntime` / Gateway 통합 테스트용 fixture 서버들의 공통 코드.
 //!
-//! 요구사항: `.docs/phases/phase-1/03-milestones/02-v0.0.2-process-runtime.md`
+//! 요구사항: `.docs/phases/phase-1/03-milestones/02-v0.0.2-process-runtime.md`,
+//! `.docs/phases/phase-1/03-milestones/03-v0.0.3-http-scale-to-zero.md`
 //!
 //! 의존성을 최소로 유지한다. fixture가 복잡해지면 테스트가 무엇을 증명하는지 흐려진다.
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 
-/// argv에서 위치 인자를 읽는다. 없거나 파싱할 수 없으면 사용법을 출력하고 종료한다.
+/// argv에서 위치 인자를 읽는다.
 ///
 /// # Panics
 ///
@@ -32,21 +33,69 @@ pub fn listen(port: u16) -> TcpListener {
         .unwrap_or_else(|error| panic!("failed to bind 127.0.0.1:{port}: {error}"))
 }
 
-/// 최소 HTTP 응답만 돌려주는 accept loop. 정상 종료 경로는 없다.
+/// 최소 HTTP/1.1 서버. 정상 종료 경로는 없다.
+///
+/// 응답 규칙:
+///
+/// ```text
+/// POST /echo   요청 body를 그대로 돌려준다   (cold start를 거친 body 전달 검증)
+/// 그 외        자기 pid를 돌려준다            (same PID / new PID 관측)
+/// ```
 pub fn serve_forever(listener: &TcpListener) -> ! {
     loop {
         if let Ok((stream, _)) = listener.accept() {
-            respond(stream);
+            // 한 연결의 실패가 서버를 멈추게 하지 않는다.
+            let _ = respond(stream);
         }
     }
 }
 
-fn respond(mut stream: TcpStream) {
-    let body = "ok";
-    let response = format!(
-        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let _ = stream.write_all(response.as_bytes());
-    let _ = stream.flush();
+fn respond(stream: TcpStream) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stream);
+
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line)? == 0 {
+        return Ok(());
+    }
+
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        let line = line.trim_end();
+        if line.is_empty() {
+            break;
+        }
+        if let Some(value) = header_value(line, "content-length") {
+            content_length = value.trim().parse().unwrap_or(0);
+        }
+    }
+
+    let mut body = vec![0u8; content_length];
+    if content_length > 0 {
+        reader.read_exact(&mut body)?;
+    }
+
+    let is_echo = request_line.starts_with("POST /echo");
+    let payload = if is_echo {
+        body
+    } else {
+        std::process::id().to_string().into_bytes()
+    };
+
+    let mut stream = reader.into_inner();
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\ncontent-type: text/plain\r\nconnection: close\r\n\r\n",
+        payload.len()
+    )?;
+    stream.write_all(&payload)?;
+    stream.flush()
+}
+
+fn header_value<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    let (key, value) = line.split_once(':')?;
+    key.trim().eq_ignore_ascii_case(name).then_some(value)
 }

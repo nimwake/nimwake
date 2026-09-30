@@ -55,3 +55,11 @@ path = "src/bin/exit_after_server.rs"
 [[bin]]
 name = "group-server"
 path = "src/bin/group_server.rs"
+
+[[bin]]
+name = "deaf-server"
+path = "src/bin/deaf_server.rs"
+
+[[bin]]
+name = "slow-body-server"
+path = "src/bin/slow_body_server.rs"

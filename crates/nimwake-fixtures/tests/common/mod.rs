@@ -54,6 +54,12 @@ pub fn spec(name: &str, port: u16, command: Vec<String>) -> AppSpec {
     }
 }
 
+/// pending waiter 상한을 바꾼다. (PRD §69)
+pub fn with_pending_limit(mut spec: AppSpec, limit: usize) -> AppSpec {
+    spec.lifecycle.max_pending_requests = limit;
+    spec
+}
+
 /// `spec`의 lifecycle 타이밍을 테스트 길이에 맞게 줄인다.
 pub fn with_timeouts(mut spec: AppSpec, startup: u64, shutdown: u64, idle: u64) -> AppSpec {
     spec.lifecycle.startup_timeout_seconds = startup;
@@ -119,6 +125,8 @@ pub mod bin {
     pub const STUBBORN: &str = env!("CARGO_BIN_EXE_stubborn-server");
     pub const EXIT_AFTER: &str = env!("CARGO_BIN_EXE_exit-after-server");
     pub const GROUP: &str = env!("CARGO_BIN_EXE_group-server");
+    pub const DEAF: &str = env!("CARGO_BIN_EXE_deaf-server");
+    pub const SLOW_BODY: &str = env!("CARGO_BIN_EXE_slow-body-server");
 }
 
 /// `command` 벡터를 만든다.
@@ -126,4 +134,72 @@ pub fn cmd(program: &str, args: &[String]) -> Vec<String> {
     let mut command = vec![program.to_owned()];
     command.extend(args.iter().cloned());
     command
+}
+
+/// gateway로 보낸 요청의 응답.
+#[derive(Debug, Clone)]
+pub struct HttpResponse {
+    pub status: u16,
+    pub body: String,
+}
+
+impl HttpResponse {
+    /// fixture는 pid를 body로 돌려준다. (`serve_forever`)
+    pub fn pid(&self) -> u32 {
+        self.body
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("expected a pid body, got {:?}", self.body))
+    }
+}
+
+/// gateway에 요청 하나를 보낸다.
+///
+/// `connection: close`로 보내므로 응답은 EOF까지 읽으면 된다.
+/// 테스트 전용이라 chunked encoding은 다루지 않는다. fixture는 항상 content-length를 준다.
+pub fn request(
+    gateway_port: u16,
+    method: &str,
+    path: &str,
+    host: &str,
+    body: Option<&str>,
+) -> std::io::Result<HttpResponse> {
+    use std::io::{Read, Write};
+
+    let mut stream = TcpStream::connect_timeout(&addr(gateway_port), Duration::from_secs(2))?;
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+
+    let body = body.unwrap_or_default();
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nhost: {host}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(body.as_bytes())?;
+    stream.flush()?;
+
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw)?;
+    let raw = String::from_utf8_lossy(&raw).into_owned();
+
+    let (head, body) = raw
+        .split_once("\r\n\r\n")
+        .unwrap_or_else(|| panic!("malformed response: {raw:?}"));
+
+    let status = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("no status code in: {head:?}"));
+
+    Ok(HttpResponse {
+        status,
+        body: body.to_owned(),
+    })
+}
+
+/// `GET /` 요청 하나. 가장 흔한 형태라 따로 둔다.
+pub fn get(gateway_port: u16, host: &str) -> std::io::Result<HttpResponse> {
+    request(gateway_port, "GET", "/", host, None)
 }

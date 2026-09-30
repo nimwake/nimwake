@@ -91,6 +91,30 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D22 | `ProcessRuntime`은 Unix 전용 (`#[cfg(unix)]`)                      | SIGTERM / SIGKILL / process group은 Windows에 대응물이 없다. Tier 1/2가 모두 Linux 계열이므로 이식 비용을 지불할 이유가 없다. | [§19](../../prd/02-architecture/04-runtime.md), [§48](../../prd/04-platform/01-environments.md) |
 | D23 | stdout/stderr는 inherit이 아니라 **drain**                          | daemon의 stdout이 어디로 가는지는 운영자가 정한다. daemon이 직접 읽어 app 이름과 함께 `tracing`으로 흘리면 그 선택과 무관하게 child가 막히지 않는다. | [§19](../../prd/02-architecture/04-runtime.md)               |
 
+## 구현 중 확정 (`v0.0.3`)
+
+| #   | 결정                                                       | 이유                                                                                                       | 반영 위치                                                    |
+| --- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| D24 | lease를 응답 body에 실어 보낸다 (`LeasedBody`)              | service 함수가 반환하는 순간 반납하면, backend에서 응답이 흘러나오는 중인데도 `active_requests`가 0이 되어 idle shutdown 대상이 된다. 실제로 body가 중간에서 잘린다. | [§25–§26](../../prd/02-architecture/06-gateway-and-requests.md) |
+| D25 | backend connection pool을 두지 않는다                       | scale-to-zero는 backend를 주기적으로 죽인다. pool에 남은 keep-alive 연결은 다음 요청에서 그대로 실패한다. 쓰려면 lifecycle 이벤트로 무효화해야 하고 그것은 MVP 범위가 아니다. | [§24](../../prd/02-architecture/06-gateway-and-requests.md)  |
+| D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
+| D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
+
+### D27을 발견한 경위
+
+`nimwaked`를 처음 실제로 띄워 본 스모크 테스트에서 나왔다. 단위 테스트와 통합 테스트는
+`shutdown()` 이후에도 테스트 프로세스가 계속 살아 있어 detached stop task가 끝날 시간을 준다.
+**daemon만이 shutdown 직후 종료한다.** 그래서 이 결함은 daemon을 실제로 띄워야만 드러났다.
+
+`kill_on_drop(true)` 덕분에 orphan은 생기지 않았다. 대신 조용히 잘못된 것은 종료 방식이다.
+
+```text
+고치기 전   SIGTERM 전송 → daemon 종료(0.003s) → kill_on_drop이 SIGKILL
+고친 후     SIGTERM 전송 → shutdown timeout(2s) 대기 → SIGKILL → daemon 종료(2.004s)
+```
+
+즉 `shutdown_timeout_seconds`가 daemon 종료 경로에서만 무시되고 있었다. (PRD §30)
+
 ### 코드 수준 주의사항
 
 - lifecycle 시간 판단은 **`tokio::time::Instant`** 를 쓴다.
@@ -99,6 +123,11 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
   먼저 온 것이 전이를 수행하고 나중 것은 stale로 무시된다. 테스트는 event 개수를 세지 말고 목표 상태까지 진행시켜야 한다.
 - process group에 `SIGKILL`을 보내는 것은 **reap보다 먼저**여야 한다.
   직접 child가 zombie로 남아 있는 동안에만 그 pid(= pgid)가 예약되어 있다. 거둔 뒤에 보내면 재사용된 pid의 엉뚱한 group을 죽일 수 있다.
+- Gateway E2E에서 HTTP client는 blocking이므로 반드시 `spawn_blocking`으로 부른다.
+  테스트 thread에서 곧바로 부르면 같은 runtime 위의 gateway task가 굶어 deadlock이 된다.
+- orphan 여부를 `pgrep -f`로 확인하지 말 것.
+  검사 스크립트 자신의 command line이 패턴에 걸려 **오탐**이 난다. 실제로 이 오탐 때문에
+  있지도 않은 orphan을 쫓았다. 대상 pid를 직접 들고 `kill -0`으로 보거나 listener를 본다.
 - 통합 테스트의 port를 `bind(:0)`으로 고르면 안 된다.
   돌려준 직후 커널이 같은 번호를 다른 연결의 ephemeral port로 내주고, readiness probe가 엉뚱한 listener에 붙는다.
   실제로 이 경로에서 테스트가 간헐적으로 깨졌다. ephemeral range 밖에서 원자 counter로 고른다.
