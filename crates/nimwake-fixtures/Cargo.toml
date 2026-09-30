@@ -16,6 +16,7 @@ nix.workspace = true
 
 [dev-dependencies]
 nimwake-core.workspace = true
+nimwake-fixtures = { path = "." }
 tokio = { workspace = true, features = ["test-util"] }
 
 # workspace의 `unsafe_code = "forbid"`는 상속하지 않는다.
