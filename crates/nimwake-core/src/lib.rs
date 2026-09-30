@@ -16,6 +16,7 @@ pub mod gateway;
 pub mod id;
 pub mod registry;
 pub mod runtime;
+pub mod trace;
 
 pub use app::{AppHandle, AppSpec, AppStateName, AppStatus, RequestLease, StopReason};
 pub use error::{AcquireError, AppError, ManifestError, RuntimeError, ValidationError};
@@ -24,3 +25,4 @@ pub use registry::{AppRegistry, DEFAULT_GATEWAY_PORT};
 #[cfg(unix)]
 pub use runtime::ProcessRuntime;
 pub use runtime::Runtime;
+pub use trace::{RequestTrace, StartTimings, StartupTrace};

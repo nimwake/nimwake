@@ -215,7 +215,10 @@ fn begin_start(waiters: Vec<Waiter>, ctx: &Ctx<'_>) -> Step {
             started_at: ctx.now,
             waiters,
         },
-        vec![Effect::Start { operation_id }],
+        vec![Effect::Start {
+            operation_id,
+            requested_at: ctx.now,
+        }],
     )
 }
 

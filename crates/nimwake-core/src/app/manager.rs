@@ -23,6 +23,7 @@ use tracing::debug;
 use crate::error::AppError;
 use crate::id::{IdleGeneration, OperationId};
 use crate::runtime::{ProcessHandle, Runtime};
+use crate::trace::StartupTrace;
 
 use super::command::AppCommand;
 use super::effect::Effect;
@@ -101,7 +102,10 @@ impl Actor {
 
     fn run_effect(&self, effect: Effect) {
         match effect {
-            Effect::Start { operation_id } => self.spawn_start(operation_id),
+            Effect::Start {
+                operation_id,
+                requested_at,
+            } => self.spawn_start(operation_id, requested_at),
 
             Effect::Stop {
                 process,
@@ -140,7 +144,7 @@ impl Actor {
 
     /// startup timeout은 여기서 건다. 시간이 다하면 `start` future가 **취소**되고,
     /// 그때 `ProcessHandle`이 drop되면서 runtime이 child를 정리한다. (D20 / PRD §71)
-    fn spawn_start(&self, operation_id: OperationId) {
+    fn spawn_start(&self, operation_id: OperationId, requested_at: Instant) {
         let spec = Arc::clone(&self.spec);
         let runtime = Arc::clone(&self.runtime);
         let tx = self.self_tx.clone();
@@ -148,7 +152,12 @@ impl Actor {
 
         tokio::spawn(async move {
             let result = match tokio::time::timeout(startup_timeout, runtime.start(&spec)).await {
-                Ok(Ok(started)) => Ok(started),
+                Ok(Ok(started)) => {
+                    // cold start를 구간별로 남긴다. 총합만으로는 Nimwake와 application 중
+                    // 어느 쪽을 고쳐야 할지 알 수 없다. (PRD §42, §72)
+                    StartupTrace::new(requested_at, started.timings).emit(&spec.name);
+                    Ok(started)
+                }
                 Ok(Err(error)) => Err(AppError::StartFailed(error.to_string())),
                 Err(_elapsed) => Err(AppError::StartupTimeout(startup_timeout)),
             };

@@ -13,6 +13,7 @@ use async_trait::async_trait;
 
 use crate::error::RuntimeError;
 use crate::id::ProcessId;
+use crate::trace::StartTimings;
 
 /// handle 뒤에 있는 실제 process를 제어하는 경로. (PRD §70의 `control`)
 ///
@@ -100,6 +101,8 @@ impl std::fmt::Display for Backend {
 pub struct StartedProcess {
     pub handle: ProcessHandle,
     pub backend: Backend,
+    /// 기동 구간 계측. cold start를 단일 숫자가 아니라 구간별로 보기 위한 것이다. (PRD §72)
+    pub timings: StartTimings,
 }
 
 /// process 종료 상태.

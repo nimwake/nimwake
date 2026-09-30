@@ -12,6 +12,7 @@
 //! - 계측(PRD §72)을 전이 로직이 아니라 수행 지점 한 곳에 붙일 수 있다.
 
 use tokio::sync::oneshot;
+use tokio::time::Instant;
 
 use crate::error::AcquireError;
 use crate::id::{IdleGeneration, LeaseId, OperationId};
@@ -23,7 +24,13 @@ use super::state::{AppStatus, Waiter};
 #[derive(Debug)]
 pub(super) enum Effect {
     /// `Runtime::start`를 startup timeout 안에서 수행하고 `StartCompleted`를 보고한다.
-    Start { operation_id: OperationId },
+    ///
+    /// `requested_at`은 기동을 결정한 시각이다. 실제 spawn까지의 대기 구간을 재기 위해
+    /// 여기서부터 들고 간다. (PRD §72)
+    Start {
+        operation_id: OperationId,
+        requested_at: Instant,
+    },
 
     /// `Runtime::stop`을 수행한다.
     ///
