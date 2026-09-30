@@ -158,6 +158,11 @@ impl Lifecycle {
 pub struct Daemon {
     child: Child,
     port: u16,
+    /// daemon이 알린 실제 listen 주소.
+    ///
+    /// 출력에서 다시 찾지 않고 여기 보관한다. `start`가 돌아온 시점에 그 줄이
+    /// 아직 `output`에 들어가지 않았을 수 있고, 실제로 CI에서 그 경쟁 때문에 깨졌다.
+    listen: String,
     output: Arc<Mutex<Vec<String>>>,
 }
 
@@ -189,16 +194,23 @@ impl Daemon {
         drain(child.stdout.take(), Arc::clone(&output), Some(tx));
         drain(child.stderr.take(), Arc::clone(&output), None);
 
-        let port = rx.recv_timeout(STARTUP_DEADLINE).unwrap_or_else(|_| {
+        let listen = rx.recv_timeout(STARTUP_DEADLINE).unwrap_or_else(|_| {
             panic!(
                 "nimwaked never reported a listen address within {STARTUP_DEADLINE:?}\n{}",
                 lines(&output).join("\n"),
             )
         });
 
+        let port = listen
+            .rsplit(':')
+            .next()
+            .and_then(|port| port.parse().ok())
+            .unwrap_or_else(|| panic!("no port in the reported address `{listen}`"));
+
         Self {
             child,
             port,
+            listen,
             output,
         }
     }
@@ -227,17 +239,8 @@ impl Daemon {
     }
 
     /// daemon이 알린 실제 listen 주소.
-    pub fn listen_addr(&self) -> String {
-        self.output()
-            .iter()
-            .find_map(|line| {
-                line.split("listening on http://")
-                    .nth(1)?
-                    .split_whitespace()
-                    .next()
-                    .map(ToOwned::to_owned)
-            })
-            .expect("the daemon reports its listen address")
+    pub fn listen_addr(&self) -> &str {
+        &self.listen
     }
 
     pub const fn port(&self) -> u16 {
@@ -290,7 +293,7 @@ fn terminate(child: &mut Child) {
     let _ = child.kill();
 }
 
-fn drain<R>(reader: Option<R>, sink: Arc<Mutex<Vec<String>>>, listen: Option<mpsc::Sender<u16>>)
+fn drain<R>(reader: Option<R>, sink: Arc<Mutex<Vec<String>>>, listen: Option<mpsc::Sender<String>>)
 where
     R: std::io::Read + Send + 'static,
 {
@@ -298,23 +301,24 @@ where
 
     std::thread::spawn(move || {
         for line in BufReader::new(reader).lines().map_while(Result::ok) {
-            if let Some(sender) = listen.as_ref() {
-                if let Some(port) = listen_port(&line) {
-                    let _ = sender.send(port);
-                }
-            }
+            let reported = listen.as_ref().and_then(|_| listen_authority(&line));
+
+            // 저장을 먼저 한다. 알린 뒤에 저장하면 기다리던 쪽이 아직 없는 출력을 볼 수 있다.
             if let Ok(mut sink) = sink.lock() {
                 sink.push(line);
+            }
+
+            if let (Some(sender), Some(authority)) = (listen.as_ref(), reported) {
+                let _ = sender.send(authority);
             }
         }
     });
 }
 
-/// `listening on http://127.0.0.1:34567 — ...`에서 port를 뽑는다.
-fn listen_port(line: &str) -> Option<u16> {
+/// `listening on http://127.0.0.1:34567 — ...`에서 `127.0.0.1:34567`을 뽑는다.
+fn listen_authority(line: &str) -> Option<String> {
     let rest = line.split("listening on http://").nth(1)?;
-    let authority = rest.split_whitespace().next()?;
-    authority.rsplit(':').next()?.parse().ok()
+    Some(rest.split_whitespace().next()?.to_owned())
 }
 
 fn lines(sink: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
