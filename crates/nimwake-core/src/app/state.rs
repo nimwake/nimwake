@@ -69,6 +69,13 @@ impl AppState {
         }
     }
 
+    /// 더 이상 정리할 process도, 진행 중인 기동도 없는 상태.
+    ///
+    /// daemon 종료가 여기 도달해야 actor loop를 끝낼 수 있다. (Invariant 10)
+    pub(crate) const fn is_settled(&self) -> bool {
+        matches!(self, Self::Sleeping | Self::Failed { .. })
+    }
+
     pub(crate) fn active_requests(&self) -> usize {
         match self {
             Self::Running(running) => running.leases.len(),

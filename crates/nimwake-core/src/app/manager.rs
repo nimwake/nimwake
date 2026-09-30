@@ -55,6 +55,7 @@ pub fn spawn_with_capacity(
         operation_ids: OperationIdSeq::new(),
         lease_ids: LeaseIdSeq::new(),
         idle_generations: IdleGenerationSeq::new(),
+        shutdown_ack: None,
     };
 
     tokio::spawn(actor.run(rx));
@@ -71,6 +72,8 @@ struct Actor {
     operation_ids: OperationIdSeq,
     lease_ids: LeaseIdSeq,
     idle_generations: IdleGenerationSeq,
+    /// daemon 종료를 기다리는 쪽. process가 사라진 뒤에 신호를 보낸다.
+    shutdown_ack: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl Actor {
@@ -83,7 +86,7 @@ impl Actor {
             }
         }
 
-        self.on_shutdown();
+        self.on_actor_stopped();
         debug!(app = %self.spec.name, "app manager stopped");
     }
 
@@ -107,10 +110,10 @@ impl Actor {
             AppCommand::Status { reply } => {
                 let _ = reply.send(self.status());
             }
-            AppCommand::Shutdown => return ControlFlow::Break(()),
+            AppCommand::Shutdown { ack } => self.on_shutdown_requested(ack),
         }
 
-        ControlFlow::Continue(())
+        self.settle_shutdown()
     }
 
     // ---------------------------------------------------------------- acquire
@@ -312,6 +315,40 @@ impl Actor {
         AppState::Running(running)
     }
 
+    /// daemon 종료 요청을 기록만 한다. 실제 정리는 [`Self::settle_shutdown`]이 한다.
+    ///
+    /// ack는 곧바로 보내지 않는다. **process가 사라진 뒤**에 보낸다.
+    /// 여기서 기다리지 않으면 daemon이 먼저 종료해 stop task가 끝나지 못하고 child가 남는다.
+    fn on_shutdown_requested(&mut self, ack: tokio::sync::oneshot::Sender<()>) {
+        self.shutdown_ack = Some(ack);
+    }
+
+    /// 매 command 처리 후에 불린다. 종료 중이라면 정리를 한 걸음 진행시킨다.
+    ///
+    /// STARTING 중에 종료 요청이 오면 기동이 끝나기를 기다렸다가 곧바로 정지시킨다.
+    /// 여기서 끊어 버리면 방금 뜬 process를 아무도 거두지 않는다.
+    fn settle_shutdown(&mut self) -> ControlFlow<()> {
+        if self.shutdown_ack.is_none() {
+            return ControlFlow::Continue(());
+        }
+
+        if matches!(self.state, AppState::Running(_)) {
+            let AppState::Running(running) = self.take_state() else {
+                unreachable!("just checked the state is RUNNING")
+            };
+            self.state = self.begin_stop(running.process, Vec::new(), StopReason::DaemonShutdown);
+        }
+
+        if !self.state.is_settled() {
+            return ControlFlow::Continue(());
+        }
+
+        if let Some(ack) = self.shutdown_ack.take() {
+            let _ = ack.send(());
+        }
+        ControlFlow::Break(())
+    }
+
     fn begin_stop(
         &mut self,
         process: ProcessHandle,
@@ -392,6 +429,14 @@ impl Actor {
     }
 
     fn finish_stop(&mut self, waiters: Vec<Waiter>) -> AppState {
+        // daemon이 내려가는 중이라면 재기동하지 않는다. 기다리던 요청은 실패시킨다.
+        if self.shutdown_ack.is_some() {
+            for waiter in waiters {
+                let _ = waiter.send(Err(AcquireError::Unavailable));
+            }
+            return AppState::Sleeping;
+        }
+
         if waiters.is_empty() {
             AppState::Sleeping
         } else {
@@ -434,7 +479,10 @@ impl Actor {
         };
     }
 
-    fn on_shutdown(&mut self) {
+    /// actor loop가 끝난 뒤의 마지막 정리.
+    ///
+    /// mailbox가 닫혀 loop가 끝나는 경로(`Shutdown` 없이)도 있으므로 best-effort로 남긴다.
+    fn on_actor_stopped(&mut self) {
         let state = self.take_state();
 
         match state {

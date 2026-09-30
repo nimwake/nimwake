@@ -57,6 +57,7 @@ impl Harness {
             operation_ids: OperationIdSeq::new(),
             lease_ids: LeaseIdSeq::new(),
             idle_generations: IdleGenerationSeq::new(),
+            shutdown_ack: None,
         };
 
         Self { actor, rx, runtime }

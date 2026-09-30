@@ -57,8 +57,14 @@ pub(crate) enum AppCommand {
         reply: oneshot::Sender<AppStatus>,
     },
 
-    /// actor loop를 종료한다.
-    Shutdown,
+    /// application을 정지시키고 actor loop를 종료한다.
+    ///
+    /// `ack`는 **process가 실제로 사라진 뒤에** 전달된다.
+    /// 여기서 기다리지 않으면 daemon이 먼저 종료해 stop task가 끝나지 못하고 child가 남는다.
+    /// (Invariant 10 / PRD §71)
+    Shutdown {
+        ack: oneshot::Sender<()>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
