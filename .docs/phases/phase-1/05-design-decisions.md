@@ -100,6 +100,49 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+### D28 — 전이를 순수 함수로 분리
+
+`AppManager`가 세 가지를 동시에 하고 있었다.
+
+```text
+(a) 전이 결정      state + event -> new state
+(b) 부수효과 실행  tokio::spawn, 타이머, 채널 전송
+(c) 식별자 발급    OperationId / LeaseId / IdleGeneration
+```
+
+(a)는 순수하게 쓸 수 있는데 (b)와 얽혀 있어서, 전이 하나를 검증하려면 actor 전체를
+조립하고 mailbox를 굴려야 했다. 증상은 셋이었다.
+
+| 증상 | 내용 |
+| --- | --- |
+| 무관한 변경이 테스트를 깬다 | `shutdown_ack` 필드 하나를 추가했더니 테스트의 `Actor { .. }` 구조체 리터럴이 컴파일되지 않았다 |
+| 전이를 직접 단언할 수 없다 | `pump_until`이 최대 16회 임의 이벤트를 밀어 넣어야 목표 상태에 도달했다 |
+| 예약된 일을 볼 수 없다 | 부수효과가 `tokio::spawn`으로 즉시 나가버려 `FakeRuntime`을 통해서만 간접 관측됐다 |
+
+그래서 부수효과를 **값으로** 바꿨다.
+
+```text
+transition.rs   (상태, 이벤트, 문맥) -> (새 상태, Vec<Effect>)     순수
+effect.rs       Effect — 무엇을 할지 기술하는 데이터
+manager.rs      Effect를 실행하는 껍데기. 상태 판단이 한 줄도 없다
+```
+
+시각도 `Ctx::now`로 주입한다. idle 판정을 시계 조작 없이 검증할 수 있다.
+
+**비용도 적어 둔다.** core 코드가 453줄에서 666줄로 약 210줄 늘었다. `Effect`를 만들고
+푸는 보일러플레이트다. 대신 `manager.rs`는 453줄에서 147줄이 됐고, 단위 테스트는
+async runtime·fake·이벤트 루프 없이 도는 30개에서 39개가 됐다.
+
+`v0.0.4`가 `RequestTrace`/`StartupTrace`를 도입하기 **직전**에 한 것은 의도적이다.
+계측 지점은 전부 전이와 부수효과 안이고, 지금 나눠 두면 계측은 `Actor::apply` 한 곳에만 붙는다.
+
+### 왜 파일을 더 쪼개지 않았나
+
+`transition.rs`가 493줄로 가장 큰 파일이 됐지만 여기서 멈춘다.
+상태 머신은 하나의 응집된 것이고, Invariant 2가 상태 변경 주체를 하나로 요구한다.
+상태별로 파일을 나누면 전수 패턴 매칭이 흩어져서, 길이를 줄이는 대신 이 설계를
+성립시키는 성질을 잃는다. 더 커진다면 상태가 아니라 **이벤트 묶음** 기준으로 나눈다.
+
 ### D27을 발견한 경위
 
 `nimwaked`를 처음 실제로 띄워 본 스모크 테스트에서 나왔다. 단위 테스트와 통합 테스트는
@@ -123,6 +166,10 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
   먼저 온 것이 전이를 수행하고 나중 것은 stale로 무시된다. 테스트는 event 개수를 세지 말고 목표 상태까지 진행시켜야 한다.
 - process group에 `SIGKILL`을 보내는 것은 **reap보다 먼저**여야 한다.
   직접 child가 zombie로 남아 있는 동안에만 그 pid(= pgid)가 예약되어 있다. 거둔 뒤에 보내면 재사용된 pid의 엉뚱한 group을 죽일 수 있다.
+- fixture는 **응답 전에 요청을 읽어야 한다.**
+  readiness probe는 아무것도 보내지 않고 연결을 닫는데, 읽지 않고 응답부터 쓰면
+  그 죽은 연결을 붙들고 있는 동안 진짜 요청이 backlog에서 기다린다.
+  `slow-body-server`가 이것 때문에 5회 중 1회꼴로 `operation was canceled`를 냈다.
 - Gateway E2E에서 HTTP client는 blocking이므로 반드시 `spawn_blocking`으로 부른다.
   테스트 thread에서 곧바로 부르면 같은 runtime 위의 gateway task가 굶어 deadlock이 된다.
 - orphan 여부를 `pgrep -f`로 확인하지 말 것.

@@ -1,11 +1,13 @@
 //! Application lifecycle.
 
 mod command;
+mod effect;
 mod handle;
 mod lease;
 mod manager;
 mod spec;
 mod state;
+mod transition;
 
 pub use command::StopReason;
 pub use handle::AppHandle;
