@@ -46,9 +46,17 @@ pub fn addr(port: u16) -> SocketAddr {
 }
 
 /// loopback port에 연결이 되는지 본다. readiness와 같은 판정 기준이다. (PRD §22)
+///
+/// timeout이 넉넉한 것은 **느린 CI runner에서 살아 있는 port를 죽은 것으로 읽지 않기** 위해서다.
+/// 200ms로 두었더니 `acquire()`가 성공한 직후의 단언이 CI에서 간헐적으로 깨졌다.
+///
+/// 이 값을 키워도 "닫혀 있음"을 확인하는 쪽은 느려지지 않는다.
+/// loopback의 닫힌 port는 timeout을 기다리지 않고 곧바로 `ECONNREFUSED`로 답한다.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
 #[must_use]
 pub fn is_listening(port: u16) -> bool {
-    TcpStream::connect_timeout(&addr(port), Duration::from_millis(200)).is_ok()
+    TcpStream::connect_timeout(&addr(port), CONNECT_TIMEOUT).is_ok()
 }
 
 /// pid가 아직 살아 있는지 본다. signal 0은 권한 검사만 수행한다.
