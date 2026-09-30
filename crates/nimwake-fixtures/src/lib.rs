@@ -5,7 +5,7 @@
 //!
 //! 의존성을 최소로 유지한다. fixture가 복잡해지면 테스트가 무엇을 증명하는지 흐려진다.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 
 /// argv에서 위치 인자를 읽는다.
@@ -50,44 +50,64 @@ pub fn serve_forever(listener: &TcpListener) -> ! {
     }
 }
 
-fn respond(stream: TcpStream) -> std::io::Result<()> {
-    let mut reader = BufReader::new(stream);
+/// 읽어 들인 요청.
+pub struct Request {
+    pub line: String,
+    pub body: Vec<u8>,
+}
 
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line)? == 0 {
-        return Ok(());
+/// 요청 한 건을 읽는다. 연결이 곧바로 닫혔으면 `None`.
+///
+/// **응답 전에 반드시 이것을 부른다.** readiness probe는 아무것도 보내지 않고 연결을 닫는데,
+/// 읽지 않고 응답부터 쓰면 그 죽은 연결을 붙들고 있는 동안 진짜 요청이 backlog에서 기다린다.
+///
+/// # Errors
+///
+/// 소켓 읽기가 실패하면 그대로 돌려준다.
+pub fn read_request<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Request>> {
+    let mut line = String::new();
+    if reader.read_line(&mut line)? == 0 {
+        return Ok(None);
     }
 
     let mut content_length = 0usize;
     loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
+        let mut header = String::new();
+        if reader.read_line(&mut header)? == 0 {
             break;
         }
-        let line = line.trim_end();
-        if line.is_empty() {
+        let header = header.trim_end();
+        if header.is_empty() {
             break;
         }
-        if let Some(value) = header_value(line, "content-length") {
+        if let Some(value) = header_value(header, "content-length") {
             content_length = value.trim().parse().unwrap_or(0);
         }
     }
 
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
-        reader.read_exact(&mut body)?;
+        std::io::Read::read_exact(reader, &mut body)?;
     }
 
-    let is_echo = request_line.starts_with("POST /echo");
-    let payload = if is_echo {
-        body
+    Ok(Some(Request { line, body }))
+}
+
+fn respond(stream: TcpStream) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stream);
+    let Some(request) = read_request(&mut reader)? else {
+        return Ok(());
+    };
+
+    let payload = if request.line.starts_with("POST /echo") {
+        request.body
     } else {
         std::process::id().to_string().into_bytes()
     };
 
     let mut stream = reader.into_inner();
     write!(
-        stream,
+            stream,
         "HTTP/1.1 200 OK\r\ncontent-length: {}\r\ncontent-type: text/plain\r\nconnection: close\r\n\r\n",
         payload.len()
     )?;

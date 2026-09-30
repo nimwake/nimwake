@@ -380,7 +380,7 @@ async fn a_lease_outlives_the_response_body() {
 
     let response = harness.get("stream.localhost").await;
 
-    assert_eq!(response.status, 200);
+    assert_eq!(response.status, 200, "body: {}", response.body);
     assert_eq!(
         response.body.len(),
         200,
