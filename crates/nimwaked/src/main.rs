@@ -1,7 +1,5 @@
 //! Nimwake daemon.
 //!
-//! `v0.0.3 — HTTP + Scale-to-Zero` 범위에서 이 바이너리가 하는 일은 다음과 같다.
-//!
 //! ```text
 //! manifest 읽기 → 기동 단계 검증 → registry 구성 → gateway serve → 종료 시 정리
 //! ```
@@ -11,28 +9,32 @@
 //! serving은 Unix에서만 가능하다. `ProcessRuntime`이 POSIX 신호 위에 서 있기 때문이다. (PRD §19, §48)
 //! 다른 플랫폼에서는 manifest 검증까지만 수행한다.
 
-use std::path::{Path, PathBuf};
+mod options;
+
+use std::path::Path;
 use std::process::ExitCode;
 
-use nimwake_core::registry::{self, DEFAULT_GATEWAY_PORT};
+use nimwake_core::registry;
 use nimwake_core::AppSpec;
+use options::{Options, Parsed};
 use tracing::error;
 
-const DEFAULT_APPS_DIR: &str = "apps";
-
 fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    let options = match options::parse(std::env::args().skip(1)) {
+        Ok(Parsed::Options(options)) => *options,
+        Ok(Parsed::Help) => {
+            print!("{}", options::USAGE);
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => {
+            eprintln!("{message}\n\n{}", options::USAGE);
+            return ExitCode::FAILURE;
+        }
+    };
 
-    let apps_dir = std::env::args()
-        .nth(1)
-        .map_or_else(|| PathBuf::from(DEFAULT_APPS_DIR), PathBuf::from);
+    init_tracing(options.trace_json);
 
-    match run(&apps_dir) {
+    match run(&options) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             error!("{message}");
@@ -41,11 +43,31 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(apps_dir: &Path) -> Result<(), String> {
-    let specs = load(apps_dir)?;
+/// benchmark mode에서는 구간 계측을 JSON 한 줄씩 내보낸다.
+///
+/// 상시 metrics framework를 붙이지 않는다는 결정에 따른 것이다. 수집과 집계는
+/// 이 출력을 읽는 쪽이 한다. (PRD §72)
+fn init_tracing(json: bool) {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    if json {
+        tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(filter)
+            .with_current_span(false)
+            .with_span_list(false)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
+}
+
+fn run(options: &Options) -> Result<(), String> {
+    let specs = load(&options.apps_dir, options.port)?;
 
     println!(
-        "nimwaked {} — {} application(s) validated, gateway port {DEFAULT_GATEWAY_PORT}",
+        "nimwaked {} — {} application(s) validated",
         env!("CARGO_PKG_VERSION"),
         specs.len()
     );
@@ -58,10 +80,10 @@ fn run(apps_dir: &Path) -> Result<(), String> {
     }
     println!();
 
-    serve(specs)
+    serve(specs, options.port)
 }
 
-fn load(apps_dir: &Path) -> Result<Vec<AppSpec>, String> {
+fn load(apps_dir: &Path, gateway_port: u16) -> Result<Vec<AppSpec>, String> {
     let specs = registry::load_dir(apps_dir).map_err(|error| {
         format!(
             "failed to load manifests from `{}`: {error}",
@@ -73,14 +95,14 @@ fn load(apps_dir: &Path) -> Result<Vec<AppSpec>, String> {
         return Err(format!("no manifests found under `{}`", apps_dir.display()));
     }
 
-    registry::validate(&specs, DEFAULT_GATEWAY_PORT)
+    registry::validate(&specs, gateway_port)
         .map_err(|error| format!("manifest validation failed: {error}"))?;
 
     Ok(specs)
 }
 
 #[cfg(unix)]
-fn serve(specs: Vec<AppSpec>) -> Result<(), String> {
+fn serve(specs: Vec<AppSpec>, port: u16) -> Result<(), String> {
     use std::net::SocketAddr;
     use std::sync::Arc;
 
@@ -94,18 +116,25 @@ fn serve(specs: Vec<AppSpec>) -> Result<(), String> {
         .map_err(|error| format!("failed to start the async runtime: {error}"))?;
 
     runtime.block_on(async move {
-        let registry =
-            AppRegistry::build(specs, DEFAULT_GATEWAY_PORT, Arc::new(ProcessRuntime::new()))
-                .map_err(|error| format!("registry validation failed: {error}"))?;
+        let registry = AppRegistry::build(specs, port, Arc::new(ProcessRuntime::new()))
+            .map_err(|error| format!("registry validation failed: {error}"))?;
         let registry = Arc::new(registry);
 
-        let addr = SocketAddr::from(([127, 0, 0, 1], DEFAULT_GATEWAY_PORT));
-        let gateway = Gateway::bind(addr, Arc::clone(&registry))
+        let requested = SocketAddr::from(([127, 0, 0, 1], port));
+        let gateway = Gateway::bind(requested, Arc::clone(&registry))
             .await
-            .map_err(|error| format!("failed to bind {addr}: {error}"))?;
+            .map_err(|error| format!("failed to bind {requested}: {error}"))?;
+
+        // `--port 0`으로 띄웠다면 실제 배정된 값을 알려야 한다. 테스트와 스크립트가 이 줄을 읽는다.
+        let addr = gateway
+            .local_addr()
+            .map_err(|error| format!("failed to read the listen address: {error}"))?;
 
         info!(%addr, apps = registry.len(), "gateway is listening");
         println!("listening on http://{addr} — every application starts asleep");
+        // 이 줄을 읽고 요청을 보내는 쪽이 있다. 버퍼에 남겨 두면 안 된다.
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
 
         gateway.serve(shutdown_signal()).await;
 
@@ -125,14 +154,14 @@ async fn shutdown_signal() {
     let mut interrupt = match signal(SignalKind::interrupt()) {
         Ok(signal) => signal,
         Err(error) => {
-            tracing::error!(%error, "failed to listen for SIGINT");
+            error!(%error, "failed to listen for SIGINT");
             return;
         }
     };
     let mut terminate = match signal(SignalKind::terminate()) {
         Ok(signal) => signal,
         Err(error) => {
-            tracing::error!(%error, "failed to listen for SIGTERM");
+            error!(%error, "failed to listen for SIGTERM");
             return;
         }
     };
@@ -148,7 +177,7 @@ async fn shutdown_signal() {
 ///
 /// `ProcessRuntime`이 Unix 전용이므로 application을 기동할 방법이 없다. (PRD §19, §48)
 #[cfg(not(unix))]
-fn serve(_specs: Vec<AppSpec>) -> Result<(), String> {
+fn serve(_specs: Vec<AppSpec>, _port: u16) -> Result<(), String> {
     println!("manifests are valid.");
     println!(
         "serving requires a Unix-like OS: ProcessRuntime is built on POSIX signals (PRD §48)."
