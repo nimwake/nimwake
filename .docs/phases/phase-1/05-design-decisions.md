@@ -100,6 +100,26 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## 구현 중 확정 (`v0.0.4`)
+
+| #   | 결정                                                       | 이유                                                                                                       | 반영 위치                                                    |
+| --- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| D29 | 계측 값을 `u64`로 내보낸다                                  | `u128`을 쓰면 `tracing`이 JSON에 **문자열**로 적는다(`"queue_us":"142"`). 읽는 쪽이 숫자로 다룰 수 없다. 마이크로초 단위 `i64`는 29만 년을 담으므로 정밀도 손실이 없다. | [§72](../../prd/03-delivery/05-instrumentation.md)           |
+| D30 | E2E를 `nimwaked` 패키지에 두고 fixture를 형제 경로에서 찾는다 | `CARGO_BIN_EXE_*`는 같은 패키지의 bin만 노출한다. daemon과 fixture를 동시에 쓰려면 한쪽은 경로로 찾아야 한다. workspace 바이너리는 모두 같은 디렉터리에 놓인다. | [§41](../../prd/03-delivery/02-testing-strategy.md)          |
+| D31 | 부하 도구를 직접 만든다                                     | k6를 쓰면 CI에 외부 의존이 생기고, cold-start breakdown을 위해 daemon의 trace 출력과 맞물려야 한다. 그 결합을 외부 도구로 하면 더 복잡해진다. `v0.0.5` storm 테스트에서도 재사용한다. | [§42](../../prd/03-delivery/03-load-tests.md)                |
+| D32 | daemon CLI를 직접 파싱한다                                  | 옵션이 셋뿐이다. `clap`은 `nimwake` CLI가 생길 때 함께 들인다. (PRD §35의 스택 선택은 CLI 도구를 가리킨다)     | [§35](../../prd/02-architecture/09-repository-and-stack.md)  |
+
+### D29를 발견한 경위
+
+E2E는 통과하는데 벤치 도구가 구간을 하나도 못 읽었다. daemon의 출력을 직접 보고 알았다.
+
+```text
+"queue_us":"142"      ← 문자열
+"queue_us":142        ← 고친 뒤
+```
+
+E2E는 필드 **이름**만 확인했기 때문에 잡히지 않았다. 형식을 소비하는 쪽이 생겨야 드러나는 종류의 결함이다.
+
 ### D28 — 전이를 순수 함수로 분리
 
 `AppManager`가 세 가지를 동시에 하고 있었다.

@@ -1,0 +1,91 @@
+# Main Branch Integration CI
+#
+# 요구사항: .docs/prd/03-delivery/06-ci-strategy.md (PRD §44)
+#
+# PR CI(`ci.yml`)가 fast feedback과 lifecycle correctness를 담당한다.
+# 여기서는 **release 바이너리**로 같은 E2E를 다시 돌리고, 성능 baseline을 기록한다.
+#
+# 성능 수치는 판정에 쓰지 않는다. merge도 release도 막지 않는다. (PRD §73)
+# baseline이 충분히 쌓인 뒤에야 상대 threshold를 도입한다.
+#
+# E2E 자체는 `cargo test --workspace`에 포함되어 PR CI에서도 돈다.
+# 따라서 "E2E 실패 시 merge 차단"은 `ci.yml`이 이미 만족시킨다.
+# 이 workflow는 debug에서 보이지 않는 것(최적화 빌드의 타이밍, 성능 추세)을 본다.
+
+name: Integration
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  e2e:
+    name: release E2E + performance baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          rustup show active-toolchain
+          cargo --version
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-integration-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-integration-
+
+      # E2E는 fixture 바이너리를 형제 경로에서 찾는다. workspace 전체를 빌드해야 한다.
+      - name: Build release binaries
+        run: cargo build --workspace --release
+
+      # 실제 nimwaked를 띄우는 회귀 테스트. (PRD §41)
+      - name: End-to-end
+        run: cargo test --release -p nimwaked --test e2e -- --test-threads=4
+
+      # 판정하지 않는다. 어디를 최적화해야 하는지 알아내기 위한 측정이다. (PRD §42)
+      - name: Performance baseline
+        run: |
+          ./target/release/nimwake-bench \
+            --commit "${GITHUB_SHA}" \
+            --out performance-report.md
+
+      - name: Publish the report to the job summary
+        if: always()
+        run: cat performance-report.md >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-report-${{ github.sha }}
+          path: performance-report.md
+          retention-days: 90
+
+      # daemon과 child가 모두 정리됐는지 본다. (Invariant 10 / PRD §71)
+      - name: Assert nothing survived
+        if: always()
+        run: |
+          leftover=$(pgrep -c -x nimwaked || true)
+          if [ "${leftover}" != "0" ]; then
+            echo "::error::${leftover} nimwaked process(es) survived the run"
+            ps -eo pid,args | grep -E "nimwaked|echo-server" | grep -v grep || true
+            exit 1
+          fi
+          echo "no nimwaked left behind"
