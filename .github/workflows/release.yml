@@ -143,7 +143,7 @@ jobs:
             echo "commit=${GITHUB_SHA}"
             echo "ref=${GITHUB_REF_NAME}"
             echo "target=aarch64-unknown-linux-musl"
-            echo "built_with=cross $(cross --version | head -1)"
+            echo "built_with=cross $(cross --version 2>/dev/null | sed -n 1p)"
             echo "rustc=$(rustc --version)"
             echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } > "${out}/BUILD_INFO"
@@ -160,7 +160,8 @@ jobs:
           mkdir -p empty-apps
 
           set +e
-          qemu-aarch64-static "${OUT_DIR}/nimwaked" --apps empty-apps 2>smoke.log
+          # nimwaked는 로그를 stdout에 쓴다. stderr만 받으면 smoke.log가 비어 아래 grep이 실패한다.
+          qemu-aarch64-static "${OUT_DIR}/nimwaked" --apps empty-apps >smoke.log 2>&1
           code=$?
           set -e
 
