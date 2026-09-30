@@ -184,7 +184,20 @@ impl Apps {
         &self.root
     }
 
+    /// 벤치 중에는 잠들면 안 되므로 idle timeout을 길게 둔다.
     pub fn app(&self, name: &str, port: u16, command: &[String]) -> std::io::Result<()> {
+        self.app_with_idle(name, port, command, 3600)
+    }
+
+    /// lifecycle stress는 반대로 짧은 idle timeout이 필요하다.
+    /// 한 cycle의 길이가 사실상 이 값이다.
+    pub fn app_with_idle(
+        &self,
+        name: &str,
+        port: u16,
+        command: &[String],
+        idle_seconds: u64,
+    ) -> std::io::Result<()> {
         let dir = self.root.join(name);
         std::fs::create_dir_all(&dir)?;
 
@@ -201,7 +214,7 @@ impl Apps {
                  [server]\nhost = \"{name}.localhost\"\nport = {port}\n\n\
                  [runtime]\ncommand = [{command}]\nworking_dir = \".\"\n\n\
                  [lifecycle]\n\
-                 idle_timeout_seconds = 3600\n\
+                 idle_timeout_seconds = {idle_seconds}\n\
                  startup_timeout_seconds = 30\n\
                  shutdown_timeout_seconds = 5\n\
                  max_pending_requests = 4096\n",

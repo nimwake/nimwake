@@ -6,7 +6,9 @@
 
 use std::fmt::Write;
 
+use crate::baseline::{self, Baseline};
 use crate::stats::{delta_ms, ms, Summary};
+use crate::stress::{Resources, StressResult, SustainedResult};
 use crate::{StormResult, SweepRow, WarmResult};
 
 pub struct Report {
@@ -14,6 +16,9 @@ pub struct Report {
     warm: Option<(Summary, WarmResult)>,
     storm: Option<StormResult>,
     sweep: Vec<SweepRow>,
+    stress: Option<StressResult>,
+    sustained: Option<SustainedResult>,
+    previous: Option<Baseline>,
 }
 
 impl Report {
@@ -23,6 +28,9 @@ impl Report {
             warm: None,
             storm: None,
             sweep: Vec::new(),
+            stress: None,
+            sustained: None,
+            previous: None,
         }
     }
 
@@ -38,6 +46,71 @@ impl Report {
         self.sweep.push(row);
     }
 
+    pub fn stress(&mut self, result: StressResult) {
+        self.stress = Some(result);
+    }
+
+    pub fn sustained(&mut self, result: SustainedResult) {
+        self.sustained = Some(result);
+    }
+
+    pub fn compare_with(&mut self, previous: Baseline) {
+        self.previous = Some(previous);
+    }
+
+    /// 다음 실행이 비교에 쓸 값들. (PRD §73)
+    pub fn baseline(&self) -> Baseline {
+        let mut baseline = Baseline::new(&self.commit);
+
+        if let Some((direct, nimwake)) = &self.warm {
+            baseline.set("warm_p50_ms", millis(nimwake.summary.p50));
+            baseline.set("warm_p95_ms", millis(nimwake.summary.p95));
+            baseline.set(
+                "proxy_overhead_p95_ms",
+                millis(nimwake.summary.p95) - millis(direct.p95),
+            );
+            if let Some(rss) = nimwake.rss {
+                baseline.set("daemon_rss_mb", rss as f64 / (1024.0 * 1024.0));
+            }
+        }
+
+        if let Some(spans) = self.storm.as_ref().and_then(|storm| storm.spans.first()) {
+            baseline.set("cold_start_total_ms", millis(spans.total));
+            baseline.set("cold_start_queue_ms", millis(spans.queue));
+        }
+
+        baseline
+    }
+
+    /// release를 막을 사유. **correctness만 들어온다.** (PRD §44)
+    pub fn correctness_problems(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+
+        if let Some(storm) = &self.storm {
+            if storm.failures > 0 {
+                problems.push(format!(
+                    "cold-start storm: {} failed request(s)",
+                    storm.failures
+                ));
+            }
+            if storm.unique_pids > 1 {
+                problems.push(format!(
+                    "cold-start storm started {} processes, expected 1",
+                    storm.unique_pids
+                ));
+            }
+        }
+
+        if let Some(stress) = &self.stress {
+            problems.extend(stress.leaks().into_iter().map(|p| format!("stress: {p}")));
+        }
+        if let Some(sustained) = &self.sustained {
+            problems.extend(sustained.leaks());
+        }
+
+        problems
+    }
+
     pub fn render(&self) -> String {
         let mut out = String::new();
         let _ = writeln!(out, "# Nimwake Performance Report\n");
@@ -50,7 +123,118 @@ impl Report {
         self.render_warm(&mut out);
         self.render_cold_start(&mut out);
         self.render_sweep(&mut out);
+        self.render_stress(&mut out);
+        self.render_sustained(&mut out);
+        self.render_comparison(&mut out);
         out
+    }
+
+    /// 누수 검증. before / after를 함께 기록한다. (PRD §43)
+    fn render_stress(&self, out: &mut String) {
+        let Some(stress) = &self.stress else {
+            return;
+        };
+
+        let _ = writeln!(
+            out,
+            "## Lifecycle stress ({} cycles / {} apps)\n",
+            stress.cycles, stress.apps
+        );
+        let _ = writeln!(out, "| | |");
+        let _ = writeln!(out, "| --- | ---: |");
+        let _ = writeln!(out, "| wall clock | {} |", ms(stress.wall));
+        let _ = writeln!(out, "| spawned processes | {} |", stress.spawned);
+        let _ = writeln!(out, "| failed requests | {} |", stress.failures);
+        let _ = writeln!(out, "| orphan processes | {} |", stress.survivors.len());
+        let _ = writeln!(out, "| zombie processes | {} |", stress.zombies);
+        let _ = writeln!(out, "| ports left open | {} |\n", stress.open_ports.len());
+
+        let _ = writeln!(out, "| | before | after |");
+        let _ = writeln!(out, "| --- | ---: | ---: |");
+        let _ = writeln!(
+            out,
+            "| FD | {} | {} |",
+            optional(stress.before.fds),
+            optional(stress.after.fds)
+        );
+        let _ = writeln!(
+            out,
+            "| RSS | {} | {} |\n",
+            megabytes(stress.before.rss),
+            megabytes(stress.after.rss)
+        );
+
+        let leaks = stress.leaks();
+        if leaks.is_empty() {
+            let _ = writeln!(out, "누수 없음.\n");
+        } else {
+            let _ = writeln!(out, "**누수 발견:**\n");
+            for leak in leaks {
+                let _ = writeln!(out, "- {leak}");
+            }
+            let _ = writeln!(out);
+        }
+    }
+
+    /// proxy 경로 자체의 누수. 기동 없이 지속되는 경로를 본다. (PRD §43)
+    fn render_sustained(&self, out: &mut String) {
+        let Some(sustained) = &self.sustained else {
+            return;
+        };
+
+        let (rss, fds) = sustained.growth();
+        let _ = writeln!(
+            out,
+            "## Sustained warm load ({}s)\n",
+            sustained.duration.as_secs()
+        );
+        let _ = writeln!(out, "| | |");
+        let _ = writeln!(out, "| --- | ---: |");
+        let _ = writeln!(out, "| requests | {} |", sustained.requests);
+        let _ = writeln!(out, "| failed | {} |", sustained.failures);
+        let _ = writeln!(out, "| RSS 증가 | {} |", growth_bytes(rss));
+        let _ = writeln!(out, "| FD 증가 | {} |\n", growth_count(fds));
+
+        let _ = render_trend(out, &sustained.samples);
+    }
+
+    /// 직전 release 대비. 경고만 남기고 release를 막지 않는다. (PRD §73)
+    fn render_comparison(&self, out: &mut String) {
+        let Some(previous) = &self.previous else {
+            return;
+        };
+
+        let current = self.baseline();
+        let changes = baseline::compare(previous, &current, baseline::TRACKED);
+
+        let _ = writeln!(out, "## 직전 대비\n");
+        if changes.is_empty() {
+            let _ = writeln!(out, "비교할 공통 지표가 없다.\n");
+            return;
+        }
+
+        let _ = writeln!(out, "| 지표 | {} | current | Δ |", previous.label());
+        let _ = writeln!(out, "| --- | ---: | ---: | ---: |");
+
+        for change in &changes {
+            let delta = change.percent().map_or_else(
+                || "n/a".to_owned(),
+                |percent| {
+                    let mark = if change.is_regression() { " (!)" } else { "" };
+                    format!("{percent:+.0}%{mark}")
+                },
+            );
+            let _ = writeln!(
+                out,
+                "| {} | {:.2} {} | {:.2} {} | {delta} |",
+                change.metric, change.previous, change.unit, change.current, change.unit,
+            );
+        }
+
+        let _ = writeln!(
+            out,
+            "\n(!)는 경고일 뿐이다. runner 편차가 커서 절대 수치를 gate로 쓰지 않는다. (PRD §73)\n"
+        );
     }
 
     fn render_warm(&self, out: &mut String) {
@@ -187,6 +371,42 @@ fn megabytes(bytes: Option<u64>) -> String {
 
 fn optional(value: Option<usize>) -> String {
     value.map_or_else(|| "n/a".to_owned(), |value| value.to_string())
+}
+
+fn millis(duration: std::time::Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+fn growth_bytes(delta: Option<i64>) -> String {
+    delta.map_or_else(
+        || "n/a".to_owned(),
+        |delta| format!("{:+.1} MB", delta as f64 / (1024.0 * 1024.0)),
+    )
+}
+
+fn growth_count(delta: Option<i64>) -> String {
+    delta.map_or_else(|| "n/a".to_owned(), |delta| format!("{delta:+}"))
+}
+
+/// 자원 추이를 간단한 막대로 보여 준다. 숫자 나열보다 추세가 눈에 들어온다.
+fn render_trend(out: &mut String, samples: &[Resources]) -> std::fmt::Result {
+    let values: Vec<u64> = samples.iter().filter_map(|sample| sample.rss).collect();
+    let (Some(min), Some(max)) = (values.iter().min(), values.iter().max()) else {
+        return Ok(());
+    };
+
+    writeln!(out, "```text")?;
+    writeln!(out, "RSS {:.1} MB -> {:.1} MB", mb(*min), mb(*max))?;
+    for value in &values {
+        let span = (max - min).max(1);
+        let width = usize::try_from((value - min) * 40 / span).unwrap_or(0);
+        writeln!(out, "{:>8.1} |{}", mb(*value), "#".repeat(width.max(1)))?;
+    }
+    writeln!(out, "```\n")
+}
+
+fn mb(bytes: u64) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0)
 }
 
 #[cfg(test)]

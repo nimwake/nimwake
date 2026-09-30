@@ -12,9 +12,11 @@
 //! concurrency     1 → 1000 sweep, knee point 탐색
 //! ```
 
+mod baseline;
 mod daemon;
 mod report;
 mod stats;
+mod stress;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -38,6 +40,14 @@ const STORM_REQUESTS: usize = 1000;
 
 /// warm path 표본 수.
 const WARM_REQUESTS: usize = 2000;
+
+/// lifecycle stress 기본값. (PRD §43)
+const STRESS_CYCLES: usize = 1000;
+const STRESS_APPS: usize = 10;
+
+/// sustained warm load 기본값.
+const SUSTAINED_SECONDS: u64 = 30;
+const SUSTAINED_CONNECTIONS: usize = 8;
 
 fn main() -> std::process::ExitCode {
     match run() {
@@ -70,11 +80,59 @@ fn run() -> Result<String, String> {
         report.sweep_row(measure_sweep(&options, concurrency)?);
     }
 
+    // stress는 오래 걸린다. release gate에서만 켠다. (PRD §43)
+    if options.stress {
+        eprintln!("running {} lifecycle cycles...", options.stress_cycles);
+        report.stress(stress::run(
+            &options.nimwaked,
+            &options.echo_server,
+            options.stress_cycles,
+            options.stress_apps,
+        )?);
+
+        eprintln!(
+            "running sustained warm load for {}s...",
+            options.sustained_seconds
+        );
+        report.sustained(stress::sustained(
+            &options.nimwaked,
+            &options.echo_server,
+            Duration::from_secs(options.sustained_seconds),
+            SUSTAINED_CONNECTIONS,
+        )?);
+    }
+
+    // 직전 release와 비교한다. 없으면 이번 것이 첫 baseline이 된다. (PRD §73)
+    if let Some(path) = &options.baseline {
+        match baseline::Baseline::load(path) {
+            Some(previous) => report.compare_with(previous),
+            None => eprintln!("no baseline at {}; this run becomes one", path.display()),
+        }
+    }
+
     let text = report.render();
     if let Some(path) = &options.out {
         std::fs::write(path, &text)
             .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
         eprintln!("report written to {}", path.display());
+    }
+    if let Some(path) = &options.baseline_out {
+        std::fs::write(path, report.baseline().render())
+            .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+        eprintln!("baseline written to {}", path.display());
+    }
+
+    // correctness만 실패 사유다. 성능 수치는 기록만 한다. (PRD §44, §73)
+    let problems = report.correctness_problems();
+    if !problems.is_empty() {
+        return Err(format!(
+            "correctness gate failed:
+  {}",
+            problems.join(
+                "
+  "
+            )
+        ));
     }
 
     Ok(text)
@@ -84,8 +142,16 @@ struct Options {
     nimwaked: PathBuf,
     echo_server: PathBuf,
     out: Option<PathBuf>,
+    /// 직전 release의 baseline. 있으면 비교표를 싣는다.
+    baseline: Option<PathBuf>,
+    /// 이번 실행을 다음 비교를 위해 남길 곳.
+    baseline_out: Option<PathBuf>,
     commit: String,
     max_concurrency: usize,
+    stress: bool,
+    stress_cycles: usize,
+    stress_apps: usize,
+    sustained_seconds: u64,
 }
 
 impl Options {
@@ -100,8 +166,14 @@ impl Options {
             nimwaked: bin_dir.join("nimwaked"),
             echo_server: bin_dir.join("echo-server"),
             out: None,
+            baseline: None,
+            baseline_out: None,
             commit: std::env::var("GITHUB_SHA").unwrap_or_else(|_| "unknown".to_owned()),
             max_concurrency: usize::MAX,
+            stress: false,
+            stress_cycles: STRESS_CYCLES,
+            stress_apps: STRESS_APPS,
+            sustained_seconds: SUSTAINED_SECONDS,
         };
 
         let mut args = std::env::args().skip(1);
@@ -111,7 +183,25 @@ impl Options {
                 "--nimwaked" => options.nimwaked = PathBuf::from(value()?),
                 "--echo-server" => options.echo_server = PathBuf::from(value()?),
                 "--out" => options.out = Some(PathBuf::from(value()?)),
+                "--baseline" => options.baseline = Some(PathBuf::from(value()?)),
+                "--baseline-out" => options.baseline_out = Some(PathBuf::from(value()?)),
                 "--commit" => options.commit = value()?,
+                "--stress" => options.stress = true,
+                "--stress-cycles" => {
+                    options.stress_cycles = value()?
+                        .parse()
+                        .map_err(|_| "`--stress-cycles` expects a number".to_owned())?;
+                }
+                "--sustained-seconds" => {
+                    options.sustained_seconds = value()?
+                        .parse()
+                        .map_err(|_| "`--sustained-seconds` expects a number".to_owned())?;
+                }
+                "--stress-apps" => {
+                    options.stress_apps = value()?
+                        .parse()
+                        .map_err(|_| "`--stress-apps` expects a number".to_owned())?;
+                }
                 "--max-concurrency" => {
                     options.max_concurrency = value()?
                         .parse()

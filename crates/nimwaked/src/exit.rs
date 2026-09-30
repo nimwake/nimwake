@@ -9,6 +9,11 @@
 //! "기동 직후 연속 종료" 같은 휴리스틱에 기대야 한다.
 //!
 //! `sysexits` 관례를 따른다.
+//!
+//! serving은 Unix에서만 한다. 다른 플랫폼은 manifest 검증까지만 수행하므로
+//! 설정 오류 말고는 닿는 실패가 없다. 그래도 계약 표는 플랫폼과 무관하게 한곳에 둔다.
+
+#![cfg_attr(not(unix), allow(dead_code))]
 
 use std::process::ExitCode;
 

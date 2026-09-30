@@ -1,0 +1,214 @@
+# Release Gate
+#
+# 요구사항: .docs/prd/03-delivery/06-ci-strategy.md (PRD §44),
+#           .docs/prd/03-delivery/04-stress-tests.md (PRD §43),
+#           .docs/prd/03-delivery/07-performance-baseline.md (PRD §73)
+#
+# 차단 사유로 삼는 것은 **correctness뿐이다.**
+#
+#   duplicate process == 0
+#   orphan process    == 0
+#   deadlock          == 0
+#   lost waiter       == 0
+#   HTTP errors       == 0
+#
+# 성능 수치는 gate가 아니라 리포트로 누적한다. GitHub-hosted runner는 편차가 커서
+# 절대 수치를 gate로 쓰기에 적절하지 않다. baseline이 충분히 쌓인 뒤에
+# `proxy overhead +30% 이상` 같은 상대 threshold를 도입한다.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # correctness gate. 여기가 실패하면 artifact를 publish하지 않는다.
+  qualify:
+    name: correctness + stress
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          rustup show active-toolchain
+          cargo --version
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-release-
+
+      - name: Build
+        run: cargo build --workspace --release
+
+      # 단위 · 동시성 · lifecycle · gateway · E2E가 모두 여기 들어 있다.
+      - name: Tests
+        run: cargo test --workspace --all-features --release
+
+      # 직전 release의 baseline. 없으면 이번 것이 첫 baseline이 된다.
+      - name: Fetch the previous baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --pattern baseline.txt --dir previous 2>/dev/null \
+            || echo "no previous release to compare against"
+
+      # cold-start storm · lifecycle stress · sustained warm load · 누수 검증. (PRD §42–§43)
+      # 이 단계가 실패하면 release가 멈춘다.
+      - name: Stress and leak checks
+        run: |
+          compare=""
+          if [ -f previous/baseline.txt ]; then
+            compare="--baseline previous/baseline.txt"
+          fi
+
+          # shellcheck disable=SC2086
+          ./target/release/nimwake-bench \
+            --commit "${GITHUB_REF_NAME}" \
+            --stress \
+            --out performance-report.md \
+            --baseline-out baseline.txt \
+            ${compare}
+
+      - name: Publish the report to the job summary
+        if: always()
+        run: cat performance-report.md >> "${GITHUB_STEP_SUMMARY}" || true
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-report
+          path: |
+            performance-report.md
+            baseline.txt
+          retention-days: 365
+
+      # daemon과 child가 모두 정리됐는지 본다. (Invariant 10 / PRD §71)
+      - name: Assert nothing survived
+        run: |
+          leftover=$(pgrep -c -x nimwaked || true)
+          if [ "${leftover}" != "0" ]; then
+            echo "::error::${leftover} nimwaked process(es) survived the run"
+            exit 1
+          fi
+          echo "no nimwaked left behind"
+
+  # aarch64 Linux 바이너리. Android 실기기 검증이 이것을 쓴다. (이슈 #3)
+  #
+  # musl static으로 빌드해 proot Ubuntu의 glibc 버전과 무관하게 실행되도록 한다.
+  # 빌드 방식은 `cross`다. Docker만 있으면 되고 Rust 생태계의 표준 경로다.
+  aarch64:
+    name: aarch64 musl binaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross
+        run: cargo install cross --locked --version 0.2.5
+
+      - name: Build
+        run: cross build --release --workspace --target aarch64-unknown-linux-musl
+
+      - name: Collect binaries
+        run: |
+          out="nimwake-aarch64-${GITHUB_SHA}"
+          mkdir -p "${out}"
+          src=target/aarch64-unknown-linux-musl/release
+
+          for binary in nimwaked echo-server crash-server group-server slow-start-server; do
+            cp "${src}/${binary}" "${out}/"
+          done
+
+          {
+            echo "commit=${GITHUB_SHA}"
+            echo "ref=${GITHUB_REF_NAME}"
+            echo "target=aarch64-unknown-linux-musl"
+            echo "built_with=cross $(cross --version | head -1)"
+            echo "rustc=$(rustc --version)"
+            echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > "${out}/BUILD_INFO"
+
+          file "${out}/nimwaked"
+          echo "OUT_DIR=${out}" >> "${GITHUB_ENV}"
+
+      # Android 동작을 CI가 증명하지는 않는다. 바이너리가 aarch64에서 실행은 되는지만 본다.
+      # manifest가 없으므로 설정 오류(78)로 끝나야 한다. (PRD §74)
+      - name: Smoke under qemu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static
+          mkdir -p empty-apps
+
+          set +e
+          qemu-aarch64-static "${OUT_DIR}/nimwaked" --apps empty-apps 2>smoke.log
+          code=$?
+          set -e
+
+          cat smoke.log
+          if [ "${code}" != "78" ]; then
+            echo "::error::expected exit code 78 (EX_CONFIG), got ${code}"
+            exit 1
+          fi
+          grep -q "no manifests found" smoke.log
+          echo "aarch64 binary runs and reports a configuration failure"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.OUT_DIR }}
+          path: ${{ env.OUT_DIR }}/
+          retention-days: 90
+
+  # correctness gate를 통과해야만 여기까지 온다.
+  publish:
+    name: publish release
+    needs: [qualify, aarch64]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package
+        run: |
+          mkdir -p release
+          cp artifacts/performance-report/performance-report.md release/
+          cp artifacts/performance-report/baseline.txt release/
+          tar -czf "release/nimwake-aarch64-linux-musl.tar.gz" \
+            -C "artifacts/nimwake-aarch64-${GITHUB_SHA}" .
+          ls -la release
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file release/performance-report.md \
+            release/*

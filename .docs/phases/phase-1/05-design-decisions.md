@@ -100,6 +100,46 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## 구현 중 확정 (`v0.0.5`)
+
+| #   | 결정                                             | 이유                                                                                                     | 반영 위치                                                |
+| --- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| D38 | idle timer는 app 하나에 하나만 둔다               | 요청마다 새 timer를 띄우면서 이전 것을 취소하지 않았다. 세대 검사는 **의미론적 안전**은 주지만 **메모리 상한**은 주지 않는다. 지속 부하 120초에 RSS가 57MB 늘었다. | [Invariant 9](../../prd/02-architecture/02-lifecycle-invariants.md), [§29](../../prd/02-architecture/07-scale-to-zero.md) |
+| D39 | lifecycle stress를 여러 app에 나눠 돌린다          | 한 cycle의 길이는 idle timeout이고 그 하한은 1초다. 직렬이면 1000 cycle이 20분 가까이 걸린다. 반복 기동·종료의 누수를 보는 것이 목적이므로 나누어도 목적은 그대로다. | [§43](../../prd/03-delivery/04-stress-tests.md)          |
+| D40 | aarch64는 `cross`로 빌드한다 (musl static)         | Docker만 있으면 되고 Rust 생태계의 표준 경로다. 네이티브 arm64 runner는 현재 요금제에서 쓸 수 있는지 불확실하고, `cargo-zigbuild`는 zig 버전을 따로 관리해야 한다. musl static이라 proot Ubuntu의 glibc 버전과 무관하다. | 이슈 #3, [§48](../../prd/04-platform/01-environments.md) |
+| D41 | baseline은 `key=value` 한 줄씩                     | 이 파일을 읽는 쪽은 우리 자신뿐이다. 파서가 필요 없을 만큼 단순한 형태로 충분하다. 형식이 어긋난 줄은 건너뛴다 — 비교는 부가 정보이고, baseline 파일 하나 때문에 release가 멈추면 안 된다. | [§73](../../prd/03-delivery/07-performance-baseline.md)  |
+
+### D38을 발견한 경위
+
+sustained warm load를 처음 돌렸을 때 RSS가 30초에 4.8 → 19.3 MB로 올랐다.
+직선이어서 평탄해지는지 보려고 120초로 늘렸더니 61.8 MB까지 계속 올랐다.
+
+원인을 좁히는 데 세 번의 A/B가 필요했다.
+
+| 가설 | 결과 |
+| --- | --- |
+| 요청 trace(`--trace-json`)가 원인 | 아니다. 끄니 오히려 더 늘었다 (28.5 vs 27.6 B/req) |
+| glibc arena 보유 | 아니다. `MALLOC_ARENA_MAX=2`로도 그대로였다 |
+| idle timer 누적 | **맞다.** idle timeout만 3600초 → 2초로 바꾸니 +29.8 MB → +3.8 MB |
+
+마지막 A/B가 결정적이었다. **요청 수는 그대로 두고 timer의 수명만 바꿨다.**
+
+### 왜 lifecycle stress는 이것을 못 잡았나
+
+lifecycle stress는 idle timeout을 1초로 둔다. timer가 곧바로 만료되므로 쌓이지 않는다.
+누수는 **기동 없이 지속되는 경로**에 있었고, 그것을 보는 것이 sustained warm load다.
+PRD §43이 둘을 나눠 둔 이유가 여기서 드러났다.
+
+### 코드 수준 주의사항 (추가)
+
+- 테스트 port 할당에서 `seed + offset + attempt`에 나머지 연산을 한 번만 걸면 안 된다.
+  `offset 0 · attempt 1`과 `offset 1 · attempt 0`이 **같은 port**를 낸다.
+  첫 후보가 막힌 호출자가 옆 호출자의 port를 가져가고, `crash-server`의 readiness probe가
+  다른 테스트의 fixture에 붙어 "기동에 실패해야 한다"는 단언이 간헐적으로 깨졌다.
+  내준 port를 process 단위로 기록해 두어야 한다.
+
+---
+
 ## Host interface (이슈 #5 · #6 · #7)
 
 Core는 자기를 감독하는 host를 모른다. 그러나 supervisor는 `nimwaked`의 외부 동작에
