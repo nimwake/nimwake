@@ -1,7 +1,7 @@
 # Phase 4 — 플랫폼 확장
 
 > **목표 버전:** 미정 (Later)
-> **주제:** Android host tooling · 스트리밍 · 컨테이너 런타임 · 관측성
+> **주제:** Android host daemon · 스트리밍 · 컨테이너 런타임 · 관측성
 > **상태:** 후보 — 범위 미확정
 
 ---
@@ -21,7 +21,7 @@ Phase 4의 항목은 아직 커밋된 계획이 아니라 **후보 목록**이�
 | -------------------------- | ------------------------------------------------------------------------- |
 | Logging & Observability    | [§60](../../prd/05-beyond-mvp/02-platform-features.md)                     |
 | Security                   | [§61](../../prd/05-beyond-mvp/02-platform-features.md)                     |
-| Android host tooling       | [§49–§51](../../prd/04-platform/02-android.md)                             |
+| Android host daemon (`nimwake-hostd`) | [§49–§51](../../prd/04-platform/02-android.md). shell 기반 host tooling MVP는 [`nimwake-android` Phase 1](https://github.com/nimwake/nimwake-android/tree/main/.docs/phases/phase-1)로 옮겼다 ([D42](../phase-1/05-design-decisions.md)) |
 | WebSocket · SSE · 스트리밍 | [§24](../../prd/02-architecture/06-gateway-and-requests.md), [§63](../../prd/05-beyond-mvp/03-long-term-roadmap.md) |
 | Container / MicroVM Runtime | [§18](../../prd/02-architecture/04-runtime.md), [§63](../../prd/05-beyond-mvp/03-long-term-roadmap.md) |
 | Dashboard · 통합           | [§63](../../prd/05-beyond-mvp/03-long-term-roadmap.md)                     |

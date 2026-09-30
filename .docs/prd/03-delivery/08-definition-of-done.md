@@ -68,6 +68,19 @@
 - concurrency sweep 결과가 기록됨
 - performance report artifact가 release마다 생성됨
 
+### Android Device
+
+[§50](../04-platform/02-android.md)의 병렬 검증 결과. `nimwake-android` 검증 리포트로 판정한다.
+
+- Install
+- Boot recovery
+- Cold start
+- Scale-to-zero
+- Daemon recovery
+- Network recovery
+- 24h soak
+- 72h soak
+
 ---
 
 이 상태를:

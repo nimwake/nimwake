@@ -108,6 +108,7 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D39 | lifecycle stress를 여러 app에 나눠 돌린다          | 한 cycle의 길이는 idle timeout이고 그 하한은 1초다. 직렬이면 1000 cycle이 20분 가까이 걸린다. 반복 기동·종료의 누수를 보는 것이 목적이므로 나누어도 목적은 그대로다. | [§43](../../prd/03-delivery/04-stress-tests.md)          |
 | D40 | aarch64는 `cross`로 빌드한다 (musl static)         | Docker만 있으면 되고 Rust 생태계의 표준 경로다. 네이티브 arm64 runner는 현재 요금제에서 쓸 수 있는지 불확실하고, `cargo-zigbuild`는 zig 버전을 따로 관리해야 한다. musl static이라 proot Ubuntu의 glibc 버전과 무관하다. | 이슈 #3, [§48](../../prd/04-platform/01-environments.md) |
 | D41 | baseline은 `key=value` 한 줄씩                     | 이 파일을 읽는 쪽은 우리 자신뿐이다. 파서가 필요 없을 만큼 단순한 형태로 충분하다. 형식이 어긋난 줄은 건너뛴다 — 비교는 부가 정보이고, baseline 파일 하나 때문에 release가 멈추면 안 된다. | [§73](../../prd/03-delivery/07-performance-baseline.md)  |
+| D42 | Android 검증을 `v0.1.0` 이후 → `v0.0.3` 이후 병렬로 당긴다 | proot 아래의 `/proc` · signal · process group, Termux background kill, Android sleep은 Linux CI로 재현되지 않는다. `v0.1.0` 이후에 발견하면 구조 변경이 되고, 그 전에 발견하면 수정이 된다. 검증은 `nimwake-android`가 하고, 결과는 Core `v0.1.0` 체크리스트로 들어온다. | [§50](../../prd/04-platform/02-android.md), [§65](../../prd/03-delivery/08-definition-of-done.md), 이슈 #4 |
 
 ### D38을 발견한 경위
 

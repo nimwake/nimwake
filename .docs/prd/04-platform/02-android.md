@@ -63,7 +63,10 @@ nimwake-android
 
 ## 50. Android Validation
 
-Core `v0.1.0` 이후 실제 Android device에서 검증한다.
+Core `v0.0.3` 이후 [`nimwake-android`](https://github.com/nimwake/nimwake-android)에서 병렬로 검증한다. `v0.1.0` 전에 24h · 72h soak를 통과한다.
+
+`/proc` 가시성, proot 아래의 signal · process group, Termux background kill, Android sleep, Wi-Fi 재연결은 Linux CI로 재현되지 않는다.
+`v0.1.0` 이후에 발견하면 구조 변경이 되고, 그 전에 발견하면 수정이 된다.
 
 필수 시나리오:
 
