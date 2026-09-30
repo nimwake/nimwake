@@ -82,12 +82,26 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D18 | mailbox가 가득 차도 lease 반납은 반드시 전달                 | 반납을 버리면 `active_requests`가 0이 되지 못해 app이 영원히 잠들지 않는다.               | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D19 | `AppCommand::Status` 추가                                    | 상태 관측 경로가 없으면 테스트가 내부 필드를 들여다봐야 한다. 나중에 `nimwake status`로 이어진다. | [§15](../../prd/02-architecture/03-concurrency.md)      |
 
+## 구현 중 확정 (`v0.0.2`)
+
+| #   | 결정                                                              | 이유                                                                                                       | 반영 위치                                                    |
+| --- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| D20 | `ProcessHandle`의 생존이 process의 생존 조건                       | startup timeout은 `Runtime::start`를 **취소**하는 방식으로 적용된다. 취소된 future가 child를 남기면 cold start마다 orphan이 쌓인다. handle이 모두 drop되면 controller가 정리하게 해서 구조적으로 막았다. | [§70](../../prd/02-architecture/04-runtime.md)               |
+| D21 | `control`을 `Arc<dyn ProcessControl>`로 handle에 넣음              | runtime이 `ProcessId → Controller` 맵을 들면 죽은 entry를 걷어낼 책임이 새로 생긴다. 그 맵 자체가 누수 경로다. handle의 동일성은 `ProcessId`가 결정하도록 `PartialEq`를 직접 구현했다. | [§70](../../prd/02-architecture/04-runtime.md)               |
+| D22 | `ProcessRuntime`은 Unix 전용 (`#[cfg(unix)]`)                      | SIGTERM / SIGKILL / process group은 Windows에 대응물이 없다. Tier 1/2가 모두 Linux 계열이므로 이식 비용을 지불할 이유가 없다. | [§19](../../prd/02-architecture/04-runtime.md), [§48](../../prd/04-platform/01-environments.md) |
+| D23 | stdout/stderr는 inherit이 아니라 **drain**                          | daemon의 stdout이 어디로 가는지는 운영자가 정한다. daemon이 직접 읽어 app 이름과 함께 `tracing`으로 흘리면 그 선택과 무관하게 child가 막히지 않는다. | [§19](../../prd/02-architecture/04-runtime.md)               |
+
 ### 코드 수준 주의사항
 
 - lifecycle 시간 판단은 **`tokio::time::Instant`** 를 쓴다.
   `std::time::Instant`는 `tokio::time::pause()`의 가상 시계를 따르지 않아 idle timeout 테스트가 실시간에 묶인다.
 - `stop`이 끝나면 `StopCompleted`와 `ProcessExited`가 **둘 다** 도착한다.
   먼저 온 것이 전이를 수행하고 나중 것은 stale로 무시된다. 테스트는 event 개수를 세지 말고 목표 상태까지 진행시켜야 한다.
+- process group에 `SIGKILL`을 보내는 것은 **reap보다 먼저**여야 한다.
+  직접 child가 zombie로 남아 있는 동안에만 그 pid(= pgid)가 예약되어 있다. 거둔 뒤에 보내면 재사용된 pid의 엉뚱한 group을 죽일 수 있다.
+- 통합 테스트의 port를 `bind(:0)`으로 고르면 안 된다.
+  돌려준 직후 커널이 같은 번호를 다른 연결의 ephemeral port로 내주고, readiness probe가 엉뚱한 listener에 붙는다.
+  실제로 이 경로에서 테스트가 간헐적으로 깨졌다. ephemeral range 밖에서 원자 counter로 고른다.
 
 ---
 

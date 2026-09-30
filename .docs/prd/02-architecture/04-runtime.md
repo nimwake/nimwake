@@ -77,6 +77,12 @@ Nimwake
 
 Rust implementation은 기본적으로 `tokio::process`를 사용한다.
 
+`ProcessRuntime`은 **Unix 전용**이다. 종료 계약(SIGTERM → timeout → SIGKILL)과
+process group 정리가 POSIX 신호 위에 서 있고, Tier 1/2 대상이 모두 Linux 계열이기 때문이다. → [§48](../04-platform/01-environments.md)
+
+Windows에는 SIGTERM에 대응하는 개념이 없어 graceful shutdown을 별도 규약으로 설계해야 한다.
+Core MVP 범위 밖이다.
+
 ---
 
 ### stdout / stderr 처리
@@ -105,7 +111,7 @@ Raw process runtime은 strong sandbox를 제공하지 않는다.
 
 - trusted application만 실행
 - app별 working directory 분리
-- app별 environment / secret 분리
+- app별 environment / secret 분리 (`[runtime.env]`, daemon 환경 위에 overlay)
 - internal application port는 loopback bind 권장
 - public exposure는 Nimwake Gateway를 통해 수행
 - hostile multi-tenant workload는 지원하지 않음
@@ -140,7 +146,12 @@ AppManager와 monitor가 같은 `Child`를 동시에 다루는 구조는 허용�
 ```rust
 struct ProcessHandle {
     id: ProcessId,
-    control: ProcessControl,
+    control: Arc<dyn ProcessControl>,
+}
+
+trait ProcessControl {
+    async fn wait(&self) -> ExitStatus;
+    async fn stop(&self, timeout: Duration) -> Result<()>;
 }
 
 struct StartedProcess {
@@ -148,6 +159,12 @@ struct StartedProcess {
     backend: Backend,
 }
 ```
+
+**handle의 생존이 process의 생존 조건이다.**
+`ProcessHandle`의 모든 복제본이 drop되면 controller는 대상 process를 정리한다.
+
+startup timeout은 호출자가 `Runtime::start`를 취소하는 방식으로 적용되므로,
+이 규칙이 없으면 취소된 cold start마다 child가 고아로 남는다. → [Invariant 10](02-lifecycle-invariants.md)
 
 `ProcessController`의 책임:
 

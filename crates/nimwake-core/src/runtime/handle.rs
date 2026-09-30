@@ -6,26 +6,68 @@
 //! AppManager는 식별자와 제어 경로만 가진다.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
 
+use async_trait::async_trait;
+
+use crate::error::RuntimeError;
 use crate::id::ProcessId;
 
+/// handle 뒤에 있는 실제 process를 제어하는 경로. (PRD §70의 `control`)
+///
+/// runtime adapter마다 구현이 다르다. `ProcessRuntime`에서는 `Child`를 소유한
+/// controller task로 가는 채널이고, `FakeRuntime`에서는 in-memory 상태다.
+///
+/// AppManager가 `Child`를 직접 만지지 못하게 하는 경계다.
+#[async_trait]
+pub trait ProcessControl: Send + Sync + std::fmt::Debug {
+    /// process가 종료될 때까지 기다린다. 이미 종료됐으면 즉시 반환한다.
+    async fn wait(&self) -> ExitStatus;
+
+    /// graceful 종료를 시도하고, timeout을 넘기면 강제 종료한다.
+    async fn stop(&self, timeout: Duration) -> Result<(), RuntimeError>;
+}
+
 /// 실행 중인 process를 가리키는 불투명 handle.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// **이 handle의 생존이 process의 생존 조건이다.** 모든 복제본이 drop되면
+/// controller는 대상 process를 정리한다. startup timeout으로 `Runtime::start`가
+/// 취소돼 handle이 버려지는 경우에도 child가 남지 않는 이유다. (Invariant 10 / PRD §71)
+#[derive(Debug, Clone)]
 pub struct ProcessHandle {
     id: ProcessId,
+    control: Arc<dyn ProcessControl>,
 }
 
 impl ProcessHandle {
     #[must_use]
-    pub const fn new(id: ProcessId) -> Self {
-        Self { id }
+    pub fn new(id: ProcessId, control: Arc<dyn ProcessControl>) -> Self {
+        Self { id, control }
     }
 
     #[must_use]
     pub const fn id(&self) -> ProcessId {
         self.id
     }
+
+    #[must_use]
+    pub fn control(&self) -> &Arc<dyn ProcessControl> {
+        &self.control
+    }
 }
+
+/// process의 동일성은 [`ProcessId`]가 결정한다.
+///
+/// stale event 판정(Invariant 8)이 보는 것도 id 하나뿐이다.
+/// control 경로는 같은 process를 가리키는 복제본끼리 다를 수 있으므로 비교에 넣지 않는다.
+impl PartialEq for ProcessHandle {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for ProcessHandle {}
 
 /// proxy가 요청을 전달할 대상 주소.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

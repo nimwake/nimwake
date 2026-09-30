@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -16,7 +16,7 @@ use crate::app::AppSpec;
 use crate::error::RuntimeError;
 use crate::id::{ProcessId, ProcessIdSeq};
 
-use super::handle::{Backend, ExitStatus, ProcessHandle, StartedProcess};
+use super::handle::{Backend, ExitStatus, ProcessControl, ProcessHandle, StartedProcess};
 use super::Runtime;
 
 /// [`FakeRuntime`]의 동작을 조정한다.
@@ -30,15 +30,74 @@ pub struct FakeRuntimeConfig {
     pub failing_starts: usize,
 }
 
+/// in-memory process. `ProcessHandle`의 control 경로이기도 하다.
 #[derive(Debug)]
 struct FakeProcess {
     exit: watch::Sender<Option<ExitStatus>>,
 }
 
+impl FakeProcess {
+    fn terminate(&self, status: ExitStatus) {
+        if self.exit.borrow().is_none() {
+            // `send`는 수신자가 하나도 없으면 실패한다.
+            // monitor task가 아직 subscribe하기 전일 수 있으므로 반드시 값을 남겨야 한다.
+            self.exit.send_replace(Some(status));
+        }
+    }
+
+    fn is_alive(&self) -> bool {
+        self.exit.borrow().is_none()
+    }
+}
+
+#[async_trait]
+impl ProcessControl for FakeProcess {
+    async fn wait(&self) -> ExitStatus {
+        let mut receiver = self.exit.subscribe();
+        loop {
+            if let Some(status) = *receiver.borrow_and_update() {
+                return status;
+            }
+            if receiver.changed().await.is_err() {
+                return ExitStatus::unknown();
+            }
+        }
+    }
+
+    async fn stop(&self, _timeout: Duration) -> Result<(), RuntimeError> {
+        self.terminate(ExitStatus::from_code(0));
+        Ok(())
+    }
+}
+
+/// 어떤 runtime에도 속하지 않은 control.
+///
+/// 단위 테스트가 `StartedProcess`를 직접 조립할 때 쓴다. 가리키는 process가 없으므로
+/// `wait`는 곧바로 [`ExitStatus::unknown`]을 돌려준다.
+#[derive(Debug)]
+struct DetachedProcess;
+
+#[async_trait]
+impl ProcessControl for DetachedProcess {
+    async fn wait(&self) -> ExitStatus {
+        ExitStatus::unknown()
+    }
+
+    async fn stop(&self, _timeout: Duration) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+}
+
+/// 실재하지 않는 process를 가리키는 [`ProcessHandle`]을 만든다. 테스트 전용이다.
+#[must_use]
+pub fn detached_handle(process_id: ProcessId) -> ProcessHandle {
+    ProcessHandle::new(process_id, Arc::new(DetachedProcess))
+}
+
 #[derive(Debug)]
 struct State {
     config: FakeRuntimeConfig,
-    processes: HashMap<ProcessId, FakeProcess>,
+    processes: HashMap<ProcessId, Arc<FakeProcess>>,
 }
 
 /// 결정적으로 조작 가능한 in-memory runtime.
@@ -90,7 +149,7 @@ impl FakeRuntime {
         state
             .processes
             .values()
-            .filter(|process| process.exit.borrow().is_none())
+            .filter(|process| process.is_alive())
             .count()
     }
 
@@ -111,17 +170,8 @@ impl FakeRuntime {
     ///
     /// 해당 process를 `wait`하던 monitor task가 깨어나 `ProcessExited`를 보고한다.
     pub fn crash(&self, process_id: ProcessId) {
-        self.terminate(process_id, ExitStatus::from_code(1));
-    }
-
-    fn terminate(&self, process_id: ProcessId, status: ExitStatus) {
-        let state = self.lock();
-        if let Some(process) = state.processes.get(&process_id) {
-            if process.exit.borrow().is_none() {
-                // `send`는 수신자가 하나도 없으면 실패한다.
-                // monitor task가 아직 subscribe하기 전일 수 있으므로 반드시 값을 남겨야 한다.
-                process.exit.send_replace(Some(status));
-            }
+        if let Some(process) = self.lock().processes.get(&process_id) {
+            process.terminate(ExitStatus::from_code(1));
         }
     }
 
@@ -159,42 +209,23 @@ impl Runtime for FakeRuntime {
 
         let process_id = self.process_ids.next_id();
         let (exit, _) = watch::channel(None);
+        let process = Arc::new(FakeProcess { exit });
         self.lock()
             .processes
-            .insert(process_id, FakeProcess { exit });
+            .insert(process_id, Arc::clone(&process));
 
         let addr = SocketAddr::from(([127, 0, 0, 1], spec.server.port));
         Ok(StartedProcess {
-            handle: ProcessHandle::new(process_id),
+            handle: ProcessHandle::new(process_id, process),
             backend: Backend::new(addr),
         })
     }
 
     async fn wait(&self, handle: &ProcessHandle) -> ExitStatus {
-        let receiver = {
-            let state = self.lock();
-            state
-                .processes
-                .get(&handle.id())
-                .map(|process| process.exit.subscribe())
-        };
-
-        let Some(mut receiver) = receiver else {
-            return ExitStatus::unknown();
-        };
-
-        loop {
-            let current = *receiver.borrow_and_update();
-            if let Some(status) = current {
-                return status;
-            }
-            if receiver.changed().await.is_err() {
-                return ExitStatus::unknown();
-            }
-        }
+        handle.control().wait().await
     }
 
-    async fn stop(&self, handle: &ProcessHandle, _timeout: Duration) -> Result<(), RuntimeError> {
+    async fn stop(&self, handle: &ProcessHandle, timeout: Duration) -> Result<(), RuntimeError> {
         self.stop_count.fetch_add(1, Ordering::SeqCst);
 
         let delay = self.lock().config.stop_delay;
@@ -202,7 +233,6 @@ impl Runtime for FakeRuntime {
             tokio::time::sleep(delay).await;
         }
 
-        self.terminate(handle.id(), ExitStatus::from_code(0));
-        Ok(())
+        handle.control().stop(timeout).await
     }
 }

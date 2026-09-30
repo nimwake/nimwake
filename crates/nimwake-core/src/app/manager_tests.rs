@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use super::*;
 use crate::app::AppStateName;
 use crate::id::ProcessId;
-use crate::runtime::{Backend, FakeRuntime};
+use crate::runtime::{detached_handle, Backend, FakeRuntime};
 
 fn test_spec(idle_seconds: u64, max_pending_requests: usize) -> AppSpec {
     AppSpec::from_toml(&format!(
@@ -127,7 +127,7 @@ impl Harness {
 
     fn fake_started(process_id: u64) -> StartedProcess {
         StartedProcess {
-            handle: ProcessHandle::new(ProcessId::from_raw(process_id)),
+            handle: detached_handle(ProcessId::from_raw(process_id)),
             backend: Backend::new(SocketAddr::from(([127, 0, 0, 1], 3101))),
         }
     }
