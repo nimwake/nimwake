@@ -1,0 +1,57 @@
+[package]
+name = "nimwake-fixtures"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Nimwake test fixtures: small servers that exercise ProcessRuntime"
+publish = false
+
+# ProcessRuntime 통합 테스트는 이 패키지 안에 둔다.
+# `CARGO_BIN_EXE_<name>`은 같은 패키지의 bin만 노출하기 때문이다.
+# stubborn-server만 nix를 쓴다. Windows에서도 workspace 전체가 빌드되도록 target을 건다.
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+
+[dev-dependencies]
+nimwake-core.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+# workspace의 `unsafe_code = "forbid"`는 상속하지 않는다.
+# stubborn-server가 SIGTERM을 무시하려면 `sigaction`이 필요하고, forbid는 국소 허용이 불가능하다.
+# core와 daemon 크레이트의 금지는 그대로다. 여기는 fixture 전용 crate다.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+[[bin]]
+name = "echo-server"
+path = "src/bin/echo_server.rs"
+
+[[bin]]
+name = "slow-start-server"
+path = "src/bin/slow_start_server.rs"
+
+[[bin]]
+name = "crash-server"
+path = "src/bin/crash_server.rs"
+
+[[bin]]
+name = "noisy-server"
+path = "src/bin/noisy_server.rs"
+
+[[bin]]
+name = "stubborn-server"
+path = "src/bin/stubborn_server.rs"
+
+[[bin]]
+name = "exit-after-server"
+path = "src/bin/exit_after_server.rs"
+
+[[bin]]
+name = "group-server"
+path = "src/bin/group_server.rs"

@@ -1,12 +1,12 @@
 //! Nimwake daemon.
 //!
-//! `v0.0.1 — Lifecycle Foundation` 범위에서 이 바이너리가 하는 일은
+//! `v0.0.2` 시점에서 이 바이너리가 하는 일은
 //! **manifest를 읽고 기동 단계에서 검증하는 것**까지다.
 //!
 //! 검증 실패를 런타임까지 미루면 cold start 시점에야 port 충돌이 드러난다. (PRD §21)
 //!
-//! - 실제 process 기동(`ProcessRuntime`)은 `v0.0.2`
-//! - HTTP gateway와 scale-to-zero 서빙은 `v0.0.3`
+//! `ProcessRuntime`은 `v0.0.2`에서 들어왔지만, application을 깨울 주체인
+//! HTTP gateway가 아직 없다. registry를 띄우고 서빙하는 것은 `v0.0.3`이다.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -66,9 +66,7 @@ fn run(apps_dir: &PathBuf) -> Result<(), String> {
     }
 
     println!();
-    println!(
-        "serving is not implemented yet: ProcessRuntime lands in v0.0.2, the gateway in v0.0.3."
-    );
+    println!("serving is not implemented yet: the HTTP gateway lands in v0.0.3.");
 
     Ok(())
 }

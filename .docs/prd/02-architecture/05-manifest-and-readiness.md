@@ -23,6 +23,10 @@ port = 3101
 command = ["node", "server.js"]
 working_dir = "./examples/hello-node"
 
+# 선택. daemon의 환경 위에 덮어쓴다. (§20)
+[runtime.env]
+NODE_ENV = "production"
+
 [lifecycle]
 idle_timeout_seconds = 60
 startup_timeout_seconds = 5

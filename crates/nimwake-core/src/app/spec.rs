@@ -5,6 +5,7 @@
 //! manifest는 특정 runtime이 아니라 동작을 기술한다.
 //! 계약은 한 문장이다: "이 command를 실행하면 이 port에서 HTTP application이 listen한다."
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -44,6 +45,12 @@ pub struct ServerSpec {
 pub struct RuntimeSpec {
     pub command: Vec<String>,
     pub working_dir: PathBuf,
+    /// app별 environment. daemon의 환경 위에 덮어쓴다. (PRD §20)
+    ///
+    /// `PATH` 같은 기본 환경까지 지우면 대부분의 interpreter가 실행되지 않으므로
+    /// MVP는 전체 격리가 아니라 overlay로 둔다. 강한 격리는 container runtime의 주제다.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

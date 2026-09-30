@@ -7,6 +7,8 @@
 
 mod fake;
 mod handle;
+#[cfg(unix)]
+mod process;
 
 use std::time::Duration;
 
@@ -15,12 +17,14 @@ use async_trait::async_trait;
 use crate::app::AppSpec;
 use crate::error::RuntimeError;
 
-pub use fake::{FakeRuntime, FakeRuntimeConfig};
-pub use handle::{Backend, ExitStatus, ProcessHandle, StartedProcess};
+pub use fake::{detached_handle, FakeRuntime, FakeRuntimeConfig};
+pub use handle::{Backend, ExitStatus, ProcessControl, ProcessHandle, StartedProcess};
+#[cfg(unix)]
+pub use process::ProcessRuntime;
 
 /// application을 실행·감시·종료하는 adapter.
 ///
-/// `v0.0.1`은 [`FakeRuntime`]만 제공한다. 실제 process 구현(`ProcessRuntime`)은 `v0.0.2`다.
+/// 실제 구현은 [`ProcessRuntime`](process::ProcessRuntime)(Unix 전용), 테스트 구현은 [`FakeRuntime`]이다.
 #[async_trait]
 pub trait Runtime: Send + Sync + 'static {
     /// application을 시작하고 readiness까지 확인한 뒤 backend를 돌려준다.

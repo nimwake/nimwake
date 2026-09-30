@@ -66,3 +66,14 @@ jobs:
             echo "::error::unbounded channel found — see PRD §69 Backpressure (Invariant 9)"
             exit 1
           fi
+
+      # Child를 소유하는 코드 경로는 ProcessController 하나뿐이어야 한다. (PRD §70)
+      # AppManager와 monitor가 같은 Child를 다루기 시작하면 소유권 규칙이 조용히 무너진다.
+      - name: Forbid Child ownership outside ProcessController
+        run: |
+          leaks=$(grep -rn "^use tokio::process" crates/nimwake-core crates/nimwaked --include="*.rs" | grep -v "controller.rs" || true)
+          if [ -n "$leaks" ]; then
+            echo "::error::tokio::process imported outside ProcessController — see PRD §70 Process Ownership"
+            echo "$leaks"
+            exit 1
+          fi
