@@ -66,9 +66,10 @@ jobs:
             --commit "${GITHUB_SHA}" \
             --out performance-report.md
 
+      # 앞 단계가 실패하면 리포트가 없다. 그때 여기서 두 번째 오류를 내지 않는다.
       - name: Publish the report to the job summary
         if: always()
-        run: cat performance-report.md >> "${GITHUB_STEP_SUMMARY}"
+        run: cat performance-report.md >> "${GITHUB_STEP_SUMMARY}" || true
 
       - name: Upload the report
         if: always()
@@ -77,6 +78,7 @@ jobs:
           name: performance-report-${{ github.sha }}
           path: performance-report.md
           retention-days: 90
+          if-no-files-found: ignore
 
       # daemon과 child가 모두 정리됐는지 본다. (Invariant 10 / PRD §71)
       - name: Assert nothing survived
