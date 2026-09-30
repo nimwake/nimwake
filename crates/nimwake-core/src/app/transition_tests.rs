@@ -131,7 +131,8 @@ impl Harness {
     }
 }
 
-// ------------------------------------------------------------- effect 들여다보기
+// 아래 도구들은 effect 목록에서 필요한 것만 꺼낸다.
+// 테스트 본문이 Effect 패턴 매칭으로 덮이지 않게 하려는 것이다.
 
 fn only_start(effects: &[Effect]) -> OperationId {
     let ids: Vec<_> = effects
@@ -193,7 +194,7 @@ fn monitored(effects: &[Effect]) -> usize {
         .count()
 }
 
-// --------------------------------------------------------- 상태 전이 (PRD §39)
+// PRD §39 상태 전이 표. 표의 각 행이 아래 테스트 하나에 대응한다.
 
 #[test]
 fn sleeping_plus_acquire_enters_starting() {
@@ -298,7 +299,7 @@ fn failed_plus_acquire_enters_starting() {
     only_start(&effects);
 }
 
-// ---------------------------------------------------------------- idle (PRD §28–§29)
+// idle timer. 정지 조건은 세 가지가 모두 맞을 때뿐이다. (PRD §28–§29)
 
 #[test]
 fn returning_the_last_lease_arms_the_idle_timer() {
@@ -429,7 +430,8 @@ fn stopping_plus_acquire_restarts_after_the_stop_completes() {
     assert_ne!(h.process_id(), first_process);
 }
 
-// ---------------------------------------------------- stale event (Invariant 8)
+// PRD §39 stale event 표.
+// actor 밖에서 온 event는 도착 시점에 이미 무효일 수 있다. 그때는 상태를 바꾸지 않는다. (Invariant 8)
 
 #[test]
 fn a_stale_start_completed_is_ignored() {
@@ -520,7 +522,7 @@ fn a_duplicate_request_finished_does_not_change_the_counter() {
     );
 }
 
-// ------------------------------------------------------- backpressure (PRD §69)
+// 대기열 상한. 모든 대기열은 bounded다. (Invariant 9 / PRD §69)
 
 #[test]
 fn startup_failure_rejects_every_waiter() {
@@ -555,7 +557,7 @@ fn the_pending_waiter_limit_rejects_with_overloaded() {
     ));
 }
 
-// ------------------------------------------------------- shutdown (Invariant 10)
+// daemon 종료. child의 수명은 daemon의 수명을 넘지 않는다. (Invariant 10)
 
 #[test]
 fn shutdown_while_sleeping_confirms_immediately() {
@@ -658,7 +660,7 @@ fn teardown_stops_a_running_process() {
     assert_eq!(stops(&effects), vec![None]);
 }
 
-// ----------------------------------------------------------------- 관측
+// 상태 조회. 테스트가 내부 필드를 들여다보지 않게 하려고 넣은 경로다. (D19)
 
 #[test]
 fn status_reports_the_current_state() {

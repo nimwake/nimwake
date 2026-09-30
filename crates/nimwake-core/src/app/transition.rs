@@ -15,6 +15,15 @@
 //! 덕분에 전이 테스트는 async runtime 없이, fake 없이, 이벤트 루프를 굴리지 않고
 //! "이 상태에서 이 이벤트가 오면 저 상태가 되고 이것들을 예약한다"를 그대로 쓴다.
 //!
+//! ## 구성
+//!
+//! ```text
+//! on_*        AppCommand 하나에 대응하는 전이. 상태를 값으로 받아 값으로 돌려준다.
+//! begin_*     긴 작업을 시작하는 전이. Effect를 하나 남긴다.
+//! finish_*    긴 작업이 끝났을 때의 전이.
+//! Machine     상태를 전이 함수들 사이로 흘려보내는 껍데기.
+//! ```
+//!
 //! ## 두 가지 예외
 //!
 //! 1. **식별자 발급**([`Ids`]). 새 `OperationId` / `LeaseId` / `IdleGeneration`은
@@ -88,8 +97,6 @@ impl Step {
         Self { state, effects }
     }
 }
-
-// ------------------------------------------------------------------- acquire
 
 /// RUNNING 확보와 active request 예약을 한 전이 안에서 처리한다. (Invariant 7)
 ///
@@ -197,8 +204,6 @@ pub(super) fn on_request_finished(state: AppState, lease_id: LeaseId, ctx: &Ctx<
     let (running, effect) = arm_idle_timer(running, ctx);
     Step::with(AppState::Running(running), vec![effect])
 }
-
-// --------------------------------------------------------------- start / stop
 
 fn begin_start(waiters: Vec<Waiter>, ctx: &Ctx<'_>) -> Step {
     let operation_id = ctx.ids.operations.next_id();
@@ -430,8 +435,6 @@ fn finish_stop(waiters: Vec<Waiter>, ctx: &Ctx<'_>) -> Step {
     }
 }
 
-// ---------------------------------------------------------------------- idle
-
 fn arm_idle_timer(mut running: RunningState, ctx: &Ctx<'_>) -> (RunningState, Effect) {
     let generation = ctx.ids.idle_generations.next_id();
     running.idle_generation = generation;
@@ -468,8 +471,6 @@ pub(super) fn on_idle_timeout(state: AppState, generation: IdleGeneration, ctx: 
         }
     }
 }
-
-// ------------------------------------------------------------------ shutdown
 
 pub(super) fn on_stop(state: AppState, reason: StopReason, ctx: &Ctx<'_>) -> Step {
     match state {
@@ -522,8 +523,6 @@ pub(super) fn status_of(state: &AppState, spec: &AppSpec) -> AppStatus {
         since: state.uptime(),
     }
 }
-
-// ------------------------------------------------------------------- machine
 
 /// 상태를 전이 함수들 사이로 흘려보내는 얇은 껍데기.
 ///
