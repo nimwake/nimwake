@@ -100,6 +100,38 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## Host interface (이슈 #5 · #6 · #7)
+
+Core는 자기를 감독하는 host를 모른다. 그러나 supervisor는 `nimwaked`의 외부 동작에
+사실상 의존한다. 암묵적 의존을 계약으로 바꾼 결정들이다. → [PRD §74](../../prd/04-platform/03-host-interface.md)
+
+| #   | 결정                                           | 이유                                                                                          | 반영 위치                                                |
+| --- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| D34 | listen 주소를 설정 가능하게, 기본은 loopback    | `127.0.0.1` 고정 bind 때문에 같은 LAN의 다른 머신에서 접근할 수 없었다. Android A5(LAN lifecycle)가 여기서 막혔다. 열어 두는 것이 기본이 되어서는 안 되므로 **opt-in**으로 두고, 열렸을 때 경고를 남긴다. | [§74](../../prd/04-platform/03-host-interface.md), [§46](../../prd/04-platform/01-environments.md) |
+| D35 | listen 주소는 이름 해석을 하지 않는다           | `host:port`만 받는다. DNS를 끌어들이면 daemon이 어디에 붙을지가 기동 시점의 네트워크에 의존하게 된다. | [§74](../../prd/04-platform/03-host-interface.md)        |
+| D36 | 종료 코드로 실패 원인을 구분한다 (`sysexits`)   | supervisor는 재시도해도 나아지지 않는 실패에서 멈춰야 한다. 코드가 없으면 stderr 문자열 파싱이나 "기동 직후 연속 종료" 휴리스틱에 기대야 한다. `78` 설정 오류 / `69` bind 실패 / `1` 그 외. | [§74](../../prd/04-platform/03-host-interface.md)        |
+| D37 | "미등록 Host 요청은 상태를 바꾸지 않는다"를 계약으로 | supervisor가 등록된 Host로 health probe하면 그 요청이 `acquire()`를 거쳐 app을 깨우고 idle timer를 리셋한다. **supervisor가 scale-to-zero를 무력화한다.** 전용 endpoint 대신 이미 성립하는 동작을 계약으로 고정하고 테스트로 못박았다. | [§74](../../prd/04-platform/03-host-interface.md), [Invariant 3](../../prd/02-architecture/02-lifecycle-invariants.md) |
+
+### D37을 계약으로 택한 이유
+
+이슈 #7은 두 가지를 제시했다.
+
+```text
+A. 미등록 Host 요청이 상태를 바꾸지 않음을 계약으로 고정
+B. acquire()를 타지 않는 전용 경로 (/__nimwake/health)
+```
+
+A를 택했다. gateway는 `registry.resolve()`가 실패하면 `acquire()` 전에 응답하므로
+**이미 성립하는 동작**이고, B는 예약 경로라는 새 표면을 만든다. Admin IPC와 전용
+health endpoint는 Post-MVP 주제다. (PRD §60)
+
+다만 "이미 성립한다"는 것만으로는 부족하다. 계약이라면 깨질 때 알아야 한다.
+그래서 probe가 **잠든 app을 깨우지 않는 것**과 **깨어 있는 app의 idle timer를 리셋하지 않는 것**을
+각각 E2E로 고정했다. 후자가 실제 위험이다 — 깨우지만 않으면 된다고 보면
+supervisor가 app을 영원히 재우지 못하는 경로를 놓친다.
+
+---
+
 ## 구현 중 확정 (`v0.0.4`)
 
 | #   | 결정                                                       | 이유                                                                                                       | 반영 위치                                                    |

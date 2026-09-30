@@ -42,6 +42,7 @@ Nimwake 제품 요구사항 정의서. **이 트리가 원장(Single Source of T
 
 - [Target Environments와 외부 의존성](04-platform/01-environments.md) — `§46–§48`
 - [Android Deployment와 검증](04-platform/02-android.md) — `§49–§51`
+- [Host Interface](04-platform/03-host-interface.md) — `§74`
 
 ## Post Core MVP — `05-beyond-mvp/`
 
