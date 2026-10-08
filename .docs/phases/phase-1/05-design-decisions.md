@@ -100,6 +100,94 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## readiness probe가 남의 listener를 자기 것으로 삼았다
+
+동시 기동을 재려다 찾았다. 측정보다 이것이 중요하다.
+
+```text
+외부 listener pid=48466 (Nimwake가 띄우지 않은 echo-server)
+gateway 요청   →  200, body=48466      남의 process가 응답
+daemon의 자식  →  없음                  자기 process는 죽었다
+자식의 stderr  →  "Address already in use"
+readiness      →  173us에 통과
+```
+
+Nimwake가 **자기가 띄우지 않은 process로 트래픽을 보내고,** 자기 자식이 죽은
+것을 알아채지 못했다.
+
+### `biased` select로는 막히지 않는다
+
+`ProcessRuntime::start`는 readiness와 조기 종료를 경쟁시키고 종료를 먼저 본다.
+주석도 "process가 죽었다면 readiness는 성립할 수 없다"고 적고 있었다.
+그 전제가 틀렸다.
+
+```text
+1. 자식을 spawn한다
+2. 자식은 bind에 실패하지만 아직 살아 있다 (수 ms)
+3. probe가 남의 listener에 붙어 성공한다     ← 정당한 순서다
+4. app이 RUNNING이 되고 트래픽이 남의 process로 간다
+```
+
+죽기 전에 probe가 이기는 것이 경쟁의 올바른 결과다. 문제는 readiness가
+**"port가 열렸나"만 묻고 "내 process가 열었나"를 묻지 않는 것**이다.
+
+### spawn 전에 port가 비었는지 본다
+
+고친 방식이다. 이미 열려 있으면 시작하지 않고 실패(502)로 끝낸다.
+
+Nimwake는 process를 인수하지 않는다는 계약이 이미 있었다. (PRD §71)
+코드가 그 계약을 지키지 않고 있었고, 이 검사가 둘을 맞춘다.
+
+`a_port_held_by_a_foreign_process_is_not_adopted`로 고정했다. 사전 검사를
+빼고 돌려 확인했다.
+
+```text
+고치기 전:  200, body="50245"   (외부 process의 pid)
+고친 후:    502
+```
+
+### 이 상황은 실제로 일어난다
+
+daemon을 SIGKILL하면 application이 남는다. destructor가 돌지 않으므로
+`kill_on_drop`도 명시적 shutdown도 수행되지 않는다. 신호로 죽는 프로세스가
+할 수 있는 일은 없다.
+
+그 뒤 daemon을 다시 띄우면 port는 orphan의 것이다. 고치기 전에는 그 orphan에게
+트래픽을 보냈다.
+
+---
+
+## 동시 기동 실측 (Next.js 8개)
+
+```text
+8개 동시 cold start  →  전부 200, 0.84~0.89초
+앱당 RSS             →  96 MB  (합계 768 MB)
+```
+
+**직렬화되지 않는다.** 하나가 0.4초인데 8개가 0.87초다. 완전히 겹친다.
+동시 기동을 제한하는 장치가 없다는 것이 수치로도 보인다.
+
+2GB 기기면 이 무게로 10개 남짓에서 한계에 닿는다.
+
+### 측정이 세 번 틀렸다
+
+고쳐 가며 얻은 것이라 남긴다.
+
+```text
+1차   comm=="node"로 RSS를 셌다           Next.js는 comm을 바꾼다
+2차   args에 standalone/server.js를 찾았다  args도 바뀐다
+3차   awk 자신이 패턴에 걸렸다             daemon이 3개로 보였다
+```
+
+Next.js standalone은 `comm`과 `cmdline`을 **둘 다** `next-server (v15.5.27)`로
+바꾼다. 원래 argv가 남지 않는다. 그래서 `pkill -x node`도 비켜 갔고 이전 실험의
+앱 8개가 768MB를 쥔 채 살아남아 다음 측정을 오염시켰다.
+
+세 번째는 `pgrep -f`에서 이미 겪은 것과 같다. **프로세스는 패턴이 아니라 pid로
+확인한다.**
+
+---
+
 ## soak은 Actions에서 돌리지 않는다
 
 저장소가 private이므로 runner 시간이 과금된다. 비교하면

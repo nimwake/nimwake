@@ -528,3 +528,69 @@ async fn a_backend_that_never_answers_hangs_the_request() {
     // app은 RUNNING이다. 기동은 성공했고 막힌 것은 요청뿐이다.
     assert_eq!(harness.state("mute").await, AppStateName::Running);
 }
+
+/// port가 이미 다른 process의 것이면 application을 시작하지 않는다.
+///
+/// readiness probe는 "port에 붙을 수 있나"만 묻는다. 그래서 사전 검사가 없으면
+/// Nimwake가 띄우지 않은 listener를 자기 application으로 착각하고, 트래픽이
+/// 그쪽으로 간다. 자기 자식은 bind에 실패해 죽는데 daemon은 그것을 모른다.
+///
+/// daemon을 SIGKILL하면 application이 남으므로(destructor가 돌지 않는다) 실제로
+/// 일어나는 상황이다. Nimwake는 process를 인수하지 않는다. (PRD §71)
+///
+/// `echo-server`는 자기 pid를 body로 돌려준다. 그래서 "누가 응답했는가"를
+/// HTTP로 직접 구별할 수 있다.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_port_held_by_a_foreign_process_is_not_adopted() {
+    let app_port = free_port();
+
+    // Nimwake와 무관한 listener. 이 테스트가 소유하고 정리한다.
+    let mut foreign = std::process::Command::new(bin::ECHO)
+        .arg(app_port.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the foreign listener starts");
+
+    wait_for(
+        "the foreign listener to bind",
+        Duration::from_secs(5),
+        || is_listening(app_port),
+    )
+    .await;
+
+    let foreign_pid = foreign.id().to_string();
+
+    let harness = Harness::start(vec![with_timeouts(
+        spec("victim", app_port, cmd(bin::ECHO, &[app_port.to_string()])),
+        5,
+        60,
+        1,
+    )])
+    .await;
+
+    let response = harness.get("victim.localhost").await;
+
+    // 고치기 전에는 200에 외부 process의 pid가 담겨 돌아왔다.
+    assert_eq!(
+        response.status, 502,
+        "an occupied port must fail the start, got {} with body {:?}",
+        response.status, response.body,
+    );
+    assert!(
+        !response.body.contains(&foreign_pid),
+        "the foreign process ({foreign_pid}) must never serve through Nimwake",
+    );
+
+    // app은 RUNNING이 아니다. 시작한 적이 없다.
+    assert_ne!(harness.state("victim").await, AppStateName::Running);
+
+    // 외부 listener는 Nimwake가 건드리지 않는다. 남의 것이다.
+    assert!(
+        is_listening(app_port),
+        "Nimwake must not stop a process it does not own",
+    );
+
+    let _ = foreign.kill();
+    let _ = foreign.wait();
+}
