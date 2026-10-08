@@ -146,13 +146,13 @@ async fn request_wakes_the_app_serves_it_sleeps_and_wakes_again() {
         "a warm request must reuse the running process",
     );
 
-    wait_for(
-        "the idle timeout to stop the app",
-        Duration::from_secs(8),
-        || !is_listening(app_port),
-    )
-    .await;
-    assert_eq!(harness.state("hello").await, AppStateName::Sleeping);
+    // port가 닫히기를 기다린 뒤 state를 단언하면 안 된다.
+    // port는 STOPPING 중에 닫히고, SLEEPING은 그 완료 event가 mailbox를 한 바퀴 돈 뒤다.
+    // SLEEPING은 process가 사라졌음을 함의하지만 그 역은 아니므로 state를 기다린다.
+    harness
+        .wait_for_state("hello", AppStateName::Sleeping, Duration::from_secs(8))
+        .await;
+    assert!(!is_listening(app_port), "SLEEPING이면 process가 없다");
 
     let third = harness.get("hello.localhost").await;
     assert_eq!(third.status, 200);
