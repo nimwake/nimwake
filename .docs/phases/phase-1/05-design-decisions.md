@@ -188,11 +188,26 @@ PRD §22는 readiness를 TCP connect 성공으로 정의한다. 그래서
 | `startup_timeout_seconds` | readiness까지만 덮는다. 그 뒤로는 상한이 없다 |
 
 후자가 실제 위험이다. port는 빨리 열고 응답은 느린 앱은 startup timeout에
-걸리지 않는다. 그리고 **gateway에는 요청 단위 timeout이 없다** (코드상 확인.
-`send_request`에 제한을 걸지 않고 hyper도 기본값을 두지 않는다).
-받아 놓고 응답하지 않는 backend를 만나면 요청은 client가 끊을 때까지 기다린다.
+걸리지 않는다. 그리고 **gateway에는 요청 단위 timeout이 없다.**
+`forward`의 `connect` · `handshake` · `send_request` 어디에도 제한이 없고
+hyper도 기본값을 두지 않는다.
+
+처음에는 코드만 읽고 이렇게 적었다. 그 뒤 `mute-server` fixture로 재현했다.
+`deaf-server`는 accept하고 **끊으므로** proxy가 실패해 502가 되지만, mute는
+연결을 **붙잡는다.** 요청을 읽지도 응답하지도 끊지도 않는다.
+
+```text
+a_backend_that_never_answers_hangs_the_request
+  → app은 RUNNING, 요청은 끝나지 않는다
+```
+
+port가 열려 있으므로 readiness probe도 startup timeout도 이것을 걸러내지
+못한다. startup timeout이 readiness까지만 덮기 때문이다.
 
 lease는 body가 drop될 때 회수되므로 daemon이 새지는 않는다. 기다리는 쪽이 문제다.
+
+이 테스트는 **지금 동작을 고정한 것**이다. PRD에 요청 timeout 조항도 504도
+없어서 새 계약을 여기서 정하지 않았다. 계약이 생기면 504를 단언하도록 바꾼다.
 
 ### 자원 경계가 `hello-node`로 본 것보다 가깝다
 

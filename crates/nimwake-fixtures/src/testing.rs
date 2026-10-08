@@ -158,8 +158,37 @@ pub fn request(
     host: &str,
     body: Option<&str>,
 ) -> std::io::Result<HttpResponse> {
+    request_within(
+        gateway_port,
+        method,
+        path,
+        host,
+        body,
+        Duration::from_secs(30),
+    )
+}
+
+/// [`request`]와 같되 읽기 제한을 지정한다.
+///
+/// 응답하지 않는 backend를 검증할 때 쓴다. 기본 30초를 기다릴 이유가 없다.
+///
+/// # Errors
+///
+/// [`request`]와 같다. 제한을 넘기면 `WouldBlock` 또는 `TimedOut`이다.
+///
+/// # Panics
+///
+/// [`request`]와 같다.
+pub fn request_within(
+    gateway_port: u16,
+    method: &str,
+    path: &str,
+    host: &str,
+    body: Option<&str>,
+    read_timeout: Duration,
+) -> std::io::Result<HttpResponse> {
     let mut stream = TcpStream::connect_timeout(&addr(gateway_port), Duration::from_secs(2))?;
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_read_timeout(Some(read_timeout))?;
 
     let body = body.unwrap_or_default();
     let head = format!(

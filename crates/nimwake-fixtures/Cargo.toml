@@ -58,6 +58,10 @@ name = "group-server"
 path = "src/bin/group_server.rs"
 
 [[bin]]
+name = "mute-server"
+path = "src/bin/mute_server.rs"
+
+[[bin]]
 name = "deaf-server"
 path = "src/bin/deaf_server.rs"
 

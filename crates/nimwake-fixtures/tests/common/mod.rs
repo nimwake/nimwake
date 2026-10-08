@@ -15,7 +15,7 @@ use nimwake_core::app::{AppSpec, LifecycleSpec, RuntimeSpec, ServerSpec};
 // 어느 쪽에서 보든 나머지는 미사용으로 보인다.
 #[allow(unused_imports)]
 pub use nimwake_fixtures::testing::{
-    addr, free_port, get, is_alive, is_listening, request, HttpResponse,
+    addr, free_port, get, is_alive, is_listening, request, request_within, HttpResponse,
 };
 
 /// fixture 하나를 실행하는 `AppSpec`을 만든다.
@@ -86,6 +86,7 @@ pub mod bin {
     pub const EXIT_AFTER: &str = env!("CARGO_BIN_EXE_exit-after-server");
     pub const GROUP: &str = env!("CARGO_BIN_EXE_group-server");
     pub const DEAF: &str = env!("CARGO_BIN_EXE_deaf-server");
+    pub const MUTE: &str = env!("CARGO_BIN_EXE_mute-server");
     pub const SLOW_BODY: &str = env!("CARGO_BIN_EXE_slow-body-server");
 }
 
