@@ -100,6 +100,115 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## soak은 Actions에서 돌리지 않는다
+
+저장소가 private이므로 runner 시간이 과금된다. 비교하면
+
+```text
+release gate의 stress        148초
+24시간 soak                  86400초   (583배)
+```
+
+GitHub-hosted runner의 job 상한이 6시간이라 PRD §65의 24h · 72h는 애초에
+담기지도 않는다. 그래서 workflow로 두지 않고 [scripts/soak.sh](../../../scripts/soak.sh)에
+두었다. 긴 구간은 수명이 긴 호스트의 일이고 Android 실기기 검증이 그 역할을 맡는다. (PRD §50)
+
+release gate의 stress는 그대로 둔다. 148초이고 correctness gate의 본체다.
+orphan · zombie · 누수를 보는 곳이 거기다. (PRD §44)
+
+### 중단된 soak은 daemon을 남긴다
+
+`nimwake-bench`는 SIGTERM에 destructor를 돌리지 않는다. 신호로 죽으면 그것이
+띄운 daemon과 application이 남는다. 2시간 soak을 중단하면서 실제로 겪었다.
+
+```text
+bench를 kill        →  nimwaked와 echo-server가 남음
+```
+
+daemon 쪽 결함이 아니다. daemon은 부모가 정리해 주기를 기대하는 쪽이고
+(`kill_on_drop`과 명시적 shutdown), 그 부모가 destructor 없이 죽은 것이다.
+
+`scripts/soak.sh`는 bench를 `setsid`로 띄워 자기 process group의 leader로
+만들고 trap에서 group 단위로 정리한다. `kill -- -$$`로는 안 된다. 비대화형
+실행에서 스크립트는 group leader가 아니고, 그때 `-$$`는 존재하지 않는 pgid여서
+kill이 조용히 실패한다.
+
+### 검증하다 알게 된 것
+
+배경 작업(`&`)으로 띄운 스크립트에는 SIGINT가 **무시로 설정된 채** 상속된다.
+POSIX가 job control 없는 shell의 배경 process에 대해 그렇게 정한다.
+진입 시 무시로 들어온 신호는 trap을 걸 수 없으므로 `trap cleanup INT`가
+조용히 아무 일도 하지 않는다.
+
+실제 사용(대화형 터미널에서 Ctrl-C)에서는 해당하지 않는다. 검증을 배경에서
+돌리려 했던 쪽의 문제였고, trap 자체는 SIGTERM으로 확인했다.
+
+---
+
+## 실측: 프레임워크 앱 (Express · Next.js)
+
+`hello-node`는 `http.createServer` 하나여서 런타임 비용만 보여 준다.
+PRD §45의 "경량 API 2초 / Next.js 5초"가 현실적인지는 프레임워크로 재야 한다.
+
+재현 절차: [scripts/measure_framework_cold_start.md](../../../scripts/measure_framework_cold_start.md)
+
+```text
+app          startup   cold TTFB      간극   warm TTFB       RSS
+bare            52.7        56.9       4.2         0.9     47 MB
+express        103.5       109.0       5.5         1.1     63 MB
+next           205.8       396.0     190.2        15.4    104 → 118 MB
+```
+
+### PRD §45의 목표는 크게 여유가 있다
+
+Next.js 기동이 **206ms**다. 목표 5초의 1/24이다.
+`startup_timeout_seconds` 기본값 5초는 이 앱들에 충분하다.
+
+**다만 이 숫자를 그대로 믿으면 안 된다.** 측정 대상은 한 페이지짜리 앱이고
+`output: standalone`으로 빌드한 것이다. route가 많고 DB에 붙고 middleware가 있는
+실제 서비스는 더 느리다. 여기서 나온 값은 **하한**이다.
+
+### TCP readiness는 application readiness가 아니다
+
+이쪽이 더 중요한 발견이다.
+
+```text
+next   기동(readiness) 206ms  →  첫 응답(TTFB) 396ms
+       간극 190ms = 사용자가 겪는 cold start의 48%
+```
+
+bare와 express의 간극은 4~6ms로 무시할 수 있다. **Next.js만 다르다.**
+port를 열고 나서도 첫 요청을 처리할 준비가 190ms 더 걸린다.
+
+PRD §22는 readiness를 TCP connect 성공으로 정의한다. 그래서
+
+| | |
+| --- | --- |
+| `readiness_latency` | 사용자가 겪는 cold start를 **과소 보고한다** |
+| `startup_timeout_seconds` | readiness까지만 덮는다. 그 뒤로는 상한이 없다 |
+
+후자가 실제 위험이다. port는 빨리 열고 응답은 느린 앱은 startup timeout에
+걸리지 않는다. 그리고 **gateway에는 요청 단위 timeout이 없다** (코드상 확인.
+`send_request`에 제한을 걸지 않고 hyper도 기본값을 두지 않는다).
+받아 놓고 응답하지 않는 backend를 만나면 요청은 client가 끊을 때까지 기다린다.
+
+lease는 body가 drop될 때 회수되므로 daemon이 새지는 않는다. 기다리는 쪽이 문제다.
+
+### 자원 경계가 `hello-node`로 본 것보다 가깝다
+
+```text
+hello-node    47 MB  →  5개 = 236 MB
+Next.js      118 MB  →  5개 = 590 MB
+```
+
+2GB 기기에서 Next.js 앱은 10~14개 수준에서 한계에 닿는다.
+그리고 동시 기동을 제한하는 장치가 없다 (자원 관리는 Post-MVP).
+
+scale-to-zero가 이 문제에 답하려는 것은 맞지만, **동시에 깨어나는 수를 아무도
+막지 않는다**는 사실은 그대로다.
+
+---
+
 ## 실측: 실제 애플리케이션 (`examples/hello-node`)
 
 `v0.0.5`까지의 모든 검증은 133줄짜리 Rust fixture 위에서 돌았다.

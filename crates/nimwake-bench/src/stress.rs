@@ -21,6 +21,11 @@ use crate::daemon::{self, Apps, Daemon};
 /// 한 cycle에서 app이 잠들기를 기다리는 한계.
 const SLEEP_DEADLINE: Duration = Duration::from_secs(20);
 
+/// 지속 부하 중 모을 자원 표본의 목표 개수.
+///
+/// 길이와 무관하게 비슷한 해상도를 유지하려는 것이다.
+const SAMPLE_TARGET: usize = 200;
+
 /// 관찰 시점의 daemon 자원 사용량.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Resources {
@@ -319,10 +324,16 @@ pub fn sustained(
         .collect();
 
     // 부하가 도는 동안 자원 추이를 기록한다.
+    //
+    // 간격을 길이에 맞춘다. 500ms로 고정하면 24시간 soak에서 표본이 17만 개가 되고
+    // 리포트가 그만큼 길어진다. 추세를 보는 데 필요한 것은 그렇게 많지 않다.
+    let interval =
+        (duration / u32::try_from(SAMPLE_TARGET).unwrap_or(1)).max(Duration::from_millis(500));
+
     let mut samples = Vec::new();
     while Instant::now() < deadline {
         samples.push(Resources::observe(daemon.pid()));
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(interval);
     }
     samples.push(Resources::observe(daemon.pid()));
 

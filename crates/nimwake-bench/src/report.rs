@@ -388,6 +388,12 @@ fn growth_count(delta: Option<i64>) -> String {
     delta.map_or_else(|| "n/a".to_owned(), |delta| format!("{delta:+}"))
 }
 
+/// 추세 그림의 최대 줄 수.
+///
+/// 표본이 이보다 많으면 솎아 낸다. 24시간 soak의 표본을 전부 적으면 리포트가
+/// 읽을 수 없게 길어지고, 추세를 보는 데 그만큼은 필요하지 않다.
+const TREND_ROWS: usize = 40;
+
 /// 자원 추이를 간단한 막대로 보여 준다. 숫자 나열보다 추세가 눈에 들어온다.
 fn render_trend(out: &mut String, samples: &[Resources]) -> std::fmt::Result {
     let values: Vec<u64> = samples.iter().filter_map(|sample| sample.rss).collect();
@@ -395,9 +401,18 @@ fn render_trend(out: &mut String, samples: &[Resources]) -> std::fmt::Result {
         return Ok(());
     };
 
+    let step = values.len().div_ceil(TREND_ROWS).max(1);
+
     writeln!(out, "```text")?;
-    writeln!(out, "RSS {:.1} MB -> {:.1} MB", mb(*min), mb(*max))?;
-    for value in &values {
+    writeln!(
+        out,
+        "RSS {:.1} MB -> {:.1} MB   (표본 {}개, {}개마다 한 줄)",
+        mb(*min),
+        mb(*max),
+        values.len(),
+        step,
+    )?;
+    for value in values.iter().step_by(step) {
         let span = (max - min).max(1);
         let width = usize::try_from((value - min) * 40 / span).unwrap_or(0);
         writeln!(out, "{:>8.1} |{}", mb(*value), "#".repeat(width.max(1)))?;

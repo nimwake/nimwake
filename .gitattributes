@@ -1,0 +1,14 @@
+# 개발 머신이 Windows다. CRLF로 저장된 shell script는 shebang이 `bash\r`가 되어
+# Unix에서 실행되지 않는다. 실제로 겪었다. 저장소 안에서는 LF로 고정한다.
+
+* text=auto eol=lf
+
+*.sh text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+
+# 바이너리로 다룬다
+*.png binary
+*.tar.gz binary
