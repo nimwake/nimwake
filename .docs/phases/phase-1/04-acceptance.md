@@ -88,8 +88,8 @@
 - [x] E2E tests pass — `gate` 위와 같음 (`crates/nimwaked/tests/e2e.rs`, 실제 바이너리)
 - [x] cold-start storm passes — `gate` `release.yml`의 "Stress and leak checks" · `report` `spawn count == 1`
 - [x] lifecycle stress passes — `gate` 위와 같음 · `report` 1000 cycles / orphan 0 / zombie 0
-- [ ] **release CI passes** — `qualify`와 `aarch64` job은 통과했다(`workflow_dispatch` 실행).
-      **`publish` job은 아직 실행된 적이 없다.** 태그에만 반응하므로 `v*` 태그가 필요하다
+- [x] release CI passes — `gate` `v0.1.0-rc1` 태그에서 세 job이 모두 통과했다
+      (`qualify` / `aarch64` / `publish`). `publish`는 이 rc에서 처음 실행됐다
 
 ---
 
@@ -128,11 +128,23 @@ Core가 할 일은 aarch64 바이너리를 공급하는 것까지이고, 그것�
 ## 남은 것
 
 ```text
-Core           release CI의 publish job        태그 하나로 검증된다
-Android        8항목                           nimwake-android 리포트 대기
+Android        8항목        nimwake-android 리포트 대기
 ```
 
-Core 쪽 구현은 끝났다. 남은 하나는 **실행해 보지 않은 workflow 단계**다.
+**Core 쪽은 전부 끝났다.** 구현도, release gate도 실제 태그로 검증됐다.
+
+`v0.1.0-rc1`에서 확인한 것:
+
+```text
+release        prerelease로 표시됨. /releases/latest가 404 →
+               다음 정식 release의 baseline 비교가 rc를 집어 가지 않는다
+assets         nimwake-aarch64-linux-musl.tar.gz (2.67 MB)
+               performance-report.md · baseline.txt
+release notes  제약이 먼저(1~56줄), 성능 리포트가 뒤(57줄부터)
+baseline       label=v0.1.0-rc1 + 지표 6개. 다음 release가 이것과 비교한다
+```
+
+남은 것은 다른 저장소의 입력이다. `v0.1.0` 태깅은 그 리포트를 기다린다.
 
 ---
 
