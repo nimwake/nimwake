@@ -100,6 +100,51 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## soak은 Actions에서 돌리지 않는다
+
+저장소가 private이므로 runner 시간이 과금된다. 비교하면
+
+```text
+release gate의 stress        148초
+24시간 soak                  86400초   (583배)
+```
+
+GitHub-hosted runner의 job 상한이 6시간이라 PRD §65의 24h · 72h는 애초에
+담기지도 않는다. 그래서 workflow로 두지 않고 [scripts/soak.sh](../../../scripts/soak.sh)에
+두었다. 긴 구간은 수명이 긴 호스트의 일이고 Android 실기기 검증이 그 역할을 맡는다. (PRD §50)
+
+release gate의 stress는 그대로 둔다. 148초이고 correctness gate의 본체다.
+orphan · zombie · 누수를 보는 곳이 거기다. (PRD §44)
+
+### 중단된 soak은 daemon을 남긴다
+
+`nimwake-bench`는 SIGTERM에 destructor를 돌리지 않는다. 신호로 죽으면 그것이
+띄운 daemon과 application이 남는다. 2시간 soak을 중단하면서 실제로 겪었다.
+
+```text
+bench를 kill        →  nimwaked와 echo-server가 남음
+```
+
+daemon 쪽 결함이 아니다. daemon은 부모가 정리해 주기를 기대하는 쪽이고
+(`kill_on_drop`과 명시적 shutdown), 그 부모가 destructor 없이 죽은 것이다.
+
+`scripts/soak.sh`는 bench를 `setsid`로 띄워 자기 process group의 leader로
+만들고 trap에서 group 단위로 정리한다. `kill -- -$$`로는 안 된다. 비대화형
+실행에서 스크립트는 group leader가 아니고, 그때 `-$$`는 존재하지 않는 pgid여서
+kill이 조용히 실패한다.
+
+### 검증하다 알게 된 것
+
+배경 작업(`&`)으로 띄운 스크립트에는 SIGINT가 **무시로 설정된 채** 상속된다.
+POSIX가 job control 없는 shell의 배경 process에 대해 그렇게 정한다.
+진입 시 무시로 들어온 신호는 trap을 걸 수 없으므로 `trap cleanup INT`가
+조용히 아무 일도 하지 않는다.
+
+실제 사용(대화형 터미널에서 Ctrl-C)에서는 해당하지 않는다. 검증을 배경에서
+돌리려 했던 쪽의 문제였고, trap 자체는 SIGTERM으로 확인했다.
+
+---
+
 ## 실측: 프레임워크 앱 (Express · Next.js)
 
 `hello-node`는 `http.createServer` 하나여서 런타임 비용만 보여 준다.

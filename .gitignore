@@ -1,3 +1,6 @@
 /target
 **/*.rs.bk
 *.pdb
+
+# soak 리포트는 로컬 산출물이다
+soak-*.md
