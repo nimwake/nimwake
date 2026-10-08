@@ -13,7 +13,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{bin, cmd, free_port, is_listening, spec, wait_for, with_timeouts};
+use common::{bin, cmd, free_port, is_listening, spec, with_timeouts};
 use nimwake_core::app::{AppSpec, AppStateName, StopReason};
 use nimwake_core::error::{AcquireError, AppError};
 use nimwake_core::runtime::ProcessRuntime;
@@ -25,6 +25,22 @@ fn start_actor(spec: AppSpec) -> AppHandle {
 
 async fn state(app: &AppHandle) -> AppStateName {
     app.status().await.expect("actor is alive").state
+}
+
+/// 목표 상태에 도달할 때까지 기다린다.
+///
+/// **port가 닫히기를 기다린 뒤 state를 단언하면 안 된다.** port는 STOPPING 중에 닫히고,
+/// SLEEPING은 그 완료 event가 mailbox를 한 바퀴 돈 뒤다. 그 사이에 단언하면 간헐적으로 깨진다.
+/// SLEEPING은 process가 사라졌음을 함의하지만 그 역은 아니다.
+async fn wait_for_state(app: &AppHandle, target: AppStateName, deadline: Duration) {
+    let started = std::time::Instant::now();
+    while started.elapsed() < deadline {
+        if state(app).await == target {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("never reached {target}, still {}", state(app).await);
 }
 
 /// SLEEPING → spawn → ready → RUNNING → stop → process gone → SLEEPING.
@@ -57,12 +73,8 @@ async fn sleeping_to_running_to_sleeping_on_a_real_process() {
         .await
         .expect("stop accepted");
 
-    wait_for(
-        "the app to go back to SLEEPING",
-        Duration::from_secs(5),
-        || !is_listening(port),
-    )
-    .await;
+    wait_for_state(&app, AppStateName::Sleeping, Duration::from_secs(5)).await;
+    assert!(!is_listening(port), "SLEEPING이면 process가 없다");
 
     let status = app.status().await.expect("actor is alive");
     assert_eq!(status.state, AppStateName::Sleeping);
@@ -216,13 +228,7 @@ async fn an_idle_application_stops_its_process() {
     // lease가 살아 있는 동안에는 idle timer가 돌지 않는다. (PRD §25)
     drop(lease);
 
-    wait_for(
-        "the idle timeout to stop the process",
-        Duration::from_secs(8),
-        || !is_listening(port),
-    )
-    .await;
-
-    assert_eq!(state(&app).await, AppStateName::Sleeping);
+    wait_for_state(&app, AppStateName::Sleeping, Duration::from_secs(8)).await;
+    assert!(!is_listening(port), "SLEEPING이면 process가 없다");
     app.shutdown().await;
 }
