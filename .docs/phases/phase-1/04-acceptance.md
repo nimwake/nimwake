@@ -156,7 +156,8 @@ baseline       label=v0.1.0-rc1 + 지표 6개. 다음 release가 이것과 비�
 | 공백 | 지금 아는 것 |
 | --- | --- |
 | 실제 서비스의 cold start | Next.js **기동 206ms**, 첫 응답 396ms. 목표 5초에 여유가 크다. 다만 한 페이지짜리 앱이므로 하한이다 |
-| readiness의 의미 | TCP connect는 application readiness가 아니다. Next.js는 port를 열고도 190ms 더 걸린다. `startup_timeout`은 그 뒤를 덮지 않고 요청 단위 timeout도 없다 |
+| readiness의 의미 | TCP connect는 application readiness가 아니다. Next.js는 port를 열고도 190ms 더 걸린다 |
+| 응답하지 않는 backend | 요청이 끝나지 않는다. `startup_timeout`은 readiness까지만 덮고 요청 단위 timeout은 없다. `a_backend_that_never_answers_hangs_the_request`로 고정했다 |
 | 동시 기동의 자원 한계 | Next.js 앱 하나가 118MB. 2GB 기기에서 10~14개가 한계인데 제한 장치가 없다 (자원 관리는 Post-MVP) |
 | 장시간 운용 | 최장 측정이 105초(stress) / 120초(sustained). 24h·72h는 Android 소관 |
 | crash-loop | backoff가 없다. 계속 죽는 앱에 트래픽이 있으면 요청마다 spawn한다 (D13) |

@@ -23,8 +23,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::{
-    bin, cmd, free_port, get, is_listening, request, spec, wait_for, with_pending_limit,
-    with_timeouts, HttpResponse,
+    bin, cmd, free_port, get, is_listening, request, request_within, spec, wait_for,
+    with_pending_limit, with_timeouts, HttpResponse,
 };
 use nimwake_core::app::AppSpec;
 use nimwake_core::runtime::ProcessRuntime;
@@ -477,4 +477,54 @@ async fn a_request_without_a_host_header_is_rejected() {
     );
 
     harness.stop().await;
+}
+
+/// `mute-server`는 연결을 받아 두고 응답하지 않는다. `deaf-server`와 다르다.
+/// deaf는 끊으므로 proxy가 실패하고 502가 되지만, 이쪽은 붙잡고 있으므로
+/// `send_request`가 끝나지 않는다.
+///
+/// gateway에는 요청 단위 제한이 없다. port는 열려 있어 readiness probe도
+/// startup timeout도 이것을 걸러내지 못한다. startup timeout은 readiness까지만
+/// 덮기 때문이다.
+///
+/// **이 테스트는 결함을 고정한다.** 요청 timeout 계약이 생기면 504를 단언하도록
+/// 바꾸어야 한다. PRD에 해당 조항이 없어 지금은 현재 동작을 기록해 둔다.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_backend_that_never_answers_hangs_the_request() {
+    let app_port = free_port();
+    let harness = Harness::start(vec![with_timeouts(
+        spec("mute", app_port, cmd(bin::MUTE, &[app_port.to_string()])),
+        5,
+        60,
+        1,
+    )])
+    .await;
+
+    let port = harness.port;
+    let outcome = tokio::task::spawn_blocking(move || {
+        request_within(
+            port,
+            "GET",
+            "/",
+            "mute.localhost",
+            None,
+            Duration::from_secs(3),
+        )
+    })
+    .await
+    .expect("client task finished");
+
+    // 응답이 왔다면 계약이 생긴 것이다. 그때는 이 테스트를 갱신해야 한다.
+    let error = outcome.expect_err("gateway must not answer while the backend holds the request");
+    assert!(
+        matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ),
+        "expected a read timeout, got {:?}: {error}",
+        error.kind(),
+    );
+
+    // app은 RUNNING이다. 기동은 성공했고 막힌 것은 요청뿐이다.
+    assert_eq!(harness.state("mute").await, AppStateName::Running);
 }
