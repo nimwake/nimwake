@@ -10,7 +10,7 @@ PRD가 **무엇을 왜 만드는가**를 정의하고, 각 페이즈 문서는 *
 
 | 페이즈                          | 버전     | 주제                                         | 상태        | PRD 근거                                                                      |
 | ------------------------------- | -------- | -------------------------------------------- | ----------- | ----------------------------------------------------------------------------- |
-| [Phase 1](phase-1/README.md)    | `v0.1.0` | Core Lifecycle · Scale-to-Zero               | 진행 예정   | [§7](../prd/01-product/03-scope.md), [§9–§36](../prd/02-architecture/01-core-architecture.md) |
+| [Phase 1](phase-1/README.md)    | `v0.1.0` | Core Lifecycle · Scale-to-Zero               | 구현 완료   | [§7](../prd/01-product/03-scope.md), [§9–§36](../prd/02-architecture/01-core-architecture.md) |
 | [Phase 2](phase-2/README.md)    | `v0.2.x` | CLI · 상태 저장 · 배포 · 롤백                | 미착수      | [§56–§59](../prd/05-beyond-mvp/02-platform-features.md)                       |
 | [Phase 3](phase-3/README.md)    | `v0.3.x` | 리소스 모니터링 · memory pressure · eviction | 미착수      | [§52–§55](../prd/05-beyond-mvp/01-resource-management.md)                      |
 | [Phase 4](phase-4/README.md)    | Later    | Android host tooling · 스트리밍 · 컨테이너   | 후보        | [§60–§63](../prd/05-beyond-mvp/03-long-term-roadmap.md)                        |

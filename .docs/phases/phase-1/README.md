@@ -2,7 +2,10 @@
 
 > **목표 버전:** `v0.1.0`
 > **주제:** Core Lifecycle · Scale-to-Zero
-> **상태:** 진행 예정
+> **상태:** Core 구현 완료 · `v0.1.0` 태깅 대기
+>
+> 남은 것은 [완료 체크리스트](04-acceptance.md)의 `release CI passes`(태그 필요)와
+> `nimwake-android` 검증 리포트다.
 
 ---
 
