@@ -21,15 +21,95 @@ static NEXT_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::n
 static HANDED_OUT: std::sync::Mutex<std::collections::BTreeSet<u16>> =
     std::sync::Mutex::new(std::collections::BTreeSet::new());
 
+/// port 예약 파일이 놓이는 곳.
+fn reservation_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join("nimwake-test-ports")
+}
+
+/// port를 이 process의 것으로 예약한다. 이미 살아 있는 다른 process의 것이면 `false`.
+///
+/// `cargo test`는 테스트 binary를 **병렬 process로** 돌린다. `HANDED_OUT`은 한
+/// process 안에서만 유효하고, bind 검사는 "지금 비어 있다"만 말해 준다. 그래서
+/// 두 binary가 거의 동시에 같은 번호를 받아 가는 창이 남는다.
+///
+/// 파일을 `create_new`로 만들어 그 창을 닫는다. 커널이 중재하므로 경쟁이 없다.
+/// 죽은 process가 남긴 예약은 회수한다. SIGKILL이나 panic으로 끝나면 파일이 남는데,
+/// 그것을 영구 점유로 두면 다음 실행이 port를 잃는다.
+fn reserve_port(port: u16) -> bool {
+    use std::io::ErrorKind;
+
+    let dir = reservation_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("{port}"));
+
+    let pid = std::process::id();
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            let _ = file.write_all(pid.to_string().as_bytes());
+            true
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            let owner = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| text.trim().parse::<u32>().ok());
+
+            match owner {
+                // 우리 것이면 이미 예약돼 있다.
+                Some(owner) if owner == pid => true,
+                // 임자가 죽었으면 회수한다.
+                Some(owner) if !pid_is_alive(owner) => {
+                    let _ = std::fs::remove_file(&path);
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&path)
+                        .map(|mut file| {
+                            let _ = file.write_all(pid.to_string().as_bytes());
+                            true
+                        })
+                        .unwrap_or(false)
+                }
+                // 살아 있는 남의 것, 또는 읽을 수 없는 예약.
+                _ => false,
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+/// 예약 파일의 임자가 살아 있는지 본다.
+///
+/// [`is_alive`]와 달리 Unix 밖에서도 컴파일돼야 한다. 그쪽에서는 알 수 없으므로
+/// 살아 있다고 본다. 회수를 못 하는 편이 남의 port를 빼앗는 것보다 안전하다.
+#[cfg(unix)]
+fn pid_is_alive(pid: u32) -> bool {
+    is_alive(pid)
+}
+
+#[cfg(not(unix))]
+fn pid_is_alive(_pid: u32) -> bool {
+    true
+}
+
 /// 비어 있는 loopback port를 고른다.
 ///
-/// 같은 binary 안의 테스트끼리는 원자 counter로, 다른 binary와는 pid로 갈린다.
-/// 실제로 bind되는지까지 확인하고 돌려준다.
+/// 세 겹으로 막는다.
 ///
-/// 내준 port를 기록해 두는 이유가 있다. counter만으로는 충분하지 않다.
-/// 첫 후보가 막혀 다음 후보로 넘어가면 **옆 호출자의 첫 후보와 같은 번호에 닿는다.**
-/// 실제로 그래서 `crash-server`의 readiness probe가 다른 테스트의 fixture에 붙어,
-/// "기동에 실패해야 한다"는 단언이 간헐적으로 깨졌다.
+/// ```text
+/// HANDED_OUT      같은 process 안에서 두 번 내주지 않는다
+/// 예약 파일        다른 process와 겹치지 않는다 (커널이 중재한다)
+/// bind 검사        지금 실제로 비어 있는지 확인한다
+/// ```
+///
+/// 세 번째만으로는 부족했다. `cargo test`가 테스트 binary를 병렬로 돌리므로,
+/// 두 binary가 거의 동시에 같은 번호를 받아 한쪽의 readiness probe가 다른 쪽
+/// fixture에 붙었다. 처음에는 `crash-server`의 "기동 실패" 단언이 깨지는 모습으로,
+/// 그다음에는 `stop_terminates_the_whole_process_group`의 기동이 "port가 이미
+/// 쓰이고 있다"로 거부되는 모습으로 나타났다. 같은 원인이다.
 ///
 /// # Panics
 ///
@@ -47,6 +127,9 @@ pub fn free_port() -> u16 {
         let port = PORT_BASE + seed.wrapping_add(offset).wrapping_add(attempt) % PORT_SPAN;
 
         if handed_out.contains(&port) {
+            continue;
+        }
+        if !reserve_port(port) {
             continue;
         }
         if TcpListener::bind(("127.0.0.1", port)).is_ok() {

@@ -51,6 +51,30 @@ impl Runtime for ProcessRuntime {
     /// 취소되면 여기서 만든 `ProcessHandle`이 drop되고 controller가 child를 정리한다.
     async fn start(&self, spec: &AppSpec) -> Result<StartedProcess, RuntimeError> {
         let process_id = self.process_ids.next_id();
+        let addr = SocketAddr::from(([127, 0, 0, 1], spec.server.port));
+
+        // spawn보다 먼저 port가 비어 있는지 본다.
+        //
+        // readiness probe는 "port에 붙을 수 있나"만 묻는다. "내가 띄운 process가
+        // 열었나"는 묻지 않는다. 그래서 port가 이미 남의 것이면 이렇게 된다.
+        //
+        //   1. 자식을 spawn한다
+        //   2. 자식은 bind에 실패하지만 아직 살아 있다 (수 ms)
+        //   3. probe가 남의 listener에 붙어 성공한다
+        //   4. app이 RUNNING이 되고 트래픽이 남의 process로 간다
+        //
+        // 조기 종료와의 경쟁(아래 select)으로는 막을 수 없다. 자식이 죽기 전에
+        // probe가 이기는 것이 정당한 순서이기 때문이다.
+        //
+        // daemon을 SIGKILL하면 application이 남으므로(destructor가 돌지 않는다)
+        // 실제로 일어나는 상황이다. Nimwake는 process를 인수하지 않는다는 계약이
+        // 이미 있고, 이 검사가 그 계약을 코드에서도 지킨다. (PRD §71)
+        if TcpStream::connect(addr).await.is_ok() {
+            return Err(RuntimeError::new(format!(
+                "`{}` cannot start: {addr} is already in use by a process Nimwake does not own",
+                spec.name
+            )));
+        }
 
         // 구간 계측. spawn과 readiness는 보통 자릿수가 다르므로 반드시 나눠 재야 한다. (PRD §42)
         let spawn_started_at = Instant::now();
@@ -59,7 +83,6 @@ impl Runtime for ProcessRuntime {
 
         let handle = ProcessHandle::new(process_id, control.clone());
 
-        let addr = SocketAddr::from(([127, 0, 0, 1], spec.server.port));
         debug!(app = %spec.name, process = %process_id, %addr, "waiting for readiness");
 
         // readiness와 조기 종료의 경쟁. process가 죽었다면 readiness는 성립할 수 없으므로

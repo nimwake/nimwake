@@ -15,7 +15,7 @@ Scale-to-Zero application lifecycle. 요청이 오면 깨우고, 쓰지 않으�
 
 | | |
 | --- | --- |
-| process adoption | daemon을 재시작하면 기존 application process를 재발견하거나 인수하지 않는다 |
+| process adoption | daemon을 재시작하면 기존 application process를 재발견하거나 인수하지 않는다. port가 이미 쓰이고 있으면 시작을 거부한다(502) |
 | WebSocket / SSE | 보장하지 않는다. 대용량 스트리밍 업로드도 마찬가지다 |
 | 성능 수치 | baseline이며 SLA가 아니다. runner 편차가 크다 |
 | crash-loop backoff | 없다. 계속 실패하는 application은 요청마다 기동을 재시도한다 |
