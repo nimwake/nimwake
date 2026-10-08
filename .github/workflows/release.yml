@@ -205,11 +205,30 @@ jobs:
             -C "artifacts/nimwake-aarch64-${GITHUB_SHA}" .
           ls -la release
 
+      # 릴리스 노트는 제약이 먼저 오고 성능 표가 뒤에 온다.
+      # 쓰는 쪽이 "보장하지 않는 것"을 숫자보다 먼저 읽어야 한다. (v0.1.0 마일스톤)
+      - name: Compose the release notes
+        run: |
+          cat .github/release-notes-preamble.md > notes.md
+          echo >> notes.md
+          cat release/performance-report.md >> notes.md
+          wc -l notes.md
+
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # `v0.1.0-rc1`처럼 하이픈이 있으면 prerelease다. (semver 관례)
+          # 표시해 두지 않으면 rc가 latest release가 되고, 다음 release의
+          # baseline 비교가 rc를 직전 값으로 집어 간다.
+          prerelease=""
+          case "${GITHUB_REF_NAME}" in
+            *-*) prerelease="--prerelease" ;;
+          esac
+
+          # shellcheck disable=SC2086
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
-            --notes-file release/performance-report.md \
+            --notes-file notes.md \
+            ${prerelease} \
             release/*
