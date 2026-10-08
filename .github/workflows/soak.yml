@@ -1,0 +1,94 @@
+# Soak
+#
+# 요구사항: .docs/prd/03-delivery/04-stress-tests.md (PRD §43 Sustained Warm Load)
+#
+# release gate(`release.yml`)의 stress는 분 단위다. 그것으로 잡히지 않는 것이 있다.
+# idle timer 누적은 30초에서는 "좀 오르네" 정도였고 120초에서야 확신할 수 있었다.
+# 더 긴 시간에서만 보이는 것이 남았다고 보는 편이 합당하다.
+#
+# **GitHub-hosted runner의 job 상한은 6시간이다.**
+# 그래서 PRD §65가 요구하는 24h · 72h soak은 여기서 돌릴 수 없다.
+# 그쪽은 수명이 긴 호스트에서 수행하며, Android 실기기 검증이 그 역할을 맡는다.
+# → PRD §50
+#
+# 이 workflow가 메우는 구간은 "release gate보다 길고 24시간보다 짧은" 쪽이다.
+
+name: Soak
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: 지속 부하 길이(초). runner 상한 때문에 6시간을 넘길 수 없다
+        required: false
+        default: "3600"
+      cycles:
+        description: lifecycle cycle 수
+        required: false
+        default: "1000"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  soak:
+    name: sustained warm load
+    runs-on: ubuntu-latest
+    # 부하 길이 + 빌드 + 여유. 상한인 6시간을 넘기지 않는다.
+    timeout-minutes: 350
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          rustup show active-toolchain
+          cargo --version
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-soak-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-soak-
+
+      - name: Build
+        run: cargo build --workspace --release
+
+      # 누수가 있으면 correctness 실패로 끝난다. 성능 수치는 기록만 한다. (PRD §44)
+      - name: Soak
+        run: |
+          ./target/release/nimwake-bench \
+            --commit "soak-${GITHUB_SHA}" \
+            --stress \
+            --stress-cycles "${{ inputs.cycles }}" \
+            --sustained-seconds "${{ inputs.seconds }}" \
+            --max-concurrency 1 \
+            --out soak-report.md
+
+      - name: Publish the report to the job summary
+        if: always()
+        run: cat soak-report.md >> "${GITHUB_STEP_SUMMARY}" || true
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-report-${{ github.sha }}
+          path: soak-report.md
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Assert nothing survived
+        if: always()
+        run: |
+          leftover=$(pgrep -c -x nimwaked || true)
+          if [ "${leftover}" != "0" ]; then
+            echo "::error::${leftover} nimwaked process(es) survived the soak"
+            exit 1
+          fi
+          echo "no nimwaked left behind"
