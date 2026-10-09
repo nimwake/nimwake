@@ -100,6 +100,63 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## §20의 app별 분리가 암묵적으로만 확인되고 있었다
+
+§20은 isolation 정책을 여섯 줄로 적는다. 그중 검증 가능한 것은 둘이다.
+
+```text
+app별 working directory 분리
+app별 environment / secret 분리 (`[runtime.env]`, daemon 환경 위에 overlay)
+```
+
+`[runtime.env]`는 `hello-node` e2e에서 `PORT`를 넘기는 데 쓰인다. 그러면 "변수가
+자식에게 닿는다"까지는 확인된다. **overlay인지는 확인되지 않는다.**
+
+### overlay와 덮어쓰기는 다르다
+
+```text
+overlay   daemon 환경 + app 환경, 같은 키는 app이 이긴다
+덮어쓰기   app 환경만
+```
+
+덮어쓰기로 구현하면 app이 지정하지 않은 변수가 사라진다. **`PATH`가 없으면
+대부분의 런타임이 기동하지 못한다.** 격리를 강화한다는 이유로 `.env_clear()`를
+넣기 쉬운 자리이고, 그러면 조용히 깨진다.
+
+### 밖에서 관측할 수 있게 만들었다
+
+`echo-server`에 두 경로를 더했다. fixture가 자기 상태를 말할 수 있어야 테스트가
+단언할 수 있다.
+
+```text
+GET /cwd      자기 작업 디렉터리
+GET /env/X    환경변수 X의 값
+```
+
+`/env/X`가 임의의 이름을 받는 것이 중요하다. app이 지정하지 **않은** 변수를
+물어볼 수 있어야 overlay를 확인할 수 있다.
+
+`the_child_gets_its_own_directory_and_an_overlaid_environment`가 넷을 단언한다.
+
+```text
+app이 지정한 변수          보인다
+daemon에만 있는 변수       보인다        ← overlay의 증거
+양쪽에 있는 변수            app이 이긴다
+작업 디렉터리               app의 것이다
+```
+
+### 뮤테이션 둘로 확인했다
+
+```text
+.env_clear() 추가        "daemon 환경을 덮지 않고 올려 쓴다" 단언이 실패
+working_dir를 "." 로 고정  "child must run in the app's working_dir" 단언이 실패
+```
+
+각 뮤테이션이 **의도한 단언에서** 잡힌다. 다른 단언이 먼저 걸렸다면 테스트가
+우연히 통과하고 있었다는 뜻이다.
+
+---
+
 ## §11이 집합을 쓰는 이유 중 하나만 테스트돼 있었다
 
 §11은 `leases`를 `HashSet`으로 두는 이유를 **둘**로 적는다.
