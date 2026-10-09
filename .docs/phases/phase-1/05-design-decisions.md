@@ -100,6 +100,52 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## daemon이 자기 버전을 틀리게 알렸다 (이슈 #24)
+
+`v0.1.0-rc1` release의 `nimwaked`가 기동 로그에 `0.0.1`을 적었다.
+같은 바이너리의 `BUILD_INFO`는 `ref=v0.1.0-rc1`이었다.
+
+```text
+nimwaked 0.0.1 — 1 application(s) validated
+```
+
+`[workspace.package] version`이 `0.0.1`로 남아 있었고 `nimwaked`가
+`version.workspace = true`로 그 값을 쓴다. 운영 로그만으로는 어떤 release가
+도는지 알 수 없었다.
+
+**Android 실기기에서 먼저 발견됐다.** 이 세션에서도 `nimwaked 0.0.1` 출력을
+여러 번 보았지만 문제로 읽지 않았다. 숫자가 눈앞에 있어도 기대값을 모르면
+틀린 것을 알아채지 못한다.
+
+### 버전을 올리고 gate를 두었다
+
+```text
+[workspace.package] version = "0.1.0"
+```
+
+`release.yml`의 qualify에 태그와 crate 버전이 다르면 실패하는 단계를 넣었다.
+빌드보다 **먼저** 본다. 어긋났으면 5분을 쓰기 전에 멈추는 편이 낫다.
+
+```text
+v0.1.0        통과
+v0.1.0-rc1    차단
+v0.0.1        차단
+```
+
+**rc를 찍으려면 workspace 버전을 그 rc로 먼저 올려야 한다.** 매 release마다
+버전 commit이 생기는데, 그것이 이슈가 요구한 규율이다.
+
+### jq를 쓰지 않은 이유
+
+처음에는 `cargo metadata | jq`로 썼다. 그런데 개발 머신(WSL)에 jq가 없어
+**gate를 로컬에서 확인할 수 없었다.** 확인하지 못하는 gate는 다음 release에서
+처음 실행된다. 이 세션에서 crash-loop 시나리오로 이미 겪은 일이다.
+
+`cargo pkgid -p nimwaked | sed 's/.*[#@]//'`로 바꾸어 의존을 없애고 네 가지
+태그로 실제 실행해 확인했다.
+
+---
+
 ## PRD §50의 비교를 실제로 가능하게 만들었다
 
 §50은 Android 검증이 별도 metric 체계를 만들지 않고 **CI Linux와 같은 workload로
