@@ -33,6 +33,7 @@ pub struct RequestTrace {
     acquire_started_at: Option<Instant>,
     acquire_completed_at: Option<Instant>,
     proxy_started_at: Option<Instant>,
+    connected_at: Option<Instant>,
     response_started_at: Option<Instant>,
 }
 
@@ -45,6 +46,7 @@ impl RequestTrace {
             acquire_started_at: None,
             acquire_completed_at: None,
             proxy_started_at: None,
+            connected_at: None,
             response_started_at: None,
         }
     }
@@ -61,6 +63,19 @@ impl RequestTrace {
         self.proxy_started_at = Some(Instant::now());
     }
 
+    /// backend와 TCP 연결이 수립된 시점.
+    pub fn backend_connected(&mut self) {
+        self.connected_at = Some(Instant::now());
+    }
+
+    /// 이미 찍어 둔 시각으로 연결 수립을 기록한다.
+    ///
+    /// proxy는 timeout 블록 안에서 연결하므로 그 안에서 찍은 값을 받아야 한다.
+    /// 블록이 trace를 붙잡으면 await를 넘는 가변 대여가 된다.
+    pub fn backend_connected_at(&mut self, at: Instant) {
+        self.connected_at = Some(at);
+    }
+
     pub fn response_started(&mut self) {
         self.response_started_at = Some(Instant::now());
     }
@@ -73,10 +88,24 @@ impl RequestTrace {
         span(self.acquire_started_at, self.acquire_completed_at)
     }
 
-    /// backend 연결을 얻기까지 걸린 시간.
+    /// backend와 연결이 수립되기까지 걸린 시간. (PRD §72)
+    ///
+    /// 이 구간은 **연결 수립까지만**이다. backend가 응답을 만드는 시간은
+    /// [`Self::backend_latency`]로 따로 본다.
+    ///
+    /// 한동안 이 함수가 `proxy_started → response_started`를 돌려주었다.
+    /// 그것은 연결 수립이 아니라 backend 왕복 전체이고, 둘을 합쳐 두면
+    /// "연결이 느린가 / application이 느린가"를 구분할 수 없다. 저사양 환경에서
+    /// 어느 구간이 먼저 무너지는지를 보려는 것이 §50의 목적이므로 나눈다.
     #[must_use]
     pub fn proxy_connect_latency(&self) -> Option<Duration> {
-        span(self.proxy_started_at, self.response_started_at)
+        span(self.proxy_started_at, self.connected_at)
+    }
+
+    /// 연결 수립부터 응답 header가 돌아오기까지. backend가 일한 시간이다.
+    #[must_use]
+    pub fn backend_latency(&self) -> Option<Duration> {
+        span(self.connected_at, self.response_started_at)
     }
 
     /// 요청 수신부터 응답 header가 나가기까지. (`time_to_first_byte`)
@@ -113,6 +142,7 @@ impl RequestTrace {
             routing_us = micros(self.routing_latency()),
             acquire_us = micros(self.acquire_latency()),
             proxy_connect_us = micros(self.proxy_connect_latency()),
+            backend_us = micros(self.backend_latency()),
             ttfb_us = micros(self.time_to_first_byte()),
             "request completed",
         );

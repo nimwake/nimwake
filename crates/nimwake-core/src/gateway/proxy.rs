@@ -82,6 +82,7 @@ pub(super) async fn forward(
     lease: RequestLease,
     request: Request<Incoming>,
     header_timeout: Duration,
+    trace: &mut crate::trace::RequestTrace,
 ) -> Result<Response<GatewayBody>, ProxyError> {
     let addr = lease.backend().addr();
 
@@ -93,10 +94,13 @@ pub(super) async fn forward(
     //
     // 전체 요청에 상한을 두면 어떤 기본값이든 누군가의 정상 요청을 깨뜨린다.
     // 막으려는 것은 느린 응답이 아니라 **오지 않는 응답**이다.
-    let response = tokio::time::timeout(header_timeout, async {
+    // 연결 수립 시각을 블록 밖으로 내보낸다. `trace`를 블록이 붙잡으면 await를
+    // 넘는 가변 대여가 되므로, 값으로 돌려받아 밖에서 기록한다. (PRD §72)
+    let (connected_at, response) = tokio::time::timeout(header_timeout, async {
         let stream = TcpStream::connect(addr)
             .await
             .map_err(|source| ProxyError::Connect { addr, source })?;
+        let connected_at = tokio::time::Instant::now();
 
         let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
             .await
@@ -109,15 +113,19 @@ pub(super) async fn forward(
             }
         });
 
-        sender
+        let response = sender
             .send_request(to_backend_request(request))
             .await
-            .map_err(ProxyError::Request)
+            .map_err(ProxyError::Request)?;
+
+        Ok::<_, ProxyError>((connected_at, response))
     })
     .await
     .map_err(|_| ProxyError::ResponseHeaderTimeout {
         limit: header_timeout,
     })??;
+
+    trace.backend_connected_at(connected_at);
 
     let (parts, body) = response.into_parts();
     let mut response = Response::from_parts(parts, LeasedBody { inner: body, lease }.boxed());
