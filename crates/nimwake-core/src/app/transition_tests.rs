@@ -684,3 +684,66 @@ fn status_reports_the_current_state() {
     assert_eq!(status.active_requests, 1);
     assert!(status.process_id.is_some());
 }
+
+/// SLEEPING을 거쳐 다시 올라온 application에 **이전 incarnation의** idle timer가
+/// 늦게 도착할 수 있다. 그것도 무효여야 한다. (PRD §29)
+///
+/// `a_stale_idle_timer_is_ignored`가 보는 것은 RUNNING 안에서 세대가 올라간
+/// 경우다. 이쪽은 RUNNING이 한 번 끝나고 새로 시작된 경우다.
+///
+/// PRD는 "`IdleGeneration`은 `Running` state가 소유하므로 자동으로 무효가 된다"고
+/// 적는다. 실제로 무효인 이유는 조금 다르다. 세대 수열이 `Ctx`에 있어 **application
+/// 수명 전체에 걸쳐 단조 증가**하기 때문이다. 수열을 `Running` 안으로 옮기면
+/// 새 incarnation이 같은 번호를 다시 내주고 이 테스트가 깨진다.
+#[test]
+fn an_idle_timer_from_a_previous_incarnation_is_ignored() {
+    let mut h = Harness::with_spec(test_spec(1, 256));
+    let lease_id = h.start();
+
+    // 첫 incarnation에서 timer를 하나 무장시킨다.
+    let effects = h.step(AppCommand::RequestFinished { lease_id });
+    let previous = armed_idle_timers(&effects)[0];
+
+    // 그 timer로 실제로 잠든다.
+    h.advance(Duration::from_secs(2));
+    let effects = h.step(AppCommand::IdleTimeout {
+        generation: previous,
+    });
+    assert_eq!(h.state(), AppStateName::Stopping);
+    let stop_operation = stops(&effects)[0].expect("stop reports back");
+
+    h.step(AppCommand::StopCompleted {
+        operation_id: stop_operation,
+        result: Ok(()),
+    });
+    assert_eq!(h.state(), AppStateName::Sleeping);
+
+    // 두 번째 incarnation.
+    let (effects, _response) = h.acquire();
+    let operation_id = only_start(&effects);
+    h.step(AppCommand::StartCompleted {
+        operation_id,
+        result: Ok(started(2)),
+    });
+    assert_eq!(h.state(), AppStateName::Running);
+
+    // 세대가 다시 쓰이지 않았다. 여기가 핵심이다.
+    assert_ne!(
+        h.idle_generation(),
+        previous,
+        "a new incarnation must not reuse a previous generation",
+    );
+
+    // 이전 incarnation의 timer가 아주 늦게 도착한다.
+    h.advance(Duration::from_secs(2));
+    h.step(AppCommand::IdleTimeout {
+        generation: previous,
+    });
+
+    assert_eq!(
+        h.state(),
+        AppStateName::Running,
+        "a timer from a previous incarnation must not stop the app",
+    );
+    assert_eq!(h.active_requests(), 1, "the live lease must survive");
+}

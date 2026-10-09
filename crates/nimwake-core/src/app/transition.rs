@@ -454,6 +454,19 @@ fn arm_idle_timer(mut running: RunningState, ctx: &Ctx<'_>) -> (RunningState, Ef
 pub(super) fn on_idle_timeout(state: AppState, generation: IdleGeneration, ctx: &Ctx<'_>) -> Step {
     let idle_timeout = ctx.spec.lifecycle.idle_timeout();
 
+    // 세 조건 중 **실제로 막는 것은 뒤의 둘**이다. 뮤테이션으로 확인했다.
+    //
+    //   leases.is_empty() 제거   returning_one_of_many_leases_does_not_arm_the_timer 실패
+    //   시간 검사 제거            an_early_idle_timer_does_not_stop_the_app 실패
+    //   세대 비교 제거            아무 테스트도 실패하지 않는다
+    //
+    // 세대 비교가 중복인 이유가 있다. 옛 timer가 도착한 시점에 lease가 비어 있고
+    // idle timeout도 지났다면, **어느 timer가 깨웠든 멈추는 것이 옳다.** 그래서
+    // 행동으로 구분되는 경우가 없고 테스트를 쓸 수도 없다.
+    //
+    // 그래도 둔다. PRD §29·§68이 처방한 기제이고, 뒤의 두 조건이 약해지면 마지막
+    // 방어선이 된다. 다만 **주된 보호로 착각하지 말 것.** §29를 읽고 "세대가
+    // 막아 준다"고 믿으면 틀린 전제로 코드를 고치게 된다.
     match state {
         AppState::Running(running)
             if running.idle_generation == generation
