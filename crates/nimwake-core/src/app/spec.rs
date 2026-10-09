@@ -173,6 +173,12 @@ impl AppSpec {
                 self.lifecycle.shutdown_timeout_seconds,
                 "shutdown_timeout_seconds",
             ),
+            // 0이면 모든 요청이 즉시 504가 되어 application이 영원히 응답하지
+            // 못한다. 실제로 그렇게 통과시켰다. (PRD §22, §75)
+            (
+                self.lifecycle.response_header_timeout_seconds,
+                "response_header_timeout_seconds",
+            ),
         ] {
             if value == 0 {
                 return Err(ValidationError::NotPositive { app: app(), field });
@@ -243,16 +249,30 @@ working_dir = "."
         ));
     }
 
+    /// §22는 timeout 전부가 양수여야 한다고 적는다. **하나씩 다 본다.**
+    ///
+    /// 전에는 `idle_timeout_seconds` 하나만 보았고, 그래서
+    /// `response_header_timeout_seconds`가 목록에 추가될 때 검증에서 빠진 것을
+    /// 아무도 알아채지 못했다. 0이면 모든 요청이 즉시 504가 되어 application이
+    /// 영원히 응답하지 못한다.
     #[test]
-    fn rejects_zero_timeout() {
-        let source = format!("{MANIFEST}\n[lifecycle]\nidle_timeout_seconds = 0\n");
-        let spec = AppSpec::from_toml(&source).expect("manifest parses");
-        assert_eq!(
-            spec.validate(),
-            Err(ValidationError::NotPositive {
-                app: "hello".to_owned(),
-                field: "idle_timeout_seconds"
-            })
-        );
+    fn rejects_a_zero_value_for_every_timeout() {
+        for field in [
+            "idle_timeout_seconds",
+            "startup_timeout_seconds",
+            "shutdown_timeout_seconds",
+            "response_header_timeout_seconds",
+        ] {
+            let source = format!("{MANIFEST}\n[lifecycle]\n{field} = 0\n");
+            let spec = AppSpec::from_toml(&source).expect("manifest parses");
+            assert_eq!(
+                spec.validate(),
+                Err(ValidationError::NotPositive {
+                    app: "hello".to_owned(),
+                    field,
+                }),
+                "`{field} = 0` must be rejected",
+            );
+        }
     }
 }

@@ -100,6 +100,59 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## §75를 넣으면서 §22의 검증 목록을 깨뜨렸다
+
+§22는 manifest 검증 항목 여덟을 열거하고 "하나라도 위반하면 기동을 거부한다"고
+적는다. 코드와 대조했다.
+
+```text
+unique name                       DuplicateName           있음
+unique host                       DuplicateHost           있음
+unique port                       DuplicatePort           있음
+port != gateway port              GatewayPortConflict     있음
+valid command (non-empty)         EmptyCommand            있음
+valid working_dir (존재하는 경로)   MissingWorkingDir       있음
+idle/startup/shutdown timeout > 0 NotPositive             셋만
+max_pending_requests > 0          NotPositive             있음
+```
+
+`response_header_timeout_seconds`가 빠져 있었다. **#23에서 내가 추가한 필드다.**
+양수 검증 목록에 넣지 않았다.
+
+### 0이면 application이 영원히 응답하지 못한다
+
+```text
+고치기 전   검증 통과 → 모든 요청이 53ms에 504
+고친 후     종료 코드 78 (EX_CONFIG)
+```
+
+상한이 0이므로 연결을 열기도 전에 만료된다. 멀쩡한 application을 쓸 수 없게
+만드는 설정이 조용히 통과했다.
+
+### 테스트가 하나만 보고 있었다
+
+`rejects_zero_timeout`은 `idle_timeout_seconds` 하나만 단언했다. 그래서 목록에
+필드가 늘었을 때 아무것도 알려주지 않았다.
+
+네 timeout을 **하나씩 다 보도록** 넓혔다.
+
+```text
+rejects_a_zero_value_for_every_timeout
+  idle · startup · shutdown · response_header
+```
+
+고친 뒤 네 경우 모두 종료 코드 78로 거부되는 것을 daemon으로 확인했다.
+
+### 교훈은 "목록을 대표값 하나로 테스트하지 않는다"
+
+이 종류를 오늘 두 번 겪었다. e2e가 계측 필드를 **이름만** 보고 있어서
+`proxy_connect_us`가 잘못된 값을 담은 것을 못 잡았고, 여기서는 timeout **하나만**
+보고 있어서 새 필드가 빠진 것을 못 잡았다.
+
+목록을 검증할 때는 목록을 돌아야 한다.
+
+---
+
 ## §29가 처방한 기제가 실제로 일하고 있지 않았다
 
 §29는 stale idle timer를 `IdleGeneration` 비교로 막는다고 적고, §68이 그 identity를
