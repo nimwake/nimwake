@@ -100,6 +100,72 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## §44의 `deadlock == 0`을 실제로 강제한다
+
+§44는 release gate의 차단 기준 다섯을 명시한다. 대조해 보니 넷은 검사가 있고
+하나는 없었다.
+
+```text
+duplicate process == 0   storm의 unique_pids · crash_loop의 max_children · stress의 spawn count
+orphan process == 0      stress의 survivors · release.yml의 "Assert nothing survived"
+HTTP errors == 0         storm · stress · sustained · crash_loop의 실패 수
+lost waiter == 0         startup_failure_rejects_every_waiter 등 3개 테스트
+deadlock == 0            없었다
+```
+
+완료 체크리스트도 정직하게 적어 두었다 — 근거가 "전체 테스트가 기한 안에 끝난다"였다.
+
+### 멈추면 60분을 태우고 아무것도 알려주지 않았다
+
+기한이 **job 단위에만** 있었다. lifecycle deadlock이 생기면 `qualify`가 60분
+뒤에 죽고, 어느 단계가 멈췄는지는 로그를 뒤져야 알 수 있다. private 저장소라
+그 60분은 실제 비용이다.
+
+긴 단계마다 `timeout-minutes`를 두었다. 11곳이다.
+
+```text
+release.yml   Build 20 · Tests 20 · Stress 25 · cross Build 30 · qemu smoke 10 ...
+integration   Build 20 · End-to-end 20 · Performance baseline 20
+ci            Test 15
+```
+
+실측 대비 넉넉하다(stress는 148초인데 25분). runner 편차를 감당하면서도 멈춘
+것은 **이름과 함께** 빠르게 드러난다.
+
+---
+
+## release gate를 디스패치로 확인했다
+
+`release.yml`을 세 번 건드렸다. 모두 태그에서 처음 실행될 수 있었다.
+
+```text
+#26  nimwake-bench 패키징
+#27  태그 gate
+#28  버전 추출을 태그 아닐 때도 실행
+```
+
+브랜치에서 디스패치해 확인한 것:
+
+```text
+Read the crate version                 success   (태그 아닌데도 실행됨)
+Assert the tag matches the version      skipped   (의도대로)
+artifact에 nimwake-bench                1,080,056 bytes
+                                        ELF 64-bit, ARM aarch64, statically linked
+BUILD_INFO                              target=aarch64-unknown-linux-musl
+```
+
+CPU 측정도 CI에서 동작한다. 그리고 **비교 대상으로서 이미 의미가 있다.**
+
+```text
+Sustained warm load   로컬 289% of wall  →  CI runner 104% of wall
+Crash loop            로컬 150%          →  CI runner  59%
+```
+
+같은 workload를 다른 하드웨어에서 돌린 차이다. PRD §50이 Android 실기기로
+한 번 더 넓히려는 축이 이것이다.
+
+---
+
 ## daemon이 자기 버전을 틀리게 알렸다 (이슈 #24)
 
 `v0.1.0-rc1` release의 `nimwaked`가 기동 로그에 `0.0.1`을 적었다.
