@@ -20,6 +20,13 @@ const DEFAULT_IDLE_TIMEOUT_SECONDS: u64 = 60;
 const DEFAULT_STARTUP_TIMEOUT_SECONDS: u64 = 5;
 const DEFAULT_SHUTDOWN_TIMEOUT_SECONDS: u64 = 5;
 
+/// 응답 header를 기다리는 기본 상한. (PRD §75)
+///
+/// 넉넉하게 잡는다. 이 상한이 겨냥하는 것은 "느린 application"이 아니라
+/// "응답하지 않는 application"이다. 긴 DB 조회나 무거운 SSR도 header가 늦으므로,
+/// 짧게 잡으면 멀쩡한 요청을 끊는다.
+const DEFAULT_RESPONSE_HEADER_TIMEOUT_SECONDS: u64 = 60;
+
 /// 하나의 application 정의.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,6 +66,12 @@ pub struct LifecycleSpec {
     pub idle_timeout_seconds: u64,
     pub startup_timeout_seconds: u64,
     pub shutdown_timeout_seconds: u64,
+    /// 응답 header를 기다리는 상한. 초과하면 `504`로 끝낸다. (PRD §75)
+    ///
+    /// **body 전송에는 적용하지 않는다.** 큰 파일이나 천천히 흐르는 응답을
+    /// 끊지 않기 위한 것이다. 제한하는 구간은 요청을 보내고 응답의 첫 줄이
+    /// 돌아오기까지다.
+    pub response_header_timeout_seconds: u64,
     /// startup을 기다릴 수 있는 최대 waiter 수. 초과분은 `503`으로 거절한다.
     pub max_pending_requests: usize,
 }
@@ -69,6 +82,7 @@ impl Default for LifecycleSpec {
             idle_timeout_seconds: DEFAULT_IDLE_TIMEOUT_SECONDS,
             startup_timeout_seconds: DEFAULT_STARTUP_TIMEOUT_SECONDS,
             shutdown_timeout_seconds: DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+            response_header_timeout_seconds: DEFAULT_RESPONSE_HEADER_TIMEOUT_SECONDS,
             max_pending_requests: DEFAULT_MAX_PENDING_REQUESTS,
         }
     }
@@ -88,6 +102,11 @@ impl LifecycleSpec {
     #[must_use]
     pub fn shutdown_timeout(&self) -> Duration {
         Duration::from_secs(self.shutdown_timeout_seconds)
+    }
+
+    #[must_use]
+    pub fn response_header_timeout(&self) -> Duration {
+        Duration::from_secs(self.response_header_timeout_seconds)
     }
 }
 

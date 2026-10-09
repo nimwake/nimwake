@@ -2,7 +2,7 @@
 
 > **Nimwake PRD** › 아키텍처
 >
-> 원문 구간: `PRD.md` §23–§26, §69
+> 원문 구간: `PRD.md` §23–§26, §69, §75
 
 ---
 
@@ -199,6 +199,65 @@ STOPPING
 ```
 
 → [§31 Request During STOPPING](08-failure-handling.md)
+
+---
+
+## 75. Response Header Timeout
+
+application이 연결을 받아 두고 응답하지 않을 수 있다.
+
+```text
+accept는 된다
+   │
+요청을 읽지 않는다
+   │
+응답을 쓰지 않는다
+   │
+끊지도 않는다
+```
+
+readiness probe는 이것을 걸러내지 못한다. port는 열려 있다.
+`startup_timeout_seconds`도 걸러내지 못한다. readiness까지만 덮기 때문이다.
+→ [§22 Manifest와 Readiness](05-manifest-and-readiness.md)
+
+상한이 없으면 그 요청은 client가 끊을 때까지 끝나지 않는다.
+
+### 상한은 응답 header까지만 적용한다
+
+```toml
+[lifecycle]
+response_header_timeout_seconds = 60
+```
+
+```text
+요청 전송 ──────── 응답 header 도착 ──────── body 전송 완료
+└──────── 상한 적용 ────────┘└──── 적용하지 않는다 ────┘
+```
+
+**body 전송에는 적용하지 않는다.** 큰 파일 내려받기나 천천히 흐르는 응답을
+끊지 않기 위한 것이다.
+
+전체 요청에 상한을 두면 어떤 기본값이든 정상 요청을 깨뜨린다. 막으려는 것은
+**느린 응답이 아니라 오지 않는 응답**이다.
+
+### 상태 코드
+
+```text
+응답이 오지 않음        504 Gateway Timeout
+backend를 쓸 수 없음    502 Bad Gateway
+```
+
+둘은 다르다. 앞의 것은 application이 살아 있으나 답하지 않는 상태다.
+상한을 넘긴 뒤에도 application은 `RUNNING`이다. 끊는 것은 요청 하나다.
+→ [§26 Acquire와 RequestLease](#26-acquire와-requestlease)
+
+### 기본값
+
+60초다. 넉넉하게 잡는다. 긴 DB 조회나 무거운 SSR도 header가 늦으므로 짧게
+잡으면 멀쩡한 요청을 끊는다. app별로 manifest에서 재정의한다.
+
+crash-loop backoff와 달리 이것은 Post-MVP가 아니다. backoff가 없으면 자원이
+더 쓰이는 데 그치지만, 이 상한이 없으면 **요청이 영원히 끝나지 않는다.**
 
 ---
 

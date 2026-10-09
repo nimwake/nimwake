@@ -49,6 +49,12 @@ pub fn with_timeouts(mut spec: AppSpec, startup: u64, shutdown: u64, idle: u64) 
     spec
 }
 
+/// 응답 header 상한만 바꾼다. 기본값 60초를 테스트에서 기다릴 이유가 없다. (PRD §75)
+pub fn with_response_header_timeout(mut spec: AppSpec, seconds: u64) -> AppSpec {
+    spec.lifecycle.response_header_timeout_seconds = seconds;
+    spec
+}
+
 /// HTTP 요청 하나를 보내고 응답 첫 줄을 돌려준다.
 pub fn http_get(port: u16) -> std::io::Result<String> {
     Ok(format!(

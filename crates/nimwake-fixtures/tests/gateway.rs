@@ -23,8 +23,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::{
-    bin, cmd, free_port, get, is_listening, request, request_within, spec, wait_for,
-    with_pending_limit, with_timeouts, HttpResponse,
+    bin, cmd, free_port, get, is_listening, request, spec, wait_for, with_pending_limit,
+    with_response_header_timeout, with_timeouts, HttpResponse,
 };
 use nimwake_core::app::AppSpec;
 use nimwake_core::runtime::ProcessRuntime;
@@ -479,54 +479,88 @@ async fn a_request_without_a_host_header_is_rejected() {
     harness.stop().await;
 }
 
-/// `mute-server`는 연결을 받아 두고 응답하지 않는다. `deaf-server`와 다르다.
-/// deaf는 끊으므로 proxy가 실패하고 502가 되지만, 이쪽은 붙잡고 있으므로
-/// `send_request`가 끝나지 않는다.
+/// 연결을 받아 두고 응답하지 않는 backend는 `504`로 끝낸다. (PRD §75)
 ///
-/// gateway에는 요청 단위 제한이 없다. port는 열려 있어 readiness probe도
-/// startup timeout도 이것을 걸러내지 못한다. startup timeout은 readiness까지만
-/// 덮기 때문이다.
+/// `mute-server`는 `deaf-server`와 다르다. deaf는 accept하고 끊으므로 proxy가
+/// 실패해 `502`가 된다. 이쪽은 연결을 **붙잡는다.** 요청을 읽지도, 응답을 쓰지도,
+/// 끊지도 않는다.
 ///
-/// **이 테스트는 결함을 고정한다.** 요청 timeout 계약이 생기면 504를 단언하도록
-/// 바꾸어야 한다. PRD에 해당 조항이 없어 지금은 현재 동작을 기록해 둔다.
+/// port는 열려 있으므로 readiness probe도 startup timeout도 이것을 걸러내지
+/// 못한다. startup timeout은 readiness까지만 덮는다. 그래서 요청 쪽에 상한이 필요하다.
+///
+/// 상한이 없던 동안 이 요청은 client가 끊을 때까지 끝나지 않았다.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_backend_that_never_answers_hangs_the_request() {
+async fn a_backend_that_never_answers_is_cut_off_with_504() {
     let app_port = free_port();
-    let harness = Harness::start(vec![with_timeouts(
-        spec("mute", app_port, cmd(bin::MUTE, &[app_port.to_string()])),
-        5,
-        60,
+    let harness = Harness::start(vec![with_response_header_timeout(
+        with_timeouts(
+            spec("mute", app_port, cmd(bin::MUTE, &[app_port.to_string()])),
+            5,
+            60,
+            1,
+        ),
         1,
     )])
     .await;
 
-    let port = harness.port;
-    let outcome = tokio::task::spawn_blocking(move || {
-        request_within(
-            port,
-            "GET",
-            "/",
-            "mute.localhost",
-            None,
-            Duration::from_secs(3),
-        )
-    })
-    .await
-    .expect("client task finished");
+    let started = Instant::now();
+    let response = harness.get("mute.localhost").await;
+    let elapsed = started.elapsed();
 
-    // 응답이 왔다면 계약이 생긴 것이다. 그때는 이 테스트를 갱신해야 한다.
-    let error = outcome.expect_err("gateway must not answer while the backend holds the request");
-    assert!(
-        matches!(
-            error.kind(),
-            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-        ),
-        "expected a read timeout, got {:?}: {error}",
-        error.kind(),
+    assert_eq!(
+        response.status, 504,
+        "a backend that never answers must produce 504, body: {:?}",
+        response.body,
     );
 
-    // app은 RUNNING이다. 기동은 성공했고 막힌 것은 요청뿐이다.
+    // 상한이 1초다. 기본값 60초를 기다렸다면 상한이 적용되지 않은 것이다.
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the request should end at the limit, took {elapsed:?}",
+    );
+
+    // application은 살아 있다. 끊은 것은 요청 하나다.
     assert_eq!(harness.state("mute").await, AppStateName::Running);
+
+    harness.stop().await;
+}
+
+/// 상한은 응답 header까지만 적용한다. body 전송에는 적용하지 않는다. (PRD §75)
+///
+/// **이 테스트가 계약의 핵심이다.** 전체 요청에 상한을 두면 큰 파일이나 천천히
+/// 흐르는 응답이 끊긴다. 막으려는 것은 느린 응답이 아니라 오지 않는 응답이다.
+///
+/// `slow-body-server`는 header를 즉시 보내고 body를 2초(20 x 100ms)에 걸쳐 흘린다.
+/// 상한을 1초로 두었으므로, body까지 상한에 들어간다면 응답이 잘린다.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_response_body_is_not_cut_off_by_the_header_timeout() {
+    let app_port = free_port();
+    let harness = Harness::start(vec![with_response_header_timeout(
+        with_timeouts(
+            spec(
+                "stream",
+                app_port,
+                cmd(bin::SLOW_BODY, &[app_port.to_string()]),
+            ),
+            5,
+            2,
+            60,
+        ),
+        1,
+    )])
+    .await;
+
+    let response = harness.get("stream.localhost").await;
+
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(
+        response.body.len(),
+        200,
+        "the body must survive a limit shorter than the body takes: {:?}",
+        response.body,
+    );
+
+    harness.stop().await;
 }
 
 /// port가 이미 다른 process의 것이면 application을 시작하지 않는다.

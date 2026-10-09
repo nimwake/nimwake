@@ -9,6 +9,7 @@
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use bytes::Bytes;
 use http::header::{HeaderName, CONNECTION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE};
@@ -48,11 +49,27 @@ pub(super) enum ProxyError {
         source: std::io::Error,
     },
 
+    #[error("backend did not send response headers within {limit:?}")]
+    ResponseHeaderTimeout { limit: std::time::Duration },
+
     #[error("backend handshake failed: {0}")]
     Handshake(#[source] hyper::Error),
 
     #[error("backend request failed: {0}")]
     Request(#[source] hyper::Error),
+}
+
+/// proxy 실패를 상태 코드로 옮긴다.
+///
+/// 응답이 오지 않은 것(`504`)과 backend를 쓸 수 없는 것(`502`)은 다르다.
+/// 앞의 것은 application이 살아 있으나 답하지 않는 상태다. (PRD §26, §75)
+pub(super) fn status_for(error: &ProxyError) -> http::StatusCode {
+    match error {
+        ProxyError::ResponseHeaderTimeout { .. } => http::StatusCode::GATEWAY_TIMEOUT,
+        ProxyError::Connect { .. } | ProxyError::Handshake(_) | ProxyError::Request(_) => {
+            http::StatusCode::BAD_GATEWAY
+        }
+    }
 }
 
 /// 요청을 backend로 전달하고 응답을 돌려준다.
@@ -64,28 +81,43 @@ pub(super) enum ProxyError {
 pub(super) async fn forward(
     lease: RequestLease,
     request: Request<Incoming>,
+    header_timeout: Duration,
 ) -> Result<Response<GatewayBody>, ProxyError> {
     let addr = lease.backend().addr();
 
-    let stream = TcpStream::connect(addr)
-        .await
-        .map_err(|source| ProxyError::Connect { addr, source })?;
+    // 상한은 **응답 header가 돌아오기까지만** 적용한다. (PRD §75)
+    //
+    // body에는 걸지 않는다. 큰 파일이나 천천히 흐르는 응답을 끊지 않기 위해서다.
+    // `send_request`는 header가 도착하면 반환하고 body는 그 뒤에 흐르므로,
+    // 이 구간을 감싸는 것이 곧 "header까지"다.
+    //
+    // 전체 요청에 상한을 두면 어떤 기본값이든 누군가의 정상 요청을 깨뜨린다.
+    // 막으려는 것은 느린 응답이 아니라 **오지 않는 응답**이다.
+    let response = tokio::time::timeout(header_timeout, async {
+        let stream = TcpStream::connect(addr)
+            .await
+            .map_err(|source| ProxyError::Connect { addr, source })?;
 
-    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
-        .await
-        .map_err(ProxyError::Handshake)?;
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+            .await
+            .map_err(ProxyError::Handshake)?;
 
-    // connection task는 응답 body가 다 흐를 때까지 살아 있어야 한다.
-    tokio::spawn(async move {
-        if let Err(error) = connection.await {
-            debug!(%addr, %error, "backend connection closed");
-        }
-    });
+        // connection task는 응답 body가 다 흐를 때까지 살아 있어야 한다.
+        tokio::spawn(async move {
+            if let Err(error) = connection.await {
+                debug!(%addr, %error, "backend connection closed");
+            }
+        });
 
-    let response = sender
-        .send_request(to_backend_request(request))
-        .await
-        .map_err(ProxyError::Request)?;
+        sender
+            .send_request(to_backend_request(request))
+            .await
+            .map_err(ProxyError::Request)
+    })
+    .await
+    .map_err(|_| ProxyError::ResponseHeaderTimeout {
+        limit: header_timeout,
+    })??;
 
     let (parts, body) = response.into_parts();
     let mut response = Response::from_parts(parts, LeasedBody { inner: body, lease }.boxed());

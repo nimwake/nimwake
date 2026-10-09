@@ -33,7 +33,6 @@ Scale-to-Zero application lifecycle. 요청이 오면 깨우고, 쓰지 않으�
 | --- | --- |
 | 실제 서비스의 cold start | Next.js 기동 206ms · 첫 응답 396ms. 다만 한 페이지짜리 앱이라 하한이다 |
 | readiness의 의미 | TCP connect가 되는 시점을 쓴다. Next.js는 port를 열고도 첫 응답까지 190ms 더 걸린다 |
-| 요청 단위 timeout | 없다. 연결을 받아 두고 응답하지 않는 application을 만나면 요청이 끝나지 않는다 |
 | 동시 기동의 자원 한계 | Next.js 앱 하나가 118MB. 2GB 기기면 10~14개가 한계인데 제한 장치가 없다 |
 | 장시간 운용 | 측정 구간이 분 단위다. 24h · 72h는 `nimwake-android` 검증 소관 |
 | manifest 재적재 | 없다. application 추가에 daemon 재시작이 필요하다 |
