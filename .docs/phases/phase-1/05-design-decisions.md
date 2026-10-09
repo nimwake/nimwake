@@ -100,6 +100,49 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## 같은 함정을 다른 테스트도 밟고 있었다
+
+§19 작업의 교훈이 "한 파일의 경고가 옆 파일에 닿지 않았다"였으므로 전체를
+쓸어 보았다.
+
+```text
+start_waits_for_readiness_and_stop_removes_the_process   http_get를 직접 부른다
+registry_shutdown_leaves_no_managed_child                오탐 (registry.get)
+```
+
+앞의 것은 진짜다. `ProcessRuntime::start`가 drain task를 띄운 뒤 단일 스레드
+runtime에서 blocking client를 직접 부른다. `echo-server`는 출력이 적어 pipe가
+차지 않으므로 **지금은** 통과한다. fixture가 수다스러워지는 순간 깨진다.
+
+`spawn_blocking`으로 감쌌다.
+
+### 경고를 검사로 옮겼다
+
+`scripts/check-blocking-clients.py`를 ci.yml에 연결했다. 통과 조건은 둘 중 하나다.
+
+```text
+flavor = "multi_thread"
+spawn_blocking으로 감싼다
+```
+
+### guard가 주석에 속았다
+
+처음 판은 본문에 `spawn_blocking`이라는 **단어**가 있는지만 보았다. 그래서
+위반을 통과시켰다 — 내가 그 테스트에 써 넣은 설명 주석에 그 단어가 있었기
+때문이다.
+
+```text
+"blocking client는 spawn_blocking으로 부른다"   ← 주석
+```
+
+주석을 걷어내고 `spawn_blocking(` 형태의 **호출**만 세도록 고쳤다.
+
+**일부러 깨뜨려 보지 않았으면 몰랐을 것이다.** guard를 넣고 "통과한다"만
+확인하면 아무것도 지키지 않는 guard가 남는다. 이번 루프에서 세 번째로 같은
+방식에 걸렸다 — §29의 세대 비교, §19의 drain 테스트, 그리고 이 guard다.
+
+---
+
 ## §19의 "pipe 방치 금지"를 지키는 테스트가 지키지 않고 있었다
 
 §19는 분명하게 적는다.

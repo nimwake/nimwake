@@ -99,6 +99,16 @@ jobs:
             exit 1
           fi
 
+      # blocking HTTP client를 단일 스레드 runtime에서 직접 부르면 같은 runtime의
+      # task(gateway, stdout/stderr drain)가 굶는다. 증상은 "client 읽기 시간 초과"로
+      # 나타나 원인을 찾기 어렵다. §19를 지킨다던 테스트가 이 함정 때문에 drain을
+      # 제거해도 통과하고 있었다.
+      #
+      # gateway.rs의 모듈 doc이 이미 경고했는데 process_runtime.rs가 밟았다.
+      # 한 파일의 경고는 옆 파일에 닿지 않으므로 검사로 옮긴다.
+      - name: Forbid blocking clients on a single-threaded runtime
+        run: python3 scripts/check-blocking-clients.py
+
       # Invariant 6 — 오래 걸리는 작업은 AppManager의 event loop 밖에서 수행한다.
       #
       # 판단 경로(`transition`)는 **동기 순수 함수**다. async가 아니면 애초에
