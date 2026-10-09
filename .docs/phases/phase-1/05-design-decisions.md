@@ -100,6 +100,65 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## §29가 처방한 기제가 실제로 일하고 있지 않았다
+
+§29는 stale idle timer를 `IdleGeneration` 비교로 막는다고 적고, §68이 그 identity를
+정의한다. idle timeout 판정은 세 조건을 본다.
+
+```rust
+running.idle_generation == generation
+    && running.leases.is_empty()
+    && ctx.now.duration_since(running.last_request_at) >= idle_timeout
+```
+
+어느 조건이 실제로 막는지 하나씩 지워 보았다.
+
+```text
+leases.is_empty() 제거   returning_one_of_many_leases_does_not_arm_the_timer 실패
+시간 검사 제거            an_early_idle_timer_does_not_stop_the_app 실패
+세대 비교 제거            아무 테스트도 실패하지 않는다
+```
+
+**세대 비교에 의존하는 테스트가 하나도 없다.**
+
+### 테스트를 쓸 수 없다
+
+처음에는 테스트가 빠진 것으로 보고 쓰려 했다. 쓸 수 없다.
+
+옛 timer가 도착한 시점에 lease가 비어 있고 idle timeout도 지났다면,
+**어느 timer가 깨웠든 멈추는 것이 옳다.** 세대를 보든 보지 않든 결과가 같다.
+행동으로 구분되는 경우가 없으므로 단언할 것이 없다.
+
+기존 `a_stale_idle_timer_is_ignored`도 세대 때문에 통과하는 것이 아니다.
+새 acquire가 lease를 발급하므로 `leases.is_empty()`에서 걸린다.
+
+### 그래도 두고, 코드에 적었다
+
+지우지 않았다. PRD가 처방한 기제이고 뒤의 두 조건이 약해지면 마지막 방어선이 된다.
+
+대신 판정부 주석에 **주된 보호가 아니라는 것**을 적었다. §29를 읽고 "세대가
+막아 준다"고 믿으면 틀린 전제로 코드를 고치게 된다. 시간 검사를 손보면서
+"세대가 있으니 괜찮다"고 판단하는 것이 정확히 그 경우다.
+
+### §29의 둘째 문단은 테스트가 없었다
+
+```text
+있던 것   Running(N) → 새 acquire로 N+1 → timer(N) 발화 → 무시
+없던 것   Running(N) → SLEEPING을 거쳐 Running(M) → timer(N) 발화 → ?
+```
+
+후자를 `an_idle_timer_from_a_previous_incarnation_is_ignored`로 채웠다.
+무시되는 것 자체는 `leases` 검사가 보장하지만, 이 테스트의
+`assert_ne!(h.idle_generation(), previous)`는 **세대가 재사용되지 않는다**는
+별개의 성질을 고정한다.
+
+그 성질은 수열이 `Ctx`에 있어 application 수명 전체에 걸쳐 단조 증가하기
+때문에 성립한다. PRD의 표현("`Running` state가 소유하므로")은 수열을 `Running`
+안으로 옮기도록 오해를 부를 수 있고, 그러면 새 incarnation이 같은 번호를 다시
+내준다. 그때 이 단언이 걸린다.
+
+---
+
 ## §12의 불변식 열 중 셋은 테스트로 잡히지 않는 종류였다
 
 완료 체크리스트는 DoD의 동시성 항목 일곱을 근거와 함께 담고 있었지만, **§12의
