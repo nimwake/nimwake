@@ -69,6 +69,55 @@
 
 ---
 
+## PRD 조항별 근거
+
+PRD를 코드와 한 절씩 대조한 결과다. **같은 일을 다시 하지 않기 위해 남긴다.**
+
+`test`는 자동 테스트, `guard`는 `ci.yml`의 구조 검사, `gate`는 release를 막는
+검사, `report`는 판정하지 않고 기록하는 수치, `구조`는 타입과 모듈 경계가
+보장하는 것이다.
+
+| 절 | 무엇으로 받쳐지나 |
+| --- | --- |
+| §9–§10 Core Architecture | `guard` gateway가 runtime에 닿지 못한다 (Invariant 3) |
+| §11 상태 모델 | `test` 전이 테스트 41개 · 집합 의미를 쓰는 두 이유 모두 |
+| §12 Invariant 1–10 | 아래 표 참조 |
+| §18 Runtime Abstraction | `구조` lifecycle 판단이 `transition.rs` 한 곳에 있다 (아래) |
+| §19 Process Runtime | `test` `a_noisy_process_keeps_serving` — drain을 빼면 실패한다 |
+| §20 Process Isolation | `test` `the_child_gets_its_own_directory_and_an_overlaid_environment` |
+| §21–§22 Manifest · Readiness | `test` 검증 항목 여덟 전부 · timeout 네 개를 하나씩 |
+| §23 Gateway Routing | `test` Host 정규화(포트·대소문자) 세 곳 |
+| §24 HTTP Contract | `test` `every_contract_method_passes_through` |
+| §25 Request Tracking | `guard` + `구조` counter는 lease로만 움직인다 |
+| §26 Acquire / Lease | `test` lease 수명과 body 수명이 묶여 있다 |
+| §27–§28 Scale-to-Zero · Idle Timer | `test` 두 조건을 각각 지워 확인했다 |
+| §29 Stale Timer | `test` · 세대 비교는 **주된 보호가 아니다** (설계 기록 참조) |
+| §30 Graceful Shutdown | `test` SIGTERM → timeout → SIGKILL · process group |
+| §31–§32 STOPPING 중 요청 · Crash | `test` waiter 이월 · 교체된 process의 event 무시 |
+| §33 Failure Recovery | `report` crash loop — backoff는 Post-MVP이고 경계를 측정했다 |
+| §43 Stress | `gate` lifecycle stress · sustained · crash loop |
+| §44 CI Strategy | `gate` 차단 기준 다섯 전부 (deadlock은 단계별 기한으로) |
+| §50 Android 비교 | `report` `baseline.txt`가 비교 항목 다섯을 담는다 |
+| §69 Backpressure | `guard` unbounded channel 금지 · `test` 상한 초과는 503 |
+| §70 Process Ownership | `guard` `tokio::process`는 `controller.rs` 밖에서 금지 |
+| §71 Daemon–Child Lifetime | `test` + `gate` daemon 종료 후 잔존 0 |
+| §72 Latency Instrumentation | `test` 구간이 연속 부분구간인지 숫자로 단언한다 |
+| §73 Performance Report | `report` release마다 baseline 누적 · 직전 대비 |
+| §74 Host Interface | `test` listen 주소 · 종료 코드 · health probe |
+| §75 Response Header Timeout | `test` 504로 끊고 **느린 body는 끊지 않는다** |
+
+### §18은 테스트가 아니라 구조가 보장한다
+
+"adapter가 바뀌어도 lifecycle semantics는 변경되지 않아야 한다"를 두 runtime의
+테스트를 나란히 두는 방식으로 증명하지 않는다. 그렇게 하면 두 벌의 테스트가
+비슷해 보이는지만 사람이 눈으로 비교하게 된다.
+
+**lifecycle 판단이 `transition.rs` 한 곳에 있다.** 그 함수는 runtime을 모른다.
+`Runtime`이 돌려줄 수 있는 것은 성공·실패·종료 상태뿐이고, 그것들은 모두 같은
+전이 함수로 들어간다. adapter가 semantics를 바꿀 방법이 없다.
+
+Invariant 2 guard가 이것을 지킨다 — 전이를 두 번째 장소에서 적용하면 CI가 막는다.
+
 ## 동시성 불변식
 
 ### PRD §12 Invariant 1–10
