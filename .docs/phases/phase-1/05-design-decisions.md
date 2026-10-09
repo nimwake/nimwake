@@ -100,6 +100,55 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## §12의 불변식 열 중 셋은 테스트로 잡히지 않는 종류였다
+
+완료 체크리스트는 DoD의 동시성 항목 일곱을 근거와 함께 담고 있었지만, **§12의
+Invariant 1~10과 1:1이 아니었다.** 대조해 보니 셋은 어떤 테스트도 지키지 않고
+있었다.
+
+```text
+2  Single Lifecycle Authority    state를 바꾸는 주체가 AppManager 하나
+3  Gateway Isolation             gateway는 acquire()만 쓴다
+6  Non-Blocking Actor            긴 작업은 event loop 밖에서
+```
+
+셋 다 **지금은 성립한다.** 문제는 테스트로 표현할 수 없는 종류라는 것이다.
+"두 번째 장소에서 상태를 바꾸지 않는다"는 어떤 입력으로도 확인할 수 없다.
+입력이 아니라 **구조**의 성질이다.
+
+저장소에 이미 같은 종류의 CI guard가 둘 있었다 — `unbounded_channel` 금지(Invariant
+9)와 `tokio::process` import 금지(§70). 그 패턴으로 셋을 더했다.
+
+```text
+Forbid a second lifecycle authority        transition::을 manager.rs 밖에서 적용하면 실패
+Forbid the gateway from reaching into...   gateway가 runtime·AppManager를 import하면 실패
+Keep the decision path synchronous         transition.rs에 async fn·.await가 들어오면 실패
+```
+
+### Invariant 6을 동기성으로 환원했다
+
+이것이 세 guard 중 가장 깔끔하다. `transition`은 **동기 순수 함수**다.
+`async`가 아니면 애초에 기다릴 수 없다. 기동·종료·monitor는 `Effect`로 나가
+별도 task에서 수행된다.
+
+```text
+Effect::Start · Effect::Stop · Effect::Monitor · Effect::ScheduleIdleTimer ...
+```
+
+"오래 걸리는 작업을 event loop 안에서 하지 않는다"를 직접 검사하는 대신
+**애초에 불가능하게 만든 것을 지킨다.** `transition.rs`에 `async fn`이 들어오는
+순간 그 보장이 사라지므로 거기를 본다.
+
+세 guard 모두 일부러 깨뜨려 잡히는지 확인했다.
+
+### 매핑을 문서에 남겼다
+
+체크리스트에 Invariant 1~10 표를 넣고 각 항목이 `test` / `guard` / `gate` /
+`report` 중 무엇으로 지켜지는지 적었다. 인용한 식별자 17개가 실존하는지도
+확인했다.
+
+---
+
 ## `proxy_connect_latency`가 이름과 다른 것을 재고 있었다
 
 §72의 파생 지표 일곱을 코드와 대조했다. 여섯은 맞고 하나가 달랐다.
