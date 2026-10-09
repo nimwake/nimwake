@@ -100,6 +100,50 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## §23~26 감사 — 하나만 비어 있었다
+
+gateway 절 넷을 코드와 대조했다.
+
+```text
+§23 Gateway Routing     Host 정규화까지 받쳐진다 (아래)
+§24 HTTP Contract       메서드 여섯 중 둘만 테스트돼 있었다   ←
+§25 Request Tracking    구조적 주장은 Invariant 3 guard와 privacy로 덮인다
+§26 Acquire / Lease     테스트가 있다
+```
+
+### §24 — GET과 POST만 쓰고 있었다
+
+§24는 `GET / HEAD / POST / PUT / DELETE / PATCH`를 보장 범위로 적는다.
+테스트는 GET과 POST만 썼다. 나머지 넷은 **동작하지만 아무것도 고정하고 있지
+않았다.** method 필터가 들어오거나 `to_backend_request`가 무언가를 떨어뜨리면
+조용히 깨진다.
+
+`every_contract_method_passes_through`로 여섯을 모두 돌린다. HEAD는 응답에 body가
+없어야 하므로 따로 단언한다. gateway가 GET 외를 거부하도록 뒤집어 잡히는 것을
+확인했다.
+
+### 조사하다 한 번 헛짚었다
+
+HEAD가 gateway를 지나면 10초 내내 멈추는 것으로 보였다. 앱에 직접 보내면
+0.0002초였으니 gateway 결함으로 읽혔다.
+
+**측정 방법이 틀렸다.** `curl -X HEAD`는 응답이 bodiless인 것을 모르고 body를
+기다린다. 규격을 지키는 backend를 따로 만들어 비교해 보니 **직접 요청도 똑같이
+멈췄다.** `curl -I`로 보면 양쪽 모두 정상이다.
+
+거짓 결함을 보고하기 전에 걸러진 이유는 "앱에 직접"이라는 대조군을 함께
+측정했기 때문이다. 한쪽만 재면 gateway 탓으로 끝났다.
+
+### §23 — 우려했던 것이 이미 처리돼 있었다
+
+기본 listen이 `127.0.0.1:8080`이므로 브라우저는 `Host: name:8080`을 보낸다.
+정확히 일치 검사였다면 브라우저로 접근하는 가장 흔한 경우가 깨진다.
+
+`normalize_host`가 포트를 떼고 소문자화하며, 단위·lifecycle·gateway 세 곳에서
+테스트된다. 확인만 하고 지나갔다.
+
+---
+
 ## §75를 넣으면서 §22의 검증 목록을 깨뜨렸다
 
 §22는 manifest 검증 항목 여덟을 열거하고 "하나라도 위반하면 기동을 거부한다"고
