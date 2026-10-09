@@ -28,7 +28,14 @@ async fn start_waits_for_readiness_and_stop_removes_the_process() {
     // start가 반환됐다는 것은 readiness가 끝났다는 뜻이다. 추가로 기다릴 필요가 없다. (PRD §22)
     assert_eq!(started.backend.addr().port(), port);
     assert!(is_listening(port), "backend must accept connections");
-    assert!(http_get(port).expect("request succeeds").contains("200"));
+
+    // blocking client는 `spawn_blocking`으로 부른다. 이 runtime에는 drain task가
+    // 돌고 있고, 테스트 thread에서 직접 부르면 그것이 굶는다. (PRD §19)
+    let response = tokio::task::spawn_blocking(move || http_get(port))
+        .await
+        .expect("client task finished")
+        .expect("request succeeds");
+    assert!(response.contains("200"));
 
     runtime
         .stop(&started.handle, STOP_TIMEOUT)
