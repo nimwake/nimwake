@@ -160,11 +160,13 @@ async fn handle(
     trace.acquire_completed();
 
     trace.proxy_started();
-    let response = match proxy::forward(lease, request).await {
+    let header_timeout = app.spec().lifecycle.response_header_timeout();
+    let response = match proxy::forward(lease, request, header_timeout).await {
         Ok(response) => response,
         Err(error) => {
-            warn!(app = app.name(), %error, "proxy failed");
-            router::text(StatusCode::BAD_GATEWAY, &error.to_string())
+            let status = proxy::status_for(&error);
+            warn!(app = app.name(), %status, %error, "proxy failed");
+            router::text(status, &error.to_string())
         }
     };
 

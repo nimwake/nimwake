@@ -364,8 +364,46 @@ port가 열려 있으므로 readiness probe도 startup timeout도 이것을 걸�
 
 lease는 body가 drop될 때 회수되므로 daemon이 새지는 않는다. 기다리는 쪽이 문제다.
 
-이 테스트는 **지금 동작을 고정한 것**이다. PRD에 요청 timeout 조항도 504도
-없어서 새 계약을 여기서 정하지 않았다. 계약이 생기면 504를 단언하도록 바꾼다.
+### 계약을 정했다 — PRD §75
+
+처음에는 지금 동작을 고정만 해 두었다. PRD에 조항도 504도 없어서 새 계약을
+코드에서 정하지 않았다. 그 뒤 사용자가 해소를 지시해 **PRD §75**를 신설했다.
+
+상한은 **응답 header까지만** 적용한다.
+
+```text
+요청 전송 ──────── 응답 header 도착 ──────── body 전송 완료
+└──────── 상한 적용 ────────┘└──── 적용하지 않는다 ────┘
+```
+
+세 안 중 이것을 고른 이유다. 전체 요청에 상한을 두면 어떤 기본값이든 정상
+요청을 깨뜨린다. 큰 파일 내려받기와 천천히 흐르는 응답이 먼저 끊긴다.
+막으려는 것은 **느린 응답이 아니라 오지 않는 응답**이다.
+
+```text
+[lifecycle] response_header_timeout_seconds = 60   기본값
+504 Gateway Timeout                                응답이 오지 않음
+502 Bad Gateway                                    backend를 쓸 수 없음
+```
+
+기본값을 60초로 넉넉히 잡았다. 긴 DB 조회나 무거운 SSR도 header가 늦다.
+
+구현은 `proxy::forward`에서 connect · handshake · `send_request`를 한 번에
+감싼다. `send_request`는 header가 도착하면 반환하고 body는 그 뒤에 흐르므로,
+이 구간을 감싸는 것이 곧 "header까지"다.
+
+테스트 둘로 고정했다.
+
+```text
+a_backend_that_never_answers_is_cut_off_with_504
+a_slow_response_body_is_not_cut_off_by_the_header_timeout   ← 계약의 핵심
+```
+
+뒤쪽이 중요하다. `slow-body-server`는 header를 즉시 보내고 body를 2초에 걸쳐
+흘린다. 상한을 1초로 두었으므로 body까지 상한에 들어간다면 응답이 잘린다.
+
+앞쪽은 뮤테이션으로 확인했다. 상한을 무력화하면 31.8초에 실패한다
+(client의 읽기 상한). 상한이 없던 동안의 실제 모습이다.
 
 ### 자원 경계가 `hello-node`로 본 것보다 가깝다
 
