@@ -8,7 +8,7 @@ use std::fmt::Write;
 
 use crate::baseline::{self, Baseline};
 use crate::stats::{delta_ms, ms, Summary};
-use crate::stress::{Resources, StressResult, SustainedResult};
+use crate::stress::{CrashLoopResult, Resources, StressResult, SustainedResult};
 use crate::{StormResult, SweepRow, WarmResult};
 
 pub struct Report {
@@ -18,6 +18,7 @@ pub struct Report {
     sweep: Vec<SweepRow>,
     stress: Option<StressResult>,
     sustained: Option<SustainedResult>,
+    crash_loop: Option<CrashLoopResult>,
     previous: Option<Baseline>,
 }
 
@@ -30,6 +31,7 @@ impl Report {
             sweep: Vec::new(),
             stress: None,
             sustained: None,
+            crash_loop: None,
             previous: None,
         }
     }
@@ -48,6 +50,10 @@ impl Report {
 
     pub fn stress(&mut self, result: StressResult) {
         self.stress = Some(result);
+    }
+
+    pub fn crash_loop(&mut self, result: CrashLoopResult) {
+        self.crash_loop = Some(result);
     }
 
     pub fn sustained(&mut self, result: SustainedResult) {
@@ -104,6 +110,10 @@ impl Report {
         if let Some(stress) = &self.stress {
             problems.extend(stress.leaks().into_iter().map(|p| format!("stress: {p}")));
         }
+        if let Some(crash_loop) = &self.crash_loop {
+            problems.extend(crash_loop.leaks());
+        }
+
         if let Some(sustained) = &self.sustained {
             problems.extend(sustained.leaks());
         }
@@ -125,6 +135,7 @@ impl Report {
         self.render_sweep(&mut out);
         self.render_stress(&mut out);
         self.render_sustained(&mut out);
+        self.render_crash_loop(&mut out);
         self.render_comparison(&mut out);
         out
     }
@@ -196,6 +207,55 @@ impl Report {
         let _ = writeln!(out, "| FD 증가 | {} |\n", growth_count(fds));
 
         let _ = render_trend(out, &sustained.samples);
+    }
+
+    /// PRD §33의 주장을 확인한 결과. backoff 없이도 경계가 있는지 본다.
+    fn render_crash_loop(&self, out: &mut String) {
+        let Some(crash_loop) = &self.crash_loop else {
+            return;
+        };
+
+        let (rss, fds) = crash_loop.growth();
+        let _ = writeln!(
+            out,
+            "## Crash loop ({}s, {} apps)
+",
+            crash_loop.duration.as_secs(),
+            crash_loop.apps,
+        );
+        let _ = writeln!(
+            out,
+            "backoff는 Post-MVP다. 여기서 보는 것은 **그 없이도 경계가 있는가**다. (PRD §33)
+"
+        );
+        let _ = writeln!(out, "| | |");
+        let _ = writeln!(out, "| --- | ---: |");
+        let _ = writeln!(
+            out,
+            "| requests (모두 502여야 한다) | {} |",
+            crash_loop.requests
+        );
+        let _ = writeln!(out, "| 502가 아닌 응답 | {} |", crash_loop.unexpected);
+        let _ = writeln!(
+            out,
+            "| 동시 자식 최대 (<= {}) | {} |",
+            crash_loop.apps, crash_loop.max_children,
+        );
+        let _ = writeln!(out, "| 정착 후 zombie | {} |", crash_loop.zombies);
+        let _ = writeln!(
+            out,
+            "| 부하 중 zombie 최대 (판정 안 함) | {} |",
+            crash_loop.max_zombies_seen,
+        );
+        let _ = writeln!(out, "| RSS 증가 | {} |", growth_bytes(rss));
+        let _ = writeln!(
+            out,
+            "| FD 증가 | {} |
+",
+            growth_count(fds)
+        );
+
+        let _ = render_trend(out, &crash_loop.samples);
     }
 
     /// 직전 release 대비. 경고만 남기고 release를 막지 않는다. (PRD §73)

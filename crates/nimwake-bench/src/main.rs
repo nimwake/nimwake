@@ -49,6 +49,13 @@ const STRESS_APPS: usize = 10;
 const SUSTAINED_SECONDS: u64 = 30;
 const SUSTAINED_CONNECTIONS: usize = 8;
 
+/// crash-loop 기본값. (PRD §33)
+///
+/// application마다 동시에 기동 하나라는 것을 보려면 여러 개가 필요하다.
+const CRASH_LOOP_SECONDS: u64 = 15;
+const CRASH_LOOP_APPS: usize = 5;
+const CRASH_LOOP_CONNECTIONS: usize = 8;
+
 fn main() -> std::process::ExitCode {
     match run() {
         Ok(report) => {
@@ -100,6 +107,15 @@ fn run() -> Result<String, String> {
             Duration::from_secs(options.sustained_seconds),
             SUSTAINED_CONNECTIONS,
         )?);
+
+        eprintln!("running crash loop for {CRASH_LOOP_SECONDS}s...");
+        report.crash_loop(stress::crash_loop(
+            &options.nimwaked,
+            &options.crash_server,
+            Duration::from_secs(CRASH_LOOP_SECONDS),
+            CRASH_LOOP_APPS,
+            CRASH_LOOP_CONNECTIONS,
+        )?);
     }
 
     // 직전 release와 비교한다. 없으면 이번 것이 첫 baseline이 된다. (PRD §73)
@@ -141,6 +157,7 @@ fn run() -> Result<String, String> {
 struct Options {
     nimwaked: PathBuf,
     echo_server: PathBuf,
+    crash_server: PathBuf,
     out: Option<PathBuf>,
     /// 직전 release의 baseline. 있으면 비교표를 싣는다.
     baseline: Option<PathBuf>,
@@ -165,6 +182,7 @@ impl Options {
         let mut options = Self {
             nimwaked: bin_dir.join("nimwaked"),
             echo_server: bin_dir.join("echo-server"),
+            crash_server: bin_dir.join("crash-server"),
             out: None,
             baseline: None,
             baseline_out: None,

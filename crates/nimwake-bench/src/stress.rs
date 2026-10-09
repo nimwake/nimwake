@@ -244,6 +244,213 @@ fn zombies_under(parent: u32) -> usize {
         .count()
 }
 
+/// daemon의 살아 있는 자식 수. zombie는 세지 않는다.
+///
+/// crash-loop에서 실제로 묻고 싶은 것은 "동시에 몇 개가 떠 있나"다.
+/// 짧게 살고 죽는 process라 표본 간격을 촘촘히 해야 잡힌다.
+fn children_under(parent: u32) -> usize {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+                return false;
+            };
+            let Some(rest) = stat.rsplit(')').next() else {
+                return false;
+            };
+            let mut fields = rest.split_whitespace();
+            let state = fields.next();
+            let ppid = fields.next().and_then(|value| value.parse::<u32>().ok());
+            state != Some("Z") && ppid == Some(parent)
+        })
+        .count()
+}
+
+pub struct CrashLoopResult {
+    pub duration: Duration,
+    pub apps: usize,
+    pub requests: usize,
+    /// 502가 아닌 응답. 계속 실패하는 application은 모든 요청에 502여야 한다.
+    pub unexpected: usize,
+    /// 동시에 살아 있던 자식의 최대값. application 수를 넘으면 안 된다.
+    pub max_children: usize,
+    /// 부하가 멈추고 거둘 시간을 준 뒤의 zombie 수. **이쪽이 판정 기준이다.**
+    pub zombies: usize,
+    /// 부하 중에 본 zombie의 최대값. 판정하지 않고 기록만 한다.
+    ///
+    /// 자식이 종료한 뒤 부모가 `wait`로 거둘 때까지 짧게 zombie다. 촘촘히 보면
+    /// 그 창에 걸리므로 0이 아닌 것이 정상이다. 쌓이는지가 문제이고 그것은
+    /// [`Self::zombies`]가 답한다.
+    pub max_zombies_seen: usize,
+    pub samples: Vec<Resources>,
+}
+
+impl CrashLoopResult {
+    pub fn leaks(&self) -> Vec<String> {
+        let mut found = Vec::new();
+
+        if self.unexpected > 0 {
+            found.push(format!(
+                "{} response(s) were not 502 from a crash-looping app",
+                self.unexpected
+            ));
+        }
+
+        // 기동 중복 제거가 깨지면 여기서 드러난다. application마다 동시에 하나다. (PRD §20)
+        if self.max_children > self.apps {
+            found.push(format!(
+                "{} concurrent child process(es) for {} crash-looping app(s)",
+                self.max_children, self.apps
+            ));
+        }
+
+        // 부하가 멈춘 뒤에도 남아 있으면 거두지 않은 것이다.
+        if self.zombies > 0 {
+            found.push(format!(
+                "{} zombie(s) left unreaped after the crash loop settled",
+                self.zombies
+            ));
+        }
+
+        found
+    }
+
+    /// 처음과 마지막 표본의 차이. [`SustainedResult::growth`]와 같은 기준이다.
+    pub fn growth(&self) -> (Option<i64>, Option<i64>) {
+        let (Some(first), Some(last)) = (self.samples.first(), self.samples.last()) else {
+            return (None, None);
+        };
+
+        let rss = first
+            .rss
+            .zip(last.rss)
+            .map(|(a, b)| i64::try_from(b).unwrap_or(0) - i64::try_from(a).unwrap_or(0));
+        let fds = first
+            .fds
+            .zip(last.fds)
+            .map(|(a, b)| i64::try_from(b).unwrap_or(0) - i64::try_from(a).unwrap_or(0));
+
+        (rss, fds)
+    }
+}
+
+/// 계속 실패하는 application에 지속적으로 요청을 보낸다. (PRD §33)
+///
+/// PRD §33은 crash-loop backoff를 Post-MVP로 미루면서 이렇게 적는다.
+///
+/// > MVP에서는 backoff 없이 재시도하되, 반복 실패가 무한 spawn으로 이어지지 않도록
+/// > `startup_timeout_seconds`와 bounded waiter 상한에 의존한다.
+///
+/// 이 시나리오는 그 주장을 확인한다. backoff를 넣지 않는다. 넣는 것은 PRD를
+/// 다시 쓰는 일이다. 확인하는 것은 **무엇을 근거로 안전하다고 말하는가**다.
+///
+/// `crash-server`는 port를 bind하지 않고 곧바로 종료하므로 요청마다 기동이
+/// 재시도된다. 자식은 매우 짧게 살기 때문에 표본 간격을 촘촘히 둔다.
+pub fn crash_loop(
+    nimwaked: &Path,
+    crash_server: &Path,
+    duration: Duration,
+    apps: usize,
+    connections: usize,
+) -> Result<CrashLoopResult, String> {
+    let apps = apps.max(1);
+    let dir = Apps::new("crash-loop").map_err(|error| error.to_string())?;
+
+    let hosts: Vec<String> = (0..apps)
+        .map(|index| {
+            let name = format!("crash{index}");
+            let port = free_port();
+            dir.app(
+                &name,
+                port,
+                &[crash_server.display().to_string(), port.to_string()],
+            )
+            .map(|()| format!("{name}.localhost"))
+            .map_err(|error| error.to_string())
+        })
+        .collect::<Result<_, _>>()?;
+
+    let daemon = Daemon::start(nimwaked, dir.path())?;
+    let gateway = daemon.port();
+    let deadline = Instant::now() + duration;
+
+    let workers: Vec<_> = (0..connections.max(1))
+        .map(|index| {
+            let hosts = hosts.clone();
+            std::thread::Builder::new()
+                .stack_size(64 * 1024)
+                .spawn(move || {
+                    let (mut sent, mut unexpected) = (0usize, 0usize);
+                    let mut next = index;
+                    while Instant::now() < deadline {
+                        let host = &hosts[next % hosts.len()];
+                        next = next.wrapping_add(1);
+                        match get(gateway, host) {
+                            // 기동에 실패한 application은 502다. (PRD §26)
+                            Ok(response) if response.status == 502 => sent += 1,
+                            Ok(_) => {
+                                sent += 1;
+                                unexpected += 1;
+                            }
+                            // 연결 자체가 실패한 것은 gateway가 답하지 않은 것이다.
+                            Err(_) => unexpected += 1,
+                        }
+                    }
+                    (sent, unexpected)
+                })
+                .expect("load thread spawns")
+        })
+        .collect();
+
+    // 자식이 짧게 살고 죽으므로 자원 표본보다 촘촘히 본다.
+    let mut samples = Vec::new();
+    let mut max_children = 0;
+    let mut max_zombies_seen = 0;
+    let mut next_sample = Instant::now();
+    let resource_interval =
+        (duration / u32::try_from(SAMPLE_TARGET).unwrap_or(1)).max(Duration::from_millis(500));
+
+    while Instant::now() < deadline {
+        max_children = max_children.max(children_under(daemon.pid()));
+        max_zombies_seen = max_zombies_seen.max(zombies_under(daemon.pid()));
+
+        if Instant::now() >= next_sample {
+            samples.push(Resources::observe(daemon.pid()));
+            next_sample = Instant::now() + resource_interval;
+        }
+
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    samples.push(Resources::observe(daemon.pid()));
+
+    let (mut requests, mut unexpected) = (0usize, 0usize);
+    for worker in workers {
+        let (sent, bad) = worker.join().map_err(|_| "load thread panicked")?;
+        requests += sent;
+        unexpected += bad;
+    }
+
+    // 부하가 멈춘 뒤에 본다. 거둘 시간을 주지 않고 세면 정상적인 일시 zombie를
+    // 누수로 읽는다. 실제로 그렇게 한 번 잘못 판정했다.
+    std::thread::sleep(Duration::from_millis(500));
+    let zombies = zombies_under(daemon.pid());
+
+    Ok(CrashLoopResult {
+        duration,
+        apps,
+        requests,
+        unexpected,
+        max_children,
+        zombies,
+        max_zombies_seen,
+        samples,
+    })
+}
+
 /// 장시간 warm 트래픽. proxy 경로 자체의 누수를 본다. (PRD §43)
 ///
 /// lifecycle stress가 반복 기동·종료를 본다면 이쪽은 기동 없이 지속되는 경로를 본다.
