@@ -59,14 +59,17 @@ jobs:
 
       # E2E는 fixture 바이너리를 형제 경로에서 찾는다. workspace 전체를 빌드해야 한다.
       - name: Build release binaries
+        timeout-minutes: 20
         run: cargo build --workspace --release
 
       # 실제 nimwaked를 띄우는 회귀 테스트. (PRD §41)
       - name: End-to-end
+        timeout-minutes: 20
         run: cargo test --release -p nimwaked --test e2e -- --test-threads=4
 
       # 판정하지 않는다. 어디를 최적화해야 하는지 알아내기 위한 측정이다. (PRD §42)
       - name: Performance baseline
+        timeout-minutes: 20
         run: |
           ./target/release/nimwake-bench \
             --commit "${GITHUB_SHA}" \

@@ -101,10 +101,12 @@ jobs:
           restore-keys: ${{ runner.os }}-release-
 
       - name: Build
+        timeout-minutes: 20
         run: cargo build --workspace --release
 
       # 단위 · 동시성 · lifecycle · gateway · E2E가 모두 여기 들어 있다.
       - name: Tests
+        timeout-minutes: 20
         run: cargo test --workspace --all-features --release
 
       # 직전 release의 baseline. 없으면 이번 것이 첫 baseline이 된다.
@@ -118,6 +120,7 @@ jobs:
       # cold-start storm · lifecycle stress · sustained warm load · 누수 검증. (PRD §42–§43)
       # 이 단계가 실패하면 release가 멈춘다.
       - name: Stress and leak checks
+        timeout-minutes: 25
         run: |
           compare=""
           if [ -f previous/baseline.txt ]; then
@@ -169,12 +172,15 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install cross
+        timeout-minutes: 15
         run: cargo install cross --locked --version 0.2.5
 
       - name: Build
+        timeout-minutes: 30
         run: cross build --release --workspace --target aarch64-unknown-linux-musl
 
       - name: Collect binaries
+        timeout-minutes: 10
         run: |
           out="nimwake-aarch64-${GITHUB_SHA}"
           mkdir -p "${out}"
@@ -205,6 +211,7 @@ jobs:
       # Android 동작을 CI가 증명하지는 않는다. 바이너리가 aarch64에서 실행은 되는지만 본다.
       # manifest가 없으므로 설정 오류(78)로 끝나야 한다. (PRD §74)
       - name: Smoke under qemu
+        timeout-minutes: 10
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-user-static
