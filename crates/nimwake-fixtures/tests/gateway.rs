@@ -628,3 +628,53 @@ async fn a_port_held_by_a_foreign_process_is_not_adopted() {
     let _ = foreign.kill();
     let _ = foreign.wait();
 }
+
+/// §24가 보장 범위로 적은 메서드 여섯이 모두 통과한다.
+///
+/// 지금까지 테스트는 GET과 POST만 썼다. 나머지 넷은 동작하지만 아무것도
+/// 고정하고 있지 않았다. method 필터가 들어오거나 `to_backend_request`가 무언가를
+/// 떨어뜨리면 조용히 깨진다.
+///
+/// HEAD는 의미가 다르다 — 응답에 body가 없다. 그래서 따로 단언한다.
+///
+/// (조사하다 한 번 헛짚었다. `curl -X HEAD`는 응답이 bodiless인 것을 모르고
+/// 기다리므로 멈춘 것처럼 보인다. `curl -I`로 보면 정상이다. gateway 문제가
+/// 아니었다.)
+#[tokio::test(flavor = "multi_thread")]
+async fn every_contract_method_passes_through() {
+    let app_port = free_port();
+    let harness = Harness::start(vec![with_timeouts(
+        spec("verbs", app_port, cmd(bin::ECHO, &[app_port.to_string()])),
+        5,
+        60,
+        1,
+    )])
+    .await;
+
+    let port = harness.port;
+    for method in ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"] {
+        let response = tokio::task::spawn_blocking(move || {
+            request(port, method, "/", "verbs.localhost", None)
+        })
+        .await
+        .expect("client task finished")
+        .unwrap_or_else(|error| panic!("`{method}` failed: {error}"));
+
+        assert_eq!(response.status, 200, "`{method}` must reach the backend");
+
+        if method == "HEAD" {
+            assert!(
+                response.body.is_empty(),
+                "HEAD must not carry a body, got {:?}",
+                response.body,
+            );
+        } else {
+            assert!(
+                !response.body.is_empty(),
+                "`{method}` must carry the backend's response",
+            );
+        }
+    }
+
+    harness.stop().await;
+}
