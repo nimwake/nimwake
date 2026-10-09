@@ -100,6 +100,76 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## PRD §33의 "무한 spawn으로 이어지지 않는다"를 확인했다
+
+§33은 crash-loop backoff를 Post-MVP로 미루면서 이렇게 적는다.
+
+> MVP에서는 backoff 없이 재시도하되, 반복 실패가 무한 spawn으로 이어지지 않도록
+> `startup_timeout_seconds`와 bounded waiter 상한에 의존한다.
+
+backoff를 넣지 않았다. 넣는 것은 PRD를 다시 쓰는 일이다.
+확인한 것은 **무엇을 근거로 안전하다고 말하는가**다.
+
+`nimwake-bench`에 `crash_loop` 시나리오를 넣었다. `crash-server` 5개에 지속
+요청을 보낸다.
+
+```text
+15초 · app 5개 · 연결 8개
+
+requests (모두 502)        129,073
+502가 아닌 응답                  0
+동시 자식 최대 (<= 5)            2
+정착 후 zombie                   0
+부하 중 zombie 최대              2     판정하지 않는다
+RSS 증가                    +1.8 MB
+FD 증가                        -23
+```
+
+**누수는 없다.** 동시 자식이 application 수를 넘지 않고, 거두지 않은 process도
+없고, RSS와 FD가 쌓이지 않는다. 결론만 보면 §33의 주장은 성립한다.
+
+### 그런데 근거로 든 기제는 작동하지 않는다
+
+spawn이 몇 번인지 따로 쟀다. `RUST_LOG=nimwake=debug`로 띄우면 spawn마다
+`waiting for readiness`가 남는다.
+
+```text
+요청        10,414      구간 14.3초
+spawn 시도   8,916      → 623 spawn/초
+요청/spawn      1.2
+```
+
+`startup_timeout_seconds`는 **한 번도 관여하지 않는다.** `crash-server`는 1ms
+안에 죽으므로 5초 상한 근처에도 가지 않는다.
+
+bounded waiter 상한도 관여하지 않는다. 그것은 **대기 중인 요청 수**를 제한하지
+spawn 속도를 제한하지 않는다.
+
+기동 중복 제거(PRD §20)가 막아 줄 것으로 보았는데 그것도 아니다.
+**요청/spawn이 1.2다.** 기동이 너무 빨리 실패해서 붙을 in-flight start가 거의
+없다. 거의 모든 요청이 자기 spawn을 만든다.
+
+실제로 spawn 속도를 정하는 것은 **들어오는 요청 속도**다. 그것은 경계가 아니다.
+
+### 그래서 무엇이 문제인가
+
+메모리가 아니라 **CPU와 배터리**다. 초당 수백 번의 process 생성은 Linux 서버에서는
+묻히지만 Nimwake가 겨냥하는 기기에서는 다르다. 측정한 623 spawn/초는 client가
+그만큼밖에 밀어넣지 못해서 나온 값이고, 더 빠른 client면 더 올라간다.
+
+**이 수치가 crash-loop backoff를 Post-MVP에서 꺼낼 시점을 정하는 근거다.**
+24h soak에서 앱이 OOM으로 죽기 시작하면 바로 이 경로를 탄다.
+
+### zombie를 한 번 잘못 판정했다
+
+처음에는 부하 중에 본 zombie의 최대값을 gate로 삼아 "2개 누수"로 release를
+막았다. 자식이 종료한 뒤 부모가 `wait`로 거둘 때까지 짧게 zombie인 것이 정상이고,
+20ms 간격으로 보면 그 창에 걸린다.
+
+**판정은 부하가 멈추고 거둘 시간을 준 뒤에 한다.** 부하 중 최대값은 기록만 한다.
+
+---
+
 ## readiness probe가 남의 listener를 자기 것으로 삼았다
 
 동시 기동을 재려다 찾았다. 측정보다 이것이 중요하다.
