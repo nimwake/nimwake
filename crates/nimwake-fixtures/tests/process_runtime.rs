@@ -161,7 +161,18 @@ async fn stop_terminates_the_whole_process_group() {
 }
 
 /// pipe를 방치하면 buffer가 차는 순간 child가 멈춘다. drain하고 있다면 계속 응답한다. (PRD §19)
-#[tokio::test]
+///
+/// **두 가지를 동시에 맞춰야 이 테스트가 의미를 갖는다.**
+///
+/// 하나는 fixture가 **응답 경로에서** 쓰는 것이다. 전에는 별도 스레드에서 썼고,
+/// 그러면 pipe가 차도 그 스레드만 멈추므로 main은 계속 응답했다. drain을
+/// 제거해도 통과했다.
+///
+/// 다른 하나는 이 테스트가 runtime을 막지 않는 것이다. drain은 `tokio::spawn`으로
+/// 돌고, HTTP client는 blocking이다. 단일 스레드 runtime에서 client를 직접 부르면
+/// **drain이 굶어** pipe가 차고, drain이 있는데도 실패한다.
+/// gateway 테스트가 같은 이유로 이미 `spawn_blocking`을 쓰고 있다.
+#[tokio::test(flavor = "multi_thread")]
 async fn a_noisy_process_keeps_serving() {
     let port = free_port();
     let spec = spec("noisy", port, cmd(bin::NOISY, &[port.to_string()]));
@@ -169,13 +180,14 @@ async fn a_noisy_process_keeps_serving() {
 
     let started = runtime.start(&spec).await.expect("noisy-server starts");
 
-    // 기본 pipe buffer(64KiB)를 훨씬 넘길 만큼 출력하도록 시간을 준다.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
+    // 요청마다 128KiB를 쏟아 낸다. 다섯 번이면 기본 pipe buffer를 열 배 넘긴다.
     for attempt in 0..5 {
-        let response = http_get(port).unwrap_or_else(|error| {
-            panic!("noisy-server stopped responding on attempt {attempt}: {error}")
-        });
+        let response = tokio::task::spawn_blocking(move || http_get(port))
+            .await
+            .expect("client task finished")
+            .unwrap_or_else(|error| {
+                panic!("noisy-server stopped responding on attempt {attempt}: {error}")
+            });
         assert!(response.contains("200"), "unexpected response: {response}");
     }
 
