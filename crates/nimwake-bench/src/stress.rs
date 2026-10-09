@@ -31,6 +31,8 @@ const SAMPLE_TARGET: usize = 200;
 pub struct Resources {
     pub rss: Option<u64>,
     pub fds: Option<usize>,
+    /// 이 시점까지 daemon이 쓴 누적 CPU 시간. (PRD §50)
+    pub cpu: Option<Duration>,
 }
 
 impl Resources {
@@ -38,6 +40,7 @@ impl Resources {
         Self {
             rss: daemon::resident_memory(pid),
             fds: daemon::open_descriptors(pid),
+            cpu: daemon::cpu_time(pid),
         }
     }
 }
@@ -268,6 +271,16 @@ fn children_under(parent: u32) -> usize {
             state != Some("Z") && ppid == Some(parent)
         })
         .count()
+}
+
+/// 표본 구간에 쓴 CPU 시간. 처음과 마지막 누적값의 차이다. (PRD §50)
+///
+/// 비교 대상이 CI Linux와 Android 실기기이므로 절대 시간만으로는 읽기 어렵다.
+/// 그래서 경과 시간에 대한 비율도 함께 낸다.
+#[must_use]
+pub fn cpu_used(samples: &[Resources]) -> Option<Duration> {
+    let (first, last) = (samples.first()?, samples.last()?);
+    Some(last.cpu?.saturating_sub(first.cpu?))
 }
 
 pub struct CrashLoopResult {

@@ -8,7 +8,7 @@ use std::fmt::Write;
 
 use crate::baseline::{self, Baseline};
 use crate::stats::{delta_ms, ms, Summary};
-use crate::stress::{CrashLoopResult, Resources, StressResult, SustainedResult};
+use crate::stress::{cpu_used, CrashLoopResult, Resources, StressResult, SustainedResult};
 use crate::{StormResult, SweepRow, WarmResult};
 
 pub struct Report {
@@ -204,7 +204,12 @@ impl Report {
         let _ = writeln!(out, "| requests | {} |", sustained.requests);
         let _ = writeln!(out, "| failed | {} |", sustained.failures);
         let _ = writeln!(out, "| RSS 증가 | {} |", growth_bytes(rss));
-        let _ = writeln!(out, "| FD 증가 | {} |\n", growth_count(fds));
+        let _ = writeln!(out, "| FD 증가 | {} |", growth_count(fds));
+        let _ = writeln!(
+            out,
+            "| CPU | {} |\n",
+            cpu_line(cpu_used(&sustained.samples), sustained.duration),
+        );
 
         let _ = render_trend(out, &sustained.samples);
     }
@@ -248,11 +253,11 @@ impl Report {
             crash_loop.max_zombies_seen,
         );
         let _ = writeln!(out, "| RSS 증가 | {} |", growth_bytes(rss));
+        let _ = writeln!(out, "| FD 증가 | {} |", growth_count(fds));
         let _ = writeln!(
             out,
-            "| FD 증가 | {} |
-",
-            growth_count(fds)
+            "| CPU | {} |\n",
+            cpu_line(cpu_used(&crash_loop.samples), crash_loop.duration),
         );
 
         let _ = render_trend(out, &crash_loop.samples);
@@ -442,6 +447,23 @@ fn growth_bytes(delta: Option<i64>) -> String {
         || "n/a".to_owned(),
         |delta| format!("{:+.1} MB", delta as f64 / (1024.0 * 1024.0)),
     )
+}
+
+/// CPU 사용량을 사람이 읽을 형태로. 절대 시간과 경과 대비 비율을 함께 낸다.
+///
+/// 비교 대상이 CI Linux와 Android 실기기이므로 절대 시간만으로는 읽기 어렵다. (PRD §50)
+fn cpu_line(used: Option<std::time::Duration>, elapsed: std::time::Duration) -> String {
+    let Some(used) = used else {
+        return "n/a".to_owned();
+    };
+
+    let ratio = if elapsed.is_zero() {
+        0.0
+    } else {
+        used.as_secs_f64() / elapsed.as_secs_f64() * 100.0
+    };
+
+    format!("{:.2}s ({ratio:.0}% of wall)", used.as_secs_f64())
 }
 
 fn growth_count(delta: Option<i64>) -> String {

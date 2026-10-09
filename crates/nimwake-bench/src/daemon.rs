@@ -167,6 +167,32 @@ pub fn open_descriptors(pid: u32) -> Option<usize> {
     Some(std::fs::read_dir(format!("/proc/{pid}/fd")).ok()?.count())
 }
 
+/// `/proc/<pid>/stat`의 시간 단위. (`USER_HZ`)
+///
+/// 커널 `HZ`와 무관하게 Linux에서 100으로 고정돼 있다. 그래서 상수로 둔다.
+const USER_HZ: u64 = 100;
+
+/// daemon이 쓴 CPU 시간. user와 system을 합친다. (PRD §50)
+///
+/// PRD §50은 CI Linux와 Android 실기기를 **같은 지표로** 비교하라고 한다.
+/// 비교 항목에 CPU가 있고, 저사양 기기에서 먼저 무너지는 구간을 찾는 것이 목적이다.
+///
+/// `/proc/<pid>/stat`의 14·15번째 필드(utime·stime)를 읽는다. 앞쪽 필드에는
+/// 공백과 괄호를 담을 수 있는 `comm`이 있으므로 마지막 `)` 뒤부터 센다.
+pub fn cpu_time(pid: u32) -> Option<Duration> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = stat.rsplit(')').next()?;
+
+    // 잘라낸 뒤의 첫 필드는 state다. utime은 그로부터 11칸 뒤다.
+    let mut fields = rest.split_whitespace().skip(11);
+    let utime: u64 = fields.next()?.parse().ok()?;
+    let stime: u64 = fields.next()?.parse().ok()?;
+
+    Some(Duration::from_micros(
+        (utime + stime).saturating_mul(1_000_000 / USER_HZ),
+    ))
+}
+
 /// 임시 apps 디렉터리 하나.
 pub struct Apps {
     root: PathBuf,

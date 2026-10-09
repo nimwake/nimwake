@@ -100,6 +100,81 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## PRD §50의 비교를 실제로 가능하게 만들었다
+
+§50은 Android 검증이 별도 metric 체계를 만들지 않고 **CI Linux와 같은 workload로
+실행해 비교하라**고 한다. 비교 항목은 다섯이다.
+
+```text
+proxy overhead p50 / p95                       nimwake-bench
+cold start breakdown (spawn/readiness/proxy)   nimwake-bench
+daemon RSS                                     nimwake-bench
+CPU                                            없었다
+concurrency knee point                         nimwake-bench
+```
+
+두 군데가 비어 있었다.
+
+### `nimwake-bench`가 기기로 가지 않았다
+
+aarch64 tarball에 담기는 것은 `nimwaked`와 fixture server들뿐이었다.
+**지표를 만드는 도구가 빠져 있었다.** 기기에서 같은 workload를 돌릴 수 없으니
+비교 자체가 불가능하다.
+
+`release.yml`의 목록에 넣었다. bench는 `nimwaked` · `echo-server` ·
+`crash-server`를 자기 옆에서 찾으므로 네 바이너리가 같은 디렉터리에 있어야 한다.
+
+### CPU를 재지 않았다
+
+`Resources`가 RSS와 FD만 담고 있었다. `/proc/<pid>/stat`의 utime·stime을 읽어
+누적 CPU 시간을 추가했다. 리포트에는 절대 시간과 경과 대비 비율을 함께 적는다.
+비교 대상이 CI runner와 저사양 기기이므로 절대 시간만으로는 읽기 어렵다.
+
+```text
+Sustained warm load (5s)    CPU 14.47s (289% of wall)
+Crash loop (15s)            CPU 22.51s (150% of wall)
+```
+
+`/proc`의 시간 단위는 커널 `HZ`와 무관하게 `USER_HZ`(100)로 고정돼 있어 상수로 두었다.
+
+---
+
+## bind가 된다는 것과 connect가 거부된다는 것은 다르다
+
+port 사전 검사(위)를 넣은 뒤 `process_runtime`이 15회 중 1~2회 깨졌다.
+
+```text
+`group` cannot start: 127.0.0.1:27137 is already in use by a process Nimwake does not own
+```
+
+`free_port`가 방금 `bind`에 성공한 port였다.
+
+### 좁혀 간 과정
+
+```text
+단일 스레드 10회       실패 0      → 바이너리 내부 스레드 경쟁이다
+ephemeral 범위 확인    32768~      → 테스트 범위(20000~30000)와 겹치지 않는다
+50ms 간격 LISTEN 샘플  한 번도 없음 → 그런데 connect는 성공했다
+```
+
+**무엇이 응답했는지는 특정하지 못했다.** LISTEN 소켓은 없었다.
+
+### 특정하지 못한 것을 추측하는 대신
+
+`free_port`가 **쓰는 쪽과 같은 기준으로** 확인하게 했다. `bind` 성공만 보지 않고
+`connect`가 거부되는지도 본다. `ProcessRuntime::start`가 그 기준을 쓰기 때문이다.
+
+```text
+고치기 전   process_runtime 15회 중 1~2회 실패
+고친 후     process_runtime 15회 · 전체 4회 모두 통과 (134개)
+```
+
+이 할당기는 같은 종류로 **네 번째** 손을 봤다. 앞의 셋은 counter만 쓰던 때,
+`HANDED_OUT`을 넣은 때, 예약 파일을 넣은 때다. 매번 "확인 방법이 쓰는 쪽의
+기준과 달랐다"가 원인이었다.
+
+---
+
 ## PRD §33의 "무한 spawn으로 이어지지 않는다"를 확인했다
 
 §33은 crash-loop backoff를 Post-MVP로 미루면서 이렇게 적는다.
