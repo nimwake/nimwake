@@ -100,6 +100,56 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## §19의 "pipe 방치 금지"를 지키는 테스트가 지키지 않고 있었다
+
+§19는 분명하게 적는다.
+
+> child를 `Stdio::piped()`로 실행하고 읽지 않으면 pipe buffer가 가득 차면서
+> **child가 멈출 수 있다.** ... pipe를 생성해 두고 방치하는 구성은 허용하지 않는다.
+
+`a_noisy_process_keeps_serving`이 그것을 본다고 적혀 있었다. **drain 호출을
+제거해도 통과했다.**
+
+### 두 가지가 동시에 틀려 있었다
+
+**하나는 fixture다.** `noisy-server`가 stdout을 **별도 스레드에서** 쏟아 냈다.
+pipe가 차면 그 스레드만 멈추고 main은 계속 accept하고 응답한다. 위험을 모델링하지
+않은 것이다.
+
+응답 직전에 쓰도록 바꿨다. 로그를 남기고 응답하는 보통의 application과 같은
+모양이고, pipe가 막히면 응답도 막힌다. 요청마다 128KiB를 쓴다.
+
+**다른 하나는 테스트다.** 고친 fixture로 돌리니 **drain이 있는데도** 실패했다.
+`#[tokio::test]`는 단일 스레드이고 HTTP client는 blocking이다. 테스트 thread에서
+직접 부르면 `tokio::spawn`으로 도는 **drain이 굶는다.** pipe가 차고 child가 멈춘다.
+
+```text
+EAGAIN (os error 11) — client 읽기 시간 초과
+```
+
+`flavor = "multi_thread"` + `spawn_blocking`으로 바꿨다.
+
+### 이 교훈은 이미 저장소에 적혀 있었다
+
+`gateway.rs`의 모듈 doc이다.
+
+> HTTP client는 blocking이므로 항상 `spawn_blocking`으로 부른다.
+> 테스트 thread에서 곧바로 부르면 같은 runtime 위에 있는 gateway task가 굶는다.
+
+같은 함정을 `process_runtime.rs`가 밟고 있었다. 한 파일에 적어 둔 교훈이 옆
+파일에 적용되지 않았다.
+
+### 고친 뒤
+
+```text
+drain 있음   0.05초 통과
+drain 제거   "stopped responding" 실패
+```
+
+이제 §19가 테스트로 강제된다.
+
+---
+
 ## §20의 app별 분리가 암묵적으로만 확인되고 있었다
 
 §20은 isolation 정책을 여섯 줄로 적는다. 그중 검증 가능한 것은 둘이다.
