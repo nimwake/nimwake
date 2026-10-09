@@ -13,7 +13,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{bin, cmd, free_port, is_listening, spec, with_timeouts};
+use common::{bin, cmd, free_port, is_listening, request, spec, with_runtime, with_timeouts};
 use nimwake_core::app::{AppSpec, AppStateName, StopReason};
 use nimwake_core::error::{AcquireError, AppError};
 use nimwake_core::runtime::ProcessRuntime;
@@ -231,4 +231,82 @@ async fn an_idle_application_stops_its_process() {
     wait_for_state(&app, AppStateName::Sleeping, Duration::from_secs(8)).await;
     assert!(!is_listening(port), "SLEEPING이면 process가 없다");
     app.shutdown().await;
+}
+
+/// §20은 app별 분리를 두 가지로 적는다. 둘 다 밖에서 관측해 고정한다.
+///
+/// ```text
+/// app별 working directory 분리
+/// app별 environment / secret 분리 (`[runtime.env]`, daemon 환경 위에 overlay)
+/// ```
+///
+/// **"overlay"가 핵심이다.** 덮어쓰기로 구현하면 app이 지정하지 않은 변수가
+/// 사라진다. `PATH`가 없으면 대부분의 런타임이 기동하지 못한다. 격리를 강화한다는
+/// 이유로 `.env_clear()`를 넣기 쉬운 자리이고, 그러면 조용히 깨진다.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_child_gets_its_own_directory_and_an_overlaid_environment() {
+    // daemon(= 이 테스트 프로세스) 환경에만 있는 변수.
+    let inherited_key = "NIMWAKE_TEST_INHERITED";
+    let inherited_value = format!("daemon-{}", std::process::id());
+    std::env::set_var(inherited_key, &inherited_value);
+
+    // 양쪽에 있는 변수. app 쪽이 이겨야 한다.
+    let overridden_key = "NIMWAKE_TEST_OVERRIDDEN";
+    std::env::set_var(overridden_key, "from-daemon");
+
+    let dir = std::env::temp_dir().join(format!("nimwake-cwd-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("the app directory exists");
+
+    let port = free_port();
+    let spec = with_runtime(
+        spec("isolated", port, cmd(bin::ECHO, &[port.to_string()])),
+        dir.clone(),
+        &[
+            ("NIMWAKE_TEST_OWN", "from-app"),
+            (overridden_key, "from-app"),
+        ],
+    );
+
+    let app = start_actor(with_timeouts(spec, 5, 2, 60));
+    let _lease = app.acquire().await.expect("cold start succeeds");
+
+    let ask = |path: &str| {
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            request(port, "GET", &path, "isolated.localhost", None)
+                .expect("the fixture answers")
+                .body
+        })
+    };
+
+    // app이 지정한 변수.
+    assert_eq!(ask("/env/NIMWAKE_TEST_OWN").await.unwrap(), "from-app");
+
+    // daemon 환경이 **그대로 넘어온다.** 덮어쓰기였다면 비어 있다.
+    assert_eq!(
+        ask(&format!("/env/{inherited_key}")).await.unwrap(),
+        inherited_value,
+        "`[runtime.env]`는 daemon 환경을 덮지 않고 올려 쓴다",
+    );
+
+    // 같은 키는 app이 이긴다.
+    assert_eq!(
+        ask(&format!("/env/{overridden_key}")).await.unwrap(),
+        "from-app",
+        "app이 지정한 값이 daemon 값을 가린다",
+    );
+
+    // 작업 디렉터리가 app의 것이다.
+    let cwd = ask("/cwd").await.unwrap();
+    let expected = dir.canonicalize().unwrap_or(dir.clone());
+    assert_eq!(
+        std::path::Path::new(&cwd)
+            .canonicalize()
+            .unwrap_or_else(|_| std::path::PathBuf::from(&cwd)),
+        expected,
+        "child must run in the app's working_dir",
+    );
+
+    drop(_lease);
+    let _ = std::fs::remove_dir_all(&dir);
 }

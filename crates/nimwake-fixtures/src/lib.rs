@@ -41,6 +41,8 @@ pub fn listen(port: u16) -> TcpListener {
 ///
 /// ```text
 /// POST /echo   요청 body를 그대로 돌려준다   (cold start를 거친 body 전달 검증)
+/// GET /cwd     자기 작업 디렉터리를 돌려준다   (app별 분리 검증, PRD §20)
+/// GET /env/X   환경변수 X의 값을 돌려준다      (daemon 환경 overlay 검증, PRD §20)
 /// 그 외        자기 pid를 돌려준다            (same PID / new PID 관측)
 /// ```
 pub fn serve_forever(listener: &TcpListener) -> ! {
@@ -103,6 +105,16 @@ fn respond(stream: TcpStream) -> std::io::Result<()> {
 
     let payload = if request.line.starts_with("POST /echo") {
         request.body
+    } else if request.line.starts_with("GET /cwd") {
+        // app별 working directory 분리를 밖에서 관측할 수 있게 한다. (PRD §20)
+        std::env::current_dir()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default()
+            .into_bytes()
+    } else if let Some(name) = env_query(&request.line) {
+        // `[runtime.env]`가 daemon 환경을 **덮지 않고 올려 쓰는지** 보기 위한 것이다.
+        // 그래서 app이 지정하지 않은 변수(PATH 등)도 물어볼 수 있어야 한다. (PRD §20)
+        std::env::var(name).unwrap_or_default().into_bytes()
     } else {
         std::process::id().to_string().into_bytes()
     };
@@ -115,6 +127,13 @@ fn respond(stream: TcpStream) -> std::io::Result<()> {
     )?;
     stream.write_all(&payload)?;
     stream.flush()
+}
+
+/// `GET /env/NAME` 요청에서 `NAME`을 뽑는다.
+fn env_query(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("GET /env/")?;
+    let name = rest.split_whitespace().next()?;
+    (!name.is_empty()).then_some(name)
 }
 
 fn header_value<'a>(line: &'a str, name: &str) -> Option<&'a str> {

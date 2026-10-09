@@ -35,6 +35,16 @@ pub fn spec(name: &str, port: u16, command: Vec<String>) -> AppSpec {
     }
 }
 
+/// app별 환경과 작업 디렉터리를 지정한다. (PRD §20)
+pub fn with_runtime(mut spec: AppSpec, working_dir: PathBuf, env: &[(&str, &str)]) -> AppSpec {
+    spec.runtime.working_dir = working_dir;
+    spec.runtime.env = env
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect();
+    spec
+}
+
 /// pending waiter 상한을 바꾼다. (PRD §69)
 pub fn with_pending_limit(mut spec: AppSpec, limit: usize) -> AppSpec {
     spec.lifecycle.max_pending_requests = limit;
