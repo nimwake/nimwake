@@ -71,6 +71,28 @@
 
 ## 동시성 불변식
 
+### PRD §12 Invariant 1–10
+
+DoD 목록(아래)은 §12의 불변식과 1:1이 아니다. 어느 불변식이 무엇으로 지켜지는지
+따로 적는다. `guard`는 `ci.yml`의 구조 검사다 — 테스트로 잡히지 않는 종류를
+막는다.
+
+| | | |
+| --- | --- | --- |
+| 1 | Single Process | `test` `thousand_concurrent_acquires_start_exactly_one_process`, `running_plus_acquire_reuses_the_process`, `concurrent_acquires_on_a_running_app_reuse_the_process` · `report` cold-start storm의 `unique_pids` |
+| 2 | Single Lifecycle Authority | `guard` Forbid a second lifecycle authority — `transition::`을 `manager.rs` 밖에서 적용하면 실패한다. `AppState`는 읽기 접근자만 노출한다 |
+| 3 | Gateway Isolation | `guard` Forbid the gateway from reaching into the lifecycle — gateway가 runtime이나 `AppManager`를 import하면 실패한다 |
+| 4 | Cold Start Deduplication | `test` `thousand_concurrent_acquires_start_exactly_one_process` · `gate` storm이 2개 이상 띄우면 release를 막는다 |
+| 5 | Active Request Protection | `test` `active_lease_prevents_idle_shutdown`, `idle_with_an_active_lease_stays_running`, `a_lease_outlives_the_response_body` |
+| 6 | Non-Blocking Actor | `guard` Keep the decision path synchronous — `transition.rs`에 `async fn`이나 `.await`가 들어오면 실패한다. 동기 순수 함수는 기다릴 수 없고, 기동·종료·monitor는 `Effect`로 나간다 |
+| 7 | Acquire Atomicity | `test` `sleeping_plus_acquire_enters_starting`, `returning_the_last_lease_arms_the_idle_timer`, `returning_one_of_many_leases_does_not_arm_the_timer` — 상태 전이와 lease 발급이 한 step에서 나온다 |
+| 8 | Stale Event Rejection | `test` `a_stale_start_completed_is_ignored`, `a_stale_stop_completed_is_ignored`, `a_stale_process_exit_is_ignored`, `a_stale_start_completed_stops_the_orphan_process` |
+| 9 | Bounded Queues | `guard` Forbid unbounded queues · `test` `with_pending_limit`을 쓰는 overload 테스트 |
+| 10 | Daemon-Child Lifetime | `test` `no_child_survives_the_daemon`, `registry_shutdown_leaves_no_managed_child` · `gate` `release.yml`의 "Assert nothing survived" |
+
+### Core MVP DoD 항목
+
+
 - [x] no duplicate processes — `test` `thousand_concurrent_acquires_start_exactly_one_process` · `report` cold-start storm의 `spawn count`
 - [x] no lost startup waiter — `test` `startup_failure_rejects_every_waiter`, `stopping_plus_acquire_restarts_after_the_stop_completes`, `teardown_rejects_pending_waiters`
 - [x] no lifecycle deadlock — `gate` 긴 단계마다 `timeout-minutes`를 두어 멈추면 **어느 단계인지와 함께** 실패한다 (release gate: Build 20 · Tests 20 · Stress 25분) · `report` lifecycle stress의 `failed requests`

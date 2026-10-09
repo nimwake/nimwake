@@ -84,3 +84,44 @@ jobs:
             echo "$leaks"
             exit 1
           fi
+
+      # Invariant 2 — lifecycle state를 바꾸는 주체는 AppManager 하나뿐이다.
+      #
+      # `AppState`는 읽기 접근자만 노출하므로 바깥에서 직접 바꿀 수는 없다.
+      # 남은 경로는 **순수 전이 함수를 두 번째 장소에서 적용하는 것**이다.
+      # 그러면 상태 변경 주체가 둘이 되고 불변식이 깨진다.
+      - name: Forbid a second lifecycle authority
+        run: |
+          leaks=$(grep -rln "transition::" crates/nimwake-core/src --include="*.rs"             | grep -v "app/manager.rs" | grep -v "app/transition" || true)
+          if [ -n "$leaks" ]; then
+            echo "::error::transitions applied outside AppManager — see PRD §12 Invariant 2"
+            echo "$leaks"
+            exit 1
+          fi
+
+      # Invariant 6 — 오래 걸리는 작업은 AppManager의 event loop 밖에서 수행한다.
+      #
+      # 판단 경로(`transition`)는 **동기 순수 함수**다. async가 아니면 애초에
+      # 기다릴 수 없고, process 기동·종료·readiness 폴링은 `Effect`로 나가 별도
+      # task에서 수행된다. 여기에 async가 들어오면 그 보장이 사라진다.
+      - name: Keep the decision path synchronous
+        run: |
+          leaks=$(grep -nE "async fn|\.await" crates/nimwake-core/src/app/transition.rs             | grep -v "^[0-9]*://" || true)
+          if [ -n "$leaks" ]; then
+            echo "::error::the transition function must stay synchronous — see PRD §12 Invariant 6"
+            echo "$leaks"
+            exit 1
+          fi
+
+      # Invariant 3 — Gateway는 application process를 직접 시작·종료하지 않는다.
+      #
+      # `app.acquire()` 하나만 쓴다. runtime이나 AppManager를 들이면 gateway가
+      # lifecycle을 직접 건드릴 수 있게 되고, 깨어날지 말지의 판단이 두 곳으로 갈린다.
+      - name: Forbid the gateway from reaching into the lifecycle
+        run: |
+          leaks=$(grep -rn "^use crate::runtime\|^use crate::app::.*AppManager\|^use crate::app::.*AppState"             crates/nimwake-core/src/gateway --include="*.rs" || true)
+          if [ -n "$leaks" ]; then
+            echo "::error::gateway reached past acquire() — see PRD §12 Invariant 3"
+            echo "$leaks"
+            exit 1
+          fi
