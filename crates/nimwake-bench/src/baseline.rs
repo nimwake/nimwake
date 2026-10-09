@@ -137,10 +137,16 @@ pub fn compare(
 pub const TRACKED: &[(&str, &str, &str)] = &[
     ("warm_p50_ms", "warm p50", "ms"),
     ("warm_p95_ms", "warm p95", "ms"),
+    ("proxy_overhead_p50_ms", "proxy overhead p50", "ms"),
     ("proxy_overhead_p95_ms", "proxy overhead p95", "ms"),
     ("daemon_rss_mb", "daemon RSS", "MB"),
     ("cold_start_total_ms", "cold start", "ms"),
     ("cold_start_queue_ms", "actor queue", "ms"),
+    ("cold_start_spawn_ms", "cold start spawn", "ms"),
+    ("cold_start_readiness_ms", "cold start readiness", "ms"),
+    ("concurrency_knee", "concurrency knee", ""),
+    ("concurrency_knee_p95_ms", "p95 at the knee", "ms"),
+    ("sustained_cpu_pct_of_wall", "sustained CPU", "% of wall"),
 ];
 
 #[cfg(test)]
