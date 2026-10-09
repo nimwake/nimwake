@@ -408,9 +408,66 @@ fn benchmark_mode_emits_span_measurements() {
         .find(|line| line.contains("nimwake::request"))
         .expect("a request trace is emitted");
 
-    for field in ["acquire_us", "proxy_connect_us", "ttfb_us"] {
-        assert!(request.contains(field), "`{field}` missing from: {request}");
-    }
+    // 이름만 보면 안 된다. 한때 계측값을 `u128`로 두었더니 tracing이 JSON에
+    // **문자열**로 적었고, 이름만 보는 단언은 그것을 통과시켰다. (D29)
+    //
+    // 숫자로 뽑아 구간 관계까지 본다.
+    let spans = numeric_fields(
+        request,
+        &[
+            "routing_us",
+            "acquire_us",
+            "proxy_connect_us",
+            "backend_us",
+            "ttfb_us",
+        ],
+    );
+
+    // proxy connect와 backend는 나뉘어 있어야 한다. (PRD §72)
+    //
+    // 한동안 `proxy_connect_us`가 backend 왕복 전체를 담고 있었다. 둘을 합쳐
+    // 두면 "연결이 느린가 / application이 느린가"를 구분할 수 없다.
+    let connect = spans["proxy_connect_us"];
+    let backend = spans["backend_us"];
+    let ttfb = spans["ttfb_us"];
+
+    assert!(
+        connect + backend <= ttfb,
+        "connect({connect}) + backend({backend}) must fit in ttfb({ttfb}): {request}",
+    );
+    assert!(
+        spans["routing_us"] + spans["acquire_us"] + connect + backend <= ttfb,
+        "the spans must be consecutive sub-intervals of ttfb: {request}",
+    );
+}
+
+/// JSON 한 줄에서 숫자 필드를 뽑는다. 문자열로 적혔으면 panic한다.
+///
+/// `"queue_us":142`는 통과하고 `"queue_us":"142"`는 실패한다. 후자는 실제로
+/// 겪은 일이다. 계측값을 `u128`로 두면 tracing이 그렇게 적는다. (D29)
+fn numeric_fields<'a>(line: &str, names: &[&'a str]) -> std::collections::BTreeMap<&'a str, u64> {
+    names
+        .iter()
+        .map(|name| {
+            let needle = format!("\"{name}\":");
+            let start = line
+                .find(&needle)
+                .unwrap_or_else(|| panic!("`{name}` missing from: {line}"))
+                + needle.len();
+            let rest = &line[start..];
+
+            assert!(
+                !rest.starts_with('"'),
+                "`{name}` is a string, not a number: {line}",
+            );
+
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            let value = digits
+                .parse()
+                .unwrap_or_else(|_| panic!("`{name}` is not a number: {line}"));
+            (*name, value)
+        })
+        .collect()
 }
 
 /// 요청 구간은 요청마다 나가므로 평소에는 꺼져 있어야 한다.

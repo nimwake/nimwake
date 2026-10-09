@@ -100,6 +100,97 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## `proxy_connect_latency`가 이름과 다른 것을 재고 있었다
+
+§72의 파생 지표 일곱을 코드와 대조했다. 여섯은 맞고 하나가 달랐다.
+
+```text
+§72 정의                                        구현
+actor_queue_latency                             queue_us            맞음
+startup_latency                                 total_us            맞음
+spawn_latency                                   spawn_us            맞음
+readiness_latency                               readiness_us        맞음
+time_to_first_byte                              ttfb_us             맞음
+proxy_connect_latency  proxy_started → 연결 수립  proxy_started → response_started
+request_total_latency  received → 응답 완료        없음
+```
+
+`proxy_connect_latency`가 **backend 왕복 전체**를 담고 있었다. 연결 수립,
+handshake, 요청 전송, application 처리, 응답 header가 한 값에 섞여 있었다.
+
+trace 모듈의 doc은 의도를 정확히 적어 두었다.
+
+```text
+actor queue       3ms
+spawn             8ms
+app readiness   821ms  ← bottleneck
+proxy connect     2ms
+```
+
+`proxy connect`가 별도 구간인 이유는 분명하다. 둘을 합쳐 두면 **"연결이 느린가
+application이 느린가"를 구분할 수 없다.** 저사양 환경에서 어느 구간이 먼저
+무너지는지를 보려는 것이 §50의 목적이므로 나누어야 한다.
+
+### 나눈 결과
+
+```text
+요청 1 (cold)  routing 2 · acquire 51,491 · connect 44 · backend 133 · ttfb 51,672
+요청 2 (warm)  routing 1 · acquire     9 · connect 74 · backend 145 · ttfb    231
+```
+
+고치기 전에는 `proxy_connect_us`가 177µs(cold) · 219µs(warm)로 나왔다.
+연결은 44~74µs이고 나머지는 backend다.
+
+`forward`가 timeout 블록 안에서 연결하므로 그 안에서 찍은 시각을 **값으로
+돌려받아** 밖에서 기록한다. 블록이 trace를 붙잡으면 await를 넘는 가변 대여가 된다.
+
+### e2e가 이것을 못 잡고 있었다
+
+단언이 **필드 이름만** 보고 있었다.
+
+```rust
+for field in ["acquire_us", "proxy_connect_us", "ttfb_us"] {
+    assert!(request.contains(field));
+}
+```
+
+D29와 같은 함정이다. 그때는 계측값을 `u128`로 두어 tracing이 JSON에 **문자열**로
+적었고, 이름만 보는 단언이 통과시켰다.
+
+숫자로 뽑아 **구간 관계**를 단언하도록 바꿨다. 문자열이면 panic한다.
+
+```text
+routing + acquire + connect + backend <= ttfb
+connect + backend <= ttfb
+```
+
+### `request_total_latency`는 넣지 않았다
+
+§72의 목록에 있지만 구현하지 않았다. 이유를 적어 둔다.
+
+응답 **완료** 시점은 body가 다 흐른 뒤이고, 그것을 찍으려면 trace가 요청 handler
+보다 오래 살아 `LeasedBody`로 넘어가야 한다. 로그가 나가는 시점도 "header 전송"
+에서 "body 완료"로 바뀐다.
+
+그리고 §72의 논지가 *"밖에서는 총 latency밖에 볼 수 없어"* 구간 분해를 Core가
+제공해야 한다는 것이다. **총 latency는 client가 이미 재고 있다** —
+`warm_p50_ms`와 `warm_p95_ms`가 그것이다. 목록에서 Core가 더할 값이 가장 적은
+항목이다.
+
+### 게이지
+
+```text
+active_requests · pending_requests   내부적으로 추적한다. trace로 내보내지는 않는다
+running_apps                         개념이 없다
+daemon_cpu · daemon_rss · open_fds   nimwake-bench가 /proc에서 읽는다
+```
+
+뒤의 셋은 Core가 아니라 부하 도구가 읽는다. §72가 "Core가 제공해야 한다"고 한
+대상은 **구간 분해**이고 그 근거는 밖에서 볼 수 없다는 것이다. process RSS와 CPU는
+밖에서 `/proc`으로 볼 수 있으므로 daemon 안에 같은 것을 두 벌 두지 않았다.
+
+---
+
 ## 비교용 `baseline.txt`가 §50의 항목을 담지 않았다
 
 §50은 "CI Linux와 Android 실기기에서 같은 workload로 비교"를 요구하고, 비교에

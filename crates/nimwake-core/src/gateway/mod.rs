@@ -161,7 +161,7 @@ async fn handle(
 
     trace.proxy_started();
     let header_timeout = app.spec().lifecycle.response_header_timeout();
-    let response = match proxy::forward(lease, request, header_timeout).await {
+    let response = match proxy::forward(lease, request, header_timeout, &mut trace).await {
         Ok(response) => response,
         Err(error) => {
             let status = proxy::status_for(&error);
