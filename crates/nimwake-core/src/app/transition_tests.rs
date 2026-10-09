@@ -504,6 +504,56 @@ fn a_stale_process_exit_is_ignored() {
     assert_eq!(h.active_requests(), 1);
 }
 
+/// 교체된 process의 lease를 반납해도 현재 lease는 줄지 않는다. (PRD §11)
+///
+/// §11은 `leases`를 집합으로 두는 이유를 둘로 적는다. 중복 반납과
+/// **이미 교체된 process에 대한 반납**이다. 앞의 것은
+/// `a_duplicate_request_finished_does_not_change_the_counter`가 본다. 이쪽은
+/// incarnation을 넘는 경우다.
+///
+/// 정수 카운터였다면 늦게 도착한 옛 반납이 그대로 감소시켜, **살아 있는 요청이
+/// 있는데도** idle timer가 걸린다. 그러면 응답 중에 process가 정지된다.
+#[test]
+fn returning_a_lease_from_a_replaced_process_changes_nothing() {
+    let mut h = Harness::new();
+    let old_lease = h.start();
+    let old_process = h.process_id().expect("running has a process");
+
+    // process가 죽어 lease가 전부 무효가 된다.
+    h.step(AppCommand::ProcessExited {
+        process_id: old_process,
+        status: ExitStatus::from_code(1),
+    });
+    assert_eq!(h.state(), AppStateName::Failed);
+
+    // 새 요청이 새 process를 띄우고 새 lease를 받는다.
+    let (effects, _response) = h.acquire();
+    let operation_id = only_start(&effects);
+    let effects = h.step(AppCommand::StartCompleted {
+        operation_id,
+        result: Ok(started(2)),
+    });
+    let new_lease = granted(&effects)[0];
+    assert_ne!(old_lease, new_lease);
+    assert_eq!(h.active_requests(), 1);
+
+    // 옛 요청의 body가 이제야 drop되어 반납이 도착한다.
+    let effects = h.step(AppCommand::RequestFinished {
+        lease_id: old_lease,
+    });
+
+    assert_eq!(
+        h.active_requests(),
+        1,
+        "the live lease must not be released by a stale one",
+    );
+    assert_eq!(h.state(), AppStateName::Running);
+    assert!(
+        armed_idle_timers(&effects).is_empty(),
+        "a stale release must not arm the idle timer",
+    );
+}
+
 /// 정수 카운터였다면 중복 반납이 그대로 감소한다. 집합이어야 무시할 수 있다. (D16)
 #[test]
 fn a_duplicate_request_finished_does_not_change_the_counter() {

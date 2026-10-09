@@ -100,6 +100,45 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## §11이 집합을 쓰는 이유 중 하나만 테스트돼 있었다
+
+§11은 `leases`를 `HashSet`으로 두는 이유를 **둘**로 적는다.
+
+```text
+중복 반납                       a_duplicate_request_finished_does_not_change_the_counter
+이미 교체된 process에 대한 반납   없었다
+```
+
+앞의 것은 D16으로 들어와 있었다. 뒤의 것은 incarnation을 넘는 경우이고 테스트가
+없었다.
+
+### 왜 다른 경우인가
+
+```text
+중복   같은 incarnation에서 같은 lease를 두 번 반납
+교체   incarnation 1의 lease가 incarnation 2에 도착
+```
+
+정수 카운터였다면 늦게 도착한 옛 반납이 그대로 감소시켜, **살아 있는 요청이
+있는데도** idle timer가 걸린다. 그러면 응답 중에 process가 정지된다. §11이
+집합을 고른 이유가 이것이다.
+
+`returning_a_lease_from_a_replaced_process_changes_nothing`으로 고정했다.
+
+### 뮤테이션으로 확인했다
+
+집합 의미를 정수 카운터 의미로 바꿨다 — 들어 있는지 보지 않고 아무 하나를 지운다.
+
+```rust
+if let Some(any) = running.leases.iter().next().copied() {
+    running.leases.remove(&any);
+}
+```
+
+두 테스트가 모두 실패한다. §11의 두 이유가 이제 양쪽 다 받쳐진다.
+
+---
+
 ## §23~26 감사 — 하나만 비어 있었다
 
 gateway 절 넷을 코드와 대조했다.
