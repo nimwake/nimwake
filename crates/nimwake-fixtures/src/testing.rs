@@ -132,14 +132,35 @@ pub fn free_port() -> u16 {
         if !reserve_port(port) {
             continue;
         }
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            handed_out.insert(port);
-            return port;
+        if TcpListener::bind(("127.0.0.1", port)).is_err() {
+            continue;
         }
+
+        // bind가 된다는 것과 "connect가 거부된다"는 것은 같은 뜻이 아니다.
+        //
+        // `ProcessRuntime::start`는 spawn 전에 connect로 port가 비었는지 본다.
+        // 그 기준으로 확인하지 않으면 bind는 되는데 start는 거부되는 port를
+        // 내주게 되고, 테스트가 간헐적으로 "already in use"로 깨진다.
+        //
+        // 실제로 그랬다. 50ms로 훑어도 LISTEN은 한 번도 보이지 않는데 connect는
+        // 성공하는 순간이 있었다. 무엇이 응답하는지는 특정하지 못했다.
+        // 특정하지 못한 것을 추측해 두는 대신, **쓰는 쪽과 같은 기준으로 확인한다.**
+        if TcpStream::connect_timeout(&addr(port), ALLOCATION_PROBE_TIMEOUT).is_ok() {
+            continue;
+        }
+
+        handed_out.insert(port);
+        return port;
     }
 
     panic!("no free port in {PORT_BASE}..{}", PORT_BASE + PORT_SPAN);
 }
+
+/// 할당 직전 확인에 쓰는 connect 제한.
+///
+/// 비어 있는 loopback port는 기다리지 않고 곧바로 `ECONNREFUSED`로 답하므로
+/// 짧게 두어도 느려지지 않는다.
+const ALLOCATION_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[must_use]
 pub fn addr(port: u16) -> SocketAddr {

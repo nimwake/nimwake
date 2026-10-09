@@ -135,7 +135,13 @@ jobs:
           mkdir -p "${out}"
           src=target/aarch64-unknown-linux-musl/release
 
-          for binary in nimwaked echo-server crash-server group-server slow-start-server; do
+          # nimwake-bench가 들어가는 이유가 있다. PRD §50은 Android 검증이 별도 metric
+          # 체계를 만들지 않고 **CI Linux와 같은 workload로 실행해 비교**하라고 한다.
+          # 그 workload를 만드는 것이 이 도구다. 기기에 없으면 비교를 할 수 없다.
+          #
+          # bench는 nimwaked · echo-server · crash-server를 자기 옆에서 찾으므로
+          # 네 바이너리가 같은 디렉터리에 있어야 한다.
+          for binary in nimwake-bench nimwaked echo-server crash-server group-server slow-start-server; do
             cp "${src}/${binary}" "${out}/"
           done
 

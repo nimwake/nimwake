@@ -31,6 +31,7 @@ NODE_ENV = "production"
 idle_timeout_seconds = 60
 startup_timeout_seconds = 5
 shutdown_timeout_seconds = 5
+response_header_timeout_seconds = 60   # §75
 max_pending_requests = 256
 ```
 
