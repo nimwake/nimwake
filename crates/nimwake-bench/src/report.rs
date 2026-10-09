@@ -7,7 +7,7 @@
 use std::fmt::Write;
 
 use crate::baseline::{self, Baseline};
-use crate::stats::{delta_ms, ms, Summary};
+use crate::stats::{self, delta_ms, ms, Summary};
 use crate::stress::{cpu_used, CrashLoopResult, Resources, StressResult, SustainedResult};
 use crate::{StormResult, SweepRow, WarmResult};
 
@@ -72,6 +72,10 @@ impl Report {
             baseline.set("warm_p50_ms", millis(nimwake.summary.p50));
             baseline.set("warm_p95_ms", millis(nimwake.summary.p95));
             baseline.set(
+                "proxy_overhead_p50_ms",
+                millis(nimwake.summary.p50) - millis(direct.p50),
+            );
+            baseline.set(
                 "proxy_overhead_p95_ms",
                 millis(nimwake.summary.p95) - millis(direct.p95),
             );
@@ -80,9 +84,42 @@ impl Report {
             }
         }
 
+        // cold start는 구간별로 담는다. §50의 비교 항목이
+        // "spawn / readiness / proxy connect" 단위이기 때문이다.
         if let Some(spans) = self.storm.as_ref().and_then(|storm| storm.spans.first()) {
             baseline.set("cold_start_total_ms", millis(spans.total));
             baseline.set("cold_start_queue_ms", millis(spans.queue));
+            baseline.set("cold_start_spawn_ms", millis(spans.spawn));
+            baseline.set("cold_start_readiness_ms", millis(spans.readiness));
+        }
+
+        // 처리량 곡선이 평평해지는 지점. 저사양 환경에서 얼마나 앞으로
+        // 당겨지는지가 §50이 보려는 것이다.
+        let points: Vec<(usize, f64)> = self
+            .sweep
+            .iter()
+            .map(|row| (row.concurrency, row.summary.rps))
+            .collect();
+        if let Some(knee) = stats::knee(&points) {
+            baseline.set("concurrency_knee", knee as f64);
+
+            if let Some(row) = self.sweep.iter().find(|row| row.concurrency == knee) {
+                baseline.set("concurrency_knee_p95_ms", millis(row.summary.p95));
+                baseline.set("concurrency_knee_rps", row.summary.rps);
+            }
+        }
+
+        // CPU는 절대 시간이 아니라 경과 대비 비율로 담는다. 비교 대상이
+        // CI runner와 저사양 기기여서 절대값은 나란히 놓기 어렵다.
+        if let Some(sustained) = &self.sustained {
+            if let Some(used) = cpu_used(&sustained.samples) {
+                if !sustained.duration.is_zero() {
+                    baseline.set(
+                        "sustained_cpu_pct_of_wall",
+                        used.as_secs_f64() / sustained.duration.as_secs_f64() * 100.0,
+                    );
+                }
+            }
         }
 
         baseline
@@ -390,6 +427,25 @@ impl Report {
                 row.summary.errors,
                 megabytes(row.rss),
             );
+        }
+
+        // 표만으로는 "어디서 평평해지는가"를 눈으로 찾아야 한다. §50의 비교
+        // 항목이므로 숫자로 적는다.
+        let points: Vec<(usize, f64)> = self
+            .sweep
+            .iter()
+            .map(|row| (row.concurrency, row.summary.rps))
+            .collect();
+        if let Some(knee) = stats::knee(&points) {
+            let _ = writeln!(out);
+            if let Some(row) = self.sweep.iter().find(|row| row.concurrency == knee) {
+                let _ = writeln!(
+                    out,
+                    "knee: 동시성 **{knee}** ({:.0} req/s, p95 {}) — 최대 처리량의 95%에 처음 도달한 지점",
+                    row.summary.rps,
+                    ms(row.summary.p95),
+                );
+            }
         }
 
         let _ = writeln!(out);

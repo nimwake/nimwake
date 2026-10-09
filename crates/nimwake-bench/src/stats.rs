@@ -56,6 +56,38 @@ pub struct Summary {
     pub rps: f64,
 }
 
+/// 처리량 곡선이 평평해지기 시작하는 지점. (PRD §50 concurrency knee point)
+///
+/// "최대 처리량을 낸 동시성"으로 정의하지 않는다. 포화된 뒤에는 어느 단계가
+/// 가장 빨랐는지가 runner 편차로 갈려 값이 튄다.
+///
+/// **최대 처리량의 95%에 처음 도달한 동시성**을 쓴다. 그 뒤로 동시성을 더 올리면
+/// 처리량은 거의 늘지 않고 지연만 늘어난다. 저사양 환경에서 이 지점이 얼마나
+/// 앞으로 당겨지는지가 §50이 보려는 것이다.
+///
+/// 임계값 0.95는 정한 값이다. 근거가 아니라 선택이므로 바꾸려면 여기를 본다.
+const KNEE_FRACTION: f64 = 0.95;
+
+/// `(동시성, 처리량)` 쌍에서 knee를 찾는다. 비어 있으면 `None`.
+#[must_use]
+pub fn knee(points: &[(usize, f64)]) -> Option<usize> {
+    let peak = points
+        .iter()
+        .map(|&(_, rps)| rps)
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    if !peak.is_finite() || peak <= 0.0 {
+        return None;
+    }
+
+    let threshold = peak * KNEE_FRACTION;
+    points
+        .iter()
+        .filter(|&&(_, rps)| rps >= threshold)
+        .map(|&(concurrency, _)| concurrency)
+        .min()
+}
+
 /// 가장 가까운 순위 방식. 표본이 적을 때 보간보다 읽기 쉽다.
 fn percentile(sorted: &[Duration], percent: f64) -> Duration {
     if sorted.is_empty() {
@@ -127,5 +159,36 @@ mod tests {
         let mut samples = samples(&[1; 100]);
         samples.set_wall(Duration::from_secs(2));
         assert!((samples.summarize().rps - 50.0).abs() < f64::EPSILON);
+    }
+}
+
+#[cfg(test)]
+mod knee_tests {
+    use super::knee;
+
+    #[test]
+    fn knee_is_the_first_concurrency_reaching_the_plateau() {
+        // 100에서 이미 최대(1000)의 95%를 넘으므로 그 뒤는 지연만 늘어난다.
+        let points = [(1, 100.0), (10, 600.0), (100, 980.0), (500, 1000.0)];
+        assert_eq!(knee(&points), Some(100));
+    }
+
+    #[test]
+    fn a_peak_in_the_middle_does_not_move_the_knee_backwards() {
+        // 포화 뒤에는 어느 단계가 가장 빨랐는지가 편차로 갈린다. 최대값을
+        // 그대로 쓰면 knee가 튄다. 이 경우 500이 최대지만 knee는 100이다.
+        let points = [(1, 100.0), (100, 960.0), (500, 1000.0), (1000, 940.0)];
+        assert_eq!(knee(&points), Some(100));
+    }
+
+    #[test]
+    fn a_single_point_is_its_own_knee() {
+        assert_eq!(knee(&[(1, 42.0)]), Some(1));
+    }
+
+    #[test]
+    fn no_points_or_no_throughput_has_no_knee() {
+        assert_eq!(knee(&[]), None);
+        assert_eq!(knee(&[(1, 0.0), (10, 0.0)]), None);
     }
 }

@@ -100,6 +100,64 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## 비교용 `baseline.txt`가 §50의 항목을 담지 않았다
+
+§50은 "CI Linux와 Android 실기기에서 같은 workload로 비교"를 요구하고, 비교에
+쓰이는 기계 판독 형식이 `baseline.txt`(`key=value`)다. 그런데 거기에 담긴 것은
+다섯 항목 중 둘뿐이었다.
+
+```text
+§50 비교 항목                                   고치기 전
+proxy overhead p50 / p95                        p95만
+cold start breakdown (spawn/readiness/proxy)    queue · total만
+daemon RSS                                      있음
+CPU                                              없음
+concurrency knee point                           없음
+```
+
+값이 없어서가 아니다. `StartupSpans`는 `spawn`과 `readiness`를 이미 갖고 있고,
+CPU는 바로 앞 작업에서 추가했고, sweep은 모든 단계의 처리량을 갖고 있었다.
+**리포트 표에만 있고 비교용 형식에는 넣지 않았다.** 그러면 Android 쪽이 markdown
+표를 파싱해야 한다.
+
+13개 키로 다섯 항목을 모두 담았다.
+
+```text
+proxy_overhead_p50_ms · proxy_overhead_p95_ms
+cold_start_queue_ms · cold_start_spawn_ms · cold_start_readiness_ms · cold_start_total_ms
+daemon_rss_mb
+sustained_cpu_pct_of_wall
+concurrency_knee · concurrency_knee_p95_ms · concurrency_knee_rps
+```
+
+CPU는 절대 시간이 아니라 **경과 대비 비율**로 담는다. 비교 대상이 CI runner와
+저사양 기기여서 절대값은 나란히 놓기 어렵다.
+
+### knee를 어떻게 정의했나
+
+sweep 모듈의 doc은 "knee point 탐색"이라 적고 있었지만 **계산하지 않았다.**
+표를 눈으로 보고 찾는 수밖에 없었다.
+
+"최대 처리량을 낸 동시성"으로 정의하지 않았다. 포화된 뒤에는 어느 단계가 가장
+빨랐는지가 runner 편차로 갈려 값이 튄다.
+
+> **최대 처리량의 95%에 처음 도달한 동시성**
+
+그 뒤로 동시성을 올리면 처리량은 거의 늘지 않고 지연만 늘어난다. 저사양 환경에서
+이 지점이 얼마나 앞으로 당겨지는지가 §50이 보려는 것이다.
+
+임계값 `0.95`는 근거가 아니라 **선택**이다. `stats::KNEE_FRACTION` 한 곳에 두고
+주석에 그렇게 적었다.
+
+순수 함수로 두어 테스트했다. 그중 하나는 **포화 뒤의 최대값이 knee를 뒤로
+끌고 가지 않는지**를 본다 — 그것이 "최대 처리량"으로 정의하지 않은 이유다.
+
+```text
+stats::knee_tests  4개
+```
+
+---
+
 ## §44의 `deadlock == 0`을 실제로 강제한다
 
 §44는 release gate의 차단 기준 다섯을 명시한다. 대조해 보니 넷은 검사가 있고
