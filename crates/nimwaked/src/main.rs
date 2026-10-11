@@ -136,6 +136,7 @@ fn serve(specs: Vec<AppSpec>, options: &Options) -> Result<(), Failure> {
         .map_err(|error| Failure::other(format!("failed to start the async runtime: {error}")))?;
 
     let requested = options.listen;
+    let apps_dir = options.apps_dir.clone();
 
     runtime.block_on(async move {
         let registry = AppRegistry::build(specs, requested.port(), Arc::new(ProcessRuntime::new()))
@@ -165,7 +166,17 @@ fn serve(specs: Vec<AppSpec>, options: &Options) -> Result<(), Failure> {
         use std::io::Write;
         let _ = std::io::stdout().flush();
 
+        // `SIGHUP`마다 manifest를 다시 읽는다. (PRD §76)
+        //
+        // gateway와 같은 수명이다. serve가 끝나면 더 받을 이유가 없다.
+        let reloader = tokio::spawn(reload_on_hangup(
+            Arc::clone(&registry),
+            apps_dir,
+            requested.port(),
+        ));
+
         gateway.serve(shutdown_signal()).await;
+        reloader.abort();
 
         // child process의 수명은 daemon의 수명을 넘지 않는다. (Invariant 10 / PRD §71)
         info!("stopping every application");
@@ -173,6 +184,70 @@ fn serve(specs: Vec<AppSpec>, options: &Options) -> Result<(), Failure> {
 
         Ok(())
     })
+}
+
+/// `SIGHUP`마다 manifest를 다시 읽어 차이만 적용한다. (PRD §76)
+///
+/// **실패해도 daemon은 계속 서빙한다.** 기동 시점의 검증 실패는 종료 코드 `78`이지만
+/// (PRD §74), 재적재 실패는 이미 서빙 중인 application을 내릴 이유가 되지 않는다.
+///
+/// manifest가 하나도 없으면 거부한다. "모두 지웠다"와 "디렉터리를 잘못 건드렸다"를
+/// 구분할 수 없고, 후자일 때 전부 내리면 복구가 어렵다.
+#[cfg(unix)]
+async fn reload_on_hangup(
+    registry: std::sync::Arc<nimwake_core::AppRegistry>,
+    apps_dir: std::path::PathBuf,
+    gateway_port: u16,
+) {
+    use tokio::signal::unix::{signal, SignalKind};
+    use tracing::{info, warn};
+
+    let mut hangup = match signal(SignalKind::hangup()) {
+        Ok(signal) => signal,
+        Err(error) => {
+            error!(%error, "failed to listen for SIGHUP; manifest reload is unavailable");
+            return;
+        }
+    };
+
+    let _ = gateway_port;
+
+    while hangup.recv().await.is_some() {
+        info!(dir = %apps_dir.display(), "SIGHUP received; reloading manifests");
+
+        let specs = match registry::load_dir(&apps_dir) {
+            Ok(specs) => specs,
+            Err(error) => {
+                warn!(%error, dir = %apps_dir.display(), "reload failed to read manifests; keeping the current set");
+                continue;
+            }
+        };
+
+        if specs.is_empty() {
+            warn!(
+                dir = %apps_dir.display(),
+                "reload found no manifests; keeping the current set",
+            );
+            continue;
+        }
+
+        match registry.reload(specs).await {
+            Ok(outcome) => {
+                println!(
+                    "reloaded: +{} -{} ~{} ={}",
+                    outcome.added.len(),
+                    outcome.removed.len(),
+                    outcome.replaced.len(),
+                    outcome.unchanged.len(),
+                );
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+            }
+            Err(error) => {
+                warn!(%error, "reload rejected by validation; keeping the current set");
+            }
+        }
+    }
 }
 
 /// `SIGINT` 또는 `SIGTERM`이 오면 완료된다.
