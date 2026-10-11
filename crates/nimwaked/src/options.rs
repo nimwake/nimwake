@@ -8,6 +8,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use nimwake_core::Limits;
 use nimwake_core::DEFAULT_GATEWAY_PORT;
 
 use crate::exit::Failure;
@@ -32,6 +33,10 @@ OPTIONS:
                         외부 노출은 opt-in이다. Core는 TLS도 인증도 제공하지 않는다
     --port <PORT>       listen 주소의 port만 바꾼다
                         0을 주면 비어 있는 port를 골라 실제 값을 출력한다
+    --min-free-memory-mb <MB>
+                        잠든 application을 깨우기 전에 있어야 하는 가용 메모리
+                        기본 0은 검사하지 않는다. 부족하면 503으로 거절한다 (PRD §78)
+                        돌고 있는 application은 내리지 않는다
     --trace-json        구간 계측을 JSON 한 줄씩 출력한다 (benchmark mode, PRD §72)
                         요청 구간은 평소 꺼져 있고 이때만 켜진다
     -h, --help          이 도움말
@@ -50,6 +55,8 @@ pub struct Options {
     pub apps_dir: PathBuf,
     pub listen: SocketAddr,
     pub trace_json: bool,
+    /// daemon 수준 자원 한계. (PRD §78)
+    pub limits: Limits,
 }
 
 impl Default for Options {
@@ -58,6 +65,7 @@ impl Default for Options {
             apps_dir: PathBuf::from(DEFAULT_APPS_DIR),
             listen: SocketAddr::from(([127, 0, 0, 1], DEFAULT_GATEWAY_PORT)),
             trace_json: false,
+            limits: Limits::default(),
         }
     }
 }
@@ -100,6 +108,16 @@ where
 
             "--listen" => {
                 options.listen = listen_addr(&value(&mut args, "--listen")?, "--listen")?;
+            }
+
+            // 0은 "검사하지 않음"이다. 기본으로 켜지 않는다. (PRD §78)
+            "--min-free-memory-mb" => {
+                let raw = value(&mut args, "--min-free-memory-mb")?;
+                options.limits.min_free_memory_mb = raw.parse().map_err(|_| {
+                    Failure::config(format!(
+                        "`--min-free-memory-mb` expects a number, got `{raw}`"
+                    ))
+                })?;
             }
 
             // port만 바꾼다. `--listen 0.0.0.0:8080 --port 0`처럼 조합할 수 있다.

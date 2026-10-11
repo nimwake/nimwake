@@ -10,6 +10,8 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use crate::limits::Limits;
+
 use super::*;
 use crate::app::AppStateName;
 use crate::id::ProcessId;
@@ -55,6 +57,8 @@ fn started(process_id: u64) -> StartedProcess {
 struct Harness {
     machine: Machine,
     now: Instant,
+    /// 전이에 넣을 외부 입력. 입장 제어 테스트가 여기에 가용 메모리를 적는다.
+    inputs: Inputs,
 }
 
 impl Harness {
@@ -63,19 +67,35 @@ impl Harness {
     }
 
     fn with_spec(spec: AppSpec) -> Self {
+        Self::with_spec_and_limits(spec, Limits::default())
+    }
+
+    fn with_spec_and_limits(spec: AppSpec, limits: Limits) -> Self {
         Self {
-            machine: Machine::new(std::sync::Arc::new(spec)),
+            machine: Machine::new(std::sync::Arc::new(spec), limits),
             now: Instant::now(),
+            inputs: Inputs::default(),
         }
     }
 
+    /// 입장 제어가 볼 가용 메모리를 정한다. (PRD §78)
+    fn with_available_memory(mut self, mb: Option<u64>) -> Self {
+        self.inputs.available_memory_mb = mb;
+        self
+    }
+
+    /// 중간에 가용 메모리를 바꾼다. 메모리가 마르는 과정을 흉내낸다.
+    fn set_available_memory(&mut self, mb: Option<u64>) {
+        self.inputs.available_memory_mb = mb;
+    }
+
     fn step(&mut self, command: AppCommand) -> Vec<Effect> {
-        self.machine.step(command, self.now).0
+        self.machine.step(command, self.now, self.inputs).0
     }
 
     /// 종료 여부까지 함께 본다.
     fn step_full(&mut self, command: AppCommand) -> (Vec<Effect>, ControlFlow<()>) {
-        self.machine.step(command, self.now)
+        self.machine.step(command, self.now, self.inputs)
     }
 
     /// 시계를 앞으로 돌린다. 실제로 기다리지 않는다.
@@ -796,4 +816,184 @@ fn an_idle_timer_from_a_previous_incarnation_is_ignored() {
         "a timer from a previous incarnation must not stop the app",
     );
     assert_eq!(h.active_requests(), 1, "the live lease must survive");
+}
+
+// 메모리 입장 제어. (PRD §78)
+
+fn limits_mb(mb: u64) -> Limits {
+    Limits {
+        min_free_memory_mb: mb,
+    }
+}
+
+fn harness_with_memory(required_mb: u64, available_mb: Option<u64>) -> Harness {
+    Harness::with_spec_and_limits(test_spec(60, 256), limits_mb(required_mb))
+        .with_available_memory(available_mb)
+}
+
+fn starts(effects: &[Effect]) -> usize {
+    effects
+        .iter()
+        .filter(|effect| matches!(effect, Effect::Start { .. }))
+        .count()
+}
+
+/// 가용 메모리가 임계값 아래면 **깨우지 않는다.** (PRD §78)
+///
+/// 이 테스트가 §78의 전부다. `Effect::Start`가 나가면 안 된다 — 거절만 하고
+/// 실제로는 spawn하는 것이 가장 나쁜 결과다.
+#[test]
+fn a_wake_is_refused_when_memory_is_short() {
+    let mut harness = harness_with_memory(500, Some(499));
+
+    let (effects, _response) = harness.acquire();
+
+    assert_eq!(starts(&effects), 0, "메모리가 부족하면 기동하지 않는다");
+    assert_eq!(harness.state(), AppStateName::Sleeping, "상태는 그대로다");
+
+    match rejections(&effects).as_slice() {
+        [AcquireError::InsufficientMemory {
+            available_mb,
+            required_mb,
+        }] => {
+            assert_eq!(*available_mb, 499);
+            assert_eq!(*required_mb, 500);
+        }
+        other => panic!("메모리 부족 거절이어야 한다: {other:?}"),
+    }
+}
+
+/// 임계값과 같으면 깨운다. 경계는 포함이다. (PRD §78)
+#[test]
+fn exactly_the_threshold_is_enough() {
+    let mut harness = harness_with_memory(500, Some(500));
+
+    let (effects, _response) = harness.acquire();
+
+    assert_eq!(starts(&effects), 1, "임계값과 같으면 깨워야 한다");
+    assert_eq!(harness.state(), AppStateName::Starting);
+}
+
+/// 임계값이 `0`이면 검사하지 않는다. 기본값이 이것이다. (PRD §78)
+#[test]
+fn a_zero_threshold_never_refuses() {
+    let mut harness = Harness::with_spec_and_limits(test_spec(60, 256), Limits::default())
+        .with_available_memory(Some(0));
+
+    let (effects, _response) = harness.acquire();
+
+    assert_eq!(starts(&effects), 1, "기본값은 검사하지 않는다");
+}
+
+/// 가용량을 읽을 수 없으면 **통과시킨다.** (PRD §78)
+///
+/// 판독 실패로 서비스를 멈추지 않는다. `/proc/meminfo`가 없는 플랫폼과
+/// 읽기가 실패한 경우가 모두 여기로 온다.
+#[test]
+fn an_unknown_reading_lets_the_wake_through() {
+    let mut harness = harness_with_memory(500, None);
+
+    let (effects, _response) = harness.acquire();
+
+    assert_eq!(starts(&effects), 1, "읽을 수 없으면 통과시킨다");
+}
+
+/// **이미 RUNNING인 application으로 가는 요청은 거절하지 않는다.** (PRD §78)
+///
+/// 이 절의 목적이 돌고 있는 것을 지키는 것이다. 메모리가 부족하다고 이미 돌고
+/// 있는 app의 요청까지 막으면 지키려던 것을 스스로 깨뜨린다.
+#[test]
+fn a_running_app_keeps_serving_when_memory_is_short() {
+    let mut harness = harness_with_memory(500, Some(5_000));
+    harness.start();
+    assert_eq!(harness.state(), AppStateName::Running);
+
+    // 이제 메모리가 말랐다.
+    harness.set_available_memory(Some(1));
+
+    let (effects, _response) = harness.acquire();
+
+    assert!(
+        rejections(&effects).is_empty(),
+        "돌고 있는 app의 요청은 거절하지 않는다: {effects:?}",
+    );
+    assert_eq!(granted(&effects).len(), 1, "lease를 발급해야 한다");
+    assert_eq!(harness.state(), AppStateName::Running);
+}
+
+/// STARTING에 합류하는 요청도 거절하지 않는다. (PRD §78)
+///
+/// 기동은 이미 시작됐다. 메모리는 그때 판정했고, 여기서 다시 막아도 되돌릴
+/// 것이 없다. 기다리던 요청만 잃는다.
+#[test]
+fn joining_a_start_in_flight_is_not_refused() {
+    let mut harness = harness_with_memory(500, Some(5_000));
+
+    let (effects, _first) = harness.acquire();
+    let operation_id = only_start(&effects);
+    assert_eq!(harness.state(), AppStateName::Starting);
+
+    // 기동 중에 메모리가 말랐다.
+    harness.set_available_memory(Some(1));
+
+    let (effects, _second) = harness.acquire();
+    assert!(
+        rejections(&effects).is_empty(),
+        "STARTING에 합류하는 요청은 거절하지 않는다: {effects:?}",
+    );
+    assert_eq!(harness.pending_waiters(), 2);
+
+    // 기동이 끝나면 둘 다 받는다.
+    let effects = harness.step(AppCommand::StartCompleted {
+        operation_id,
+        result: Ok(started(1)),
+    });
+    assert_eq!(granted(&effects).len(), 2, "기다린 요청 둘 다 받는다");
+}
+
+/// 메모리가 풀리면 다시 깨운다. 영구 거절이 아니다. (PRD §78)
+#[test]
+fn a_wake_succeeds_once_memory_frees_up() {
+    let mut harness = harness_with_memory(500, Some(100));
+
+    let (effects, _response) = harness.acquire();
+    assert_eq!(starts(&effects), 0);
+    assert_eq!(rejections(&effects).len(), 1);
+
+    harness.set_available_memory(Some(800));
+
+    let (effects, _response) = harness.acquire();
+    assert_eq!(starts(&effects), 1, "메모리가 풀리면 깨워야 한다");
+}
+
+/// `FAILED`에서도 입장 제어가 걸린다. (PRD §77, §78)
+///
+/// backoff가 지나 재시도할 수 있게 되었더라도 메모리가 없으면 깨우지 않는다.
+/// 두 검사는 서로를 대신하지 않는다.
+#[test]
+fn a_failed_app_is_also_subject_to_admission() {
+    let mut harness = harness_with_memory(500, Some(5_000));
+
+    // 기동을 한 번 실패시켜 FAILED로 둔다. 1회 실패는 backoff가 아니다.
+    let (effects, _response) = harness.acquire();
+    let operation_id = only_start(&effects);
+    harness.step(AppCommand::StartCompleted {
+        operation_id,
+        result: Err(AppError::StartFailed("on purpose".to_owned())),
+    });
+    assert_eq!(harness.state(), AppStateName::Failed);
+
+    // 메모리가 마르면 재시도도 막는다.
+    harness.set_available_memory(Some(1));
+
+    let (effects, _response) = harness.acquire();
+    assert_eq!(starts(&effects), 0, "FAILED에서의 재시도도 막는다");
+    assert_eq!(harness.state(), AppStateName::Failed, "상태는 그대로다");
+    assert!(
+        matches!(
+            rejections(&effects).as_slice(),
+            [AcquireError::InsufficientMemory { .. }]
+        ),
+        "메모리 부족으로 거절해야 한다: {effects:?}",
+    );
 }

@@ -22,6 +22,7 @@ use tracing::debug;
 
 use crate::error::AppError;
 use crate::id::{IdleGeneration, OperationId};
+use crate::limits::Limits;
 use crate::runtime::{ProcessHandle, Runtime};
 use crate::trace::StartupTrace;
 
@@ -30,6 +31,7 @@ use super::effect::Effect;
 use super::handle::AppHandle;
 use super::lease::RequestLease;
 use super::spec::AppSpec;
+use super::transition::Inputs;
 use super::transition::Machine;
 
 /// AppManager mailbox 기본 용량.
@@ -47,11 +49,29 @@ pub fn spawn(spec: Arc<AppSpec>, runtime: Arc<dyn Runtime>) -> AppHandle {
     spawn_with_capacity(spec, runtime, DEFAULT_MAILBOX_CAPACITY)
 }
 
+/// daemon 수준 한계값을 주고 actor를 띄운다. (PRD §78)
+pub fn spawn_with_limits(
+    spec: Arc<AppSpec>,
+    runtime: Arc<dyn Runtime>,
+    limits: Limits,
+) -> AppHandle {
+    spawn_inner(spec, runtime, DEFAULT_MAILBOX_CAPACITY, limits)
+}
+
 /// mailbox 용량을 지정해 actor를 띄운다. 주로 backpressure 테스트에서 사용한다.
 pub fn spawn_with_capacity(
     spec: Arc<AppSpec>,
     runtime: Arc<dyn Runtime>,
     mailbox_capacity: usize,
+) -> AppHandle {
+    spawn_inner(spec, runtime, mailbox_capacity, Limits::default())
+}
+
+fn spawn_inner(
+    spec: Arc<AppSpec>,
+    runtime: Arc<dyn Runtime>,
+    mailbox_capacity: usize,
+    limits: Limits,
 ) -> AppHandle {
     let (tx, rx) = mpsc::channel(mailbox_capacity.max(1));
 
@@ -59,7 +79,8 @@ pub fn spawn_with_capacity(
         spec: Arc::clone(&spec),
         runtime,
         self_tx: tx.clone(),
-        machine: Machine::new(Arc::clone(&spec)),
+        machine: Machine::new(Arc::clone(&spec), limits),
+        limits,
         idle_timer: None,
     };
 
@@ -71,6 +92,7 @@ pub fn spawn_with_capacity(
 struct Actor {
     spec: Arc<AppSpec>,
     runtime: Arc<dyn Runtime>,
+    limits: Limits,
     /// 자기 자신에게 event를 보내기 위한 sender. lease 발급에도 사용한다.
     self_tx: mpsc::Sender<AppCommand>,
     machine: Machine,
@@ -90,7 +112,20 @@ impl Actor {
         debug!(app = %self.spec.name, "app manager started");
 
         while let Some(command) = rx.recv().await {
-            let (effects, control) = self.machine.step(command, Instant::now());
+            // 입장 제어는 **잠든 app을 깨우는 요청**에만 적용한다. (PRD §78)
+            //
+            // 모든 명령마다 `/proc/meminfo`를 읽으면 lease 반납처럼 흔한 경로에
+            // 비용이 붙는다. 한계값이 꺼져 있으면 읽지도 않는다.
+            let inputs =
+                if self.limits.checks_memory() && matches!(command, AppCommand::Acquire { .. }) {
+                    Inputs {
+                        available_memory_mb: self.runtime.available_memory_mb(),
+                    }
+                } else {
+                    Inputs::default()
+                };
+
+            let (effects, control) = self.machine.step(command, Instant::now(), inputs);
             self.apply(effects);
 
             if control == ControlFlow::Break(()) {

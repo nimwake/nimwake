@@ -2,7 +2,7 @@
 
 > **Nimwake PRD** › 아키텍처
 >
-> 원문 구간: `PRD.md` §23–§26, §69, §75
+> 원문 구간: `PRD.md` §23–§26, §69, §75, §78
 
 ---
 
@@ -328,6 +328,89 @@ MVP는 adaptive queue나 우선순위 큐를 만들지 않는다.
 **"모든 대기열은 bounded"라는 invariant만 처음부터 지키면 된다.**
 
 기본값은 상수로 두고, app별로 `max_pending_requests`를 재정의할 수 있게 한다.
+
+## 78. Memory Admission Control
+
+§53이 모양을 예로 보였을 뿐 계약이 없었다. 이 절이 그 계약이다.
+
+§54 Eviction Policy는 **여전히 Post-MVP다.** 이 절은 메모리가 부족할 때
+**새로 깨우지 않는 것**까지만 정한다. 돌고 있는 application을 내리지 않는다.
+
+### 무엇이 문제였나
+
+제한 장치가 없었다. Next.js 앱 하나가 96~118MB이고, 요청이 올 때마다 하나씩
+깨어난다. 메모리가 바닥나면 **OOM killer가 무엇을 죽일지 우리가 정하지 못한다**
+— 돌고 있던 application일 수도, `nimwaked` 자신일 수도 있다.
+
+요청 하나를 거절하는 것이 돌고 있는 것을 잃는 것보다 낫다.
+
+### 임계값
+
+```text
+nimwaked --min-free-memory-mb <N>
+```
+
+`0`이 기본이고 그때는 검사하지 않는다. **기본으로 켜지 않는 이유**: 안전한
+값은 기기마다 다르고, 켜져 있으면 지금까지 되던 기동이 거절될 수 있다.
+scale-to-zero 엔진이 기본값 때문에 app을 깨우지 않는 것은 놀랄 일이다.
+
+manifest가 아니라 CLI다. 임계값은 **시스템 전체의 성질**이고 application마다
+다른 값을 갖는 것이 아니다. daemon 설정은 모두 CLI 인자다. (§74)
+
+### 어디에 적용하나
+
+```text
+적용      잠든 application을 깨우는 요청 (SLEEPING · FAILED에서의 acquire)
+적용 안 함 이미 RUNNING인 application으로 가는 요청
+적용 안 함 STARTING에 합류하는 요청
+적용 안 함 stop 직후의 재기동
+```
+
+**돌고 있는 것은 건드리지 않는다.** 이 절의 목적이 그것을 지키는 것이다.
+
+stop 직후의 재기동을 검사하지 않는 이유: 방금 그 application이 쓰던 메모리가
+풀렸고, stop을 기다린 요청을 거절하는 것이 가장 나쁜 결과다. (§31)
+
+### 거절하는 방식
+
+```text
+503 Service Unavailable
+Retry-After 없음
+```
+
+`Retry-After`를 붙이지 않는다. 메모리가 언제 풀릴지 **모른다.** §77의 backoff는
+남은 시간을 알기 때문에 붙인다. 모르는 것을 숫자로 적으면 거짓말이 된다.
+
+overload(§69)도 `503`에 `Retry-After`가 없다. 둘은 본문과 로그로 구분한다.
+클라이언트가 할 일은 어느 쪽이든 같다 — 다시 보내면 될 수도 있다.
+
+### 막지 못하는 것
+
+**동시에 깨어나는 경우는 막지 못한다.**
+
+application의 메모리 비용을 기동 전에 알 수 없다. 앱 8개가 같은 순간에 요청을
+받으면 여덟 결정이 모두 같은 가용량을 보고 모두 통과한다.
+
+막는 것은 **하나씩 쌓이는 경우**다. 전화기에서 몇 시간에 걸쳐 앱이 하나씩
+깨어나는 것이 실제 양상이고, 매 cold start가 그 시점의 가용량을 본다.
+
+예약(reservation)으로 동시성까지 막으려면 actor들이 공유하는 메모리 예산이
+필요하고, 그것은 application마다의 예상 RSS를 먼저 알아야 한다. 측정 기반이
+생긴 뒤에 다룬다.
+
+### 가용량의 정의
+
+`/proc/meminfo`의 `MemAvailable`을 쓴다. `MemFree`가 아니다.
+
+`MemFree`는 page cache를 쓰지 않은 양만 센다. Linux는 남는 메모리를 cache로
+쓰므로 `MemFree`는 정상 상태에서도 작고, 그것으로 판정하면 **멀쩡한 기기에서
+계속 거절한다.** `MemAvailable`은 커널이 "회수 가능"으로 계산한 값이다.
+
+읽을 수 없으면 **통과시킨다.** 판독 실패로 서비스를 멈추지 않는다.
+
+→ [§53 Memory Pressure](../05-beyond-mvp/01-resource-management.md) ·
+[§54 Eviction Policy](../05-beyond-mvp/01-resource-management.md) ·
+[§74 Host Interface](../04-platform/03-host-interface.md)
 
 ---
 

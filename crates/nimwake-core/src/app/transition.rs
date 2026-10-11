@@ -45,6 +45,8 @@ use crate::id::{
 };
 use crate::runtime::{ExitStatus, ProcessHandle, StartedProcess};
 
+use crate::limits::Limits;
+
 use super::backoff::{self, FailureHistory};
 use super::command::{AppCommand, StopReason};
 use super::effect::Effect;
@@ -70,9 +72,25 @@ impl Ids {
 }
 
 /// 전이가 참조하는 읽기 전용 문맥.
+/// 전이가 필요로 하는 외부 입력.
+///
+/// 시계(`now`)처럼 **주입받는다.** 전이 함수가 직접 `/proc`을 읽으면 같은
+/// (상태, 명령)이 다른 결과를 낼 수 있고 테스트가 값을 정할 수 없다. (PRD §18)
+///
+/// 명령에 따라 비어 있을 수 있다. 필요하지 않은 경로에서 읽지 않기 때문이다.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct Inputs {
+    /// 가용 메모리(MiB). 입장 제어가 필요한 명령에서만 채운다. (PRD §78)
+    pub available_memory_mb: Option<u64>,
+}
+
 pub(super) struct Ctx<'a> {
     pub spec: &'a AppSpec,
     pub ids: &'a Ids,
+    /// daemon 수준 한계값. (PRD §78)
+    pub limits: Limits,
+    /// 이 전이에 주어진 외부 입력.
+    pub inputs: Inputs,
     /// 이 전이가 일어난 시각. 주입받으므로 idle 판정을 시계 조작 없이 검증할 수 있다.
     pub now: Instant,
     /// daemon이 내려가는 중인가. 참이면 stop 완료 후 재기동하지 않는다. (Invariant 10)
@@ -104,11 +122,17 @@ impl Step {
 /// 둘을 나누면 그 사이에 idle shutdown이 끼어들 수 있다. (PRD §26)
 pub(super) fn on_acquire(state: AppState, waiter: Waiter, ctx: &Ctx<'_>) -> Step {
     match state {
-        AppState::Sleeping => begin_start(vec![waiter], FailureHistory::default(), ctx),
+        AppState::Sleeping => match admit(ctx) {
+            Err(error) => Step::with(
+                AppState::Sleeping,
+                vec![Effect::RejectWaiter { waiter, error }],
+            ),
+            Ok(()) => begin_start(vec![waiter], FailureHistory::default(), ctx),
+        },
 
         // crash loop라면 지금 재시도하지 않는다. (PRD §77)
         AppState::Failed {
-            error,
+            error: error_state,
             failed_at,
             failures,
         } => match backoff::remaining_backoff(&failures, failed_at, ctx.now) {
@@ -120,7 +144,7 @@ pub(super) fn on_acquire(state: AppState, waiter: Waiter, ctx: &Ctx<'_>) -> Step
                 );
                 Step::with(
                     AppState::Failed {
-                        error,
+                        error: error_state,
                         failed_at,
                         failures,
                     },
@@ -130,7 +154,17 @@ pub(super) fn on_acquire(state: AppState, waiter: Waiter, ctx: &Ctx<'_>) -> Step
                     }],
                 )
             }
-            None => begin_start(vec![waiter], failures, ctx),
+            None => match admit(ctx) {
+                Err(error) => Step::with(
+                    AppState::Failed {
+                        error: error_state,
+                        failed_at,
+                        failures,
+                    },
+                    vec![Effect::RejectWaiter { waiter, error }],
+                ),
+                Ok(()) => begin_start(vec![waiter], failures, ctx),
+            },
         },
 
         AppState::Starting {
@@ -233,6 +267,39 @@ pub(super) fn on_request_finished(state: AppState, lease_id: LeaseId, ctx: &Ctx<
 
     let (running, effect) = arm_idle_timer(running, ctx);
     Step::with(AppState::Running(running), vec![effect])
+}
+
+/// 잠든 application을 깨울 수 있는가. (PRD §78)
+///
+/// **돌고 있는 것은 건드리지 않는다.** 이 검사는 새로 깨우는 경로에만 있다.
+/// stop 직후의 재기동(§31)에도 적용하지 않는다 — 방금 그 application이 쓰던
+/// 메모리가 풀렸고, stop을 기다린 요청을 거절하는 것이 가장 나쁜 결과다.
+///
+/// 가용량을 읽을 수 없으면 **통과시킨다.** 판독 실패로 서비스를 멈추지 않는다.
+fn admit(ctx: &Ctx<'_>) -> Result<(), AcquireError> {
+    // 임계값 0을 따로 걸러내지 않는다. `u64 >= 0`은 늘 참이므로 아래 비교가 통과한다.
+    // **꺼져 있을 때 `/proc`을 읽지 않는 것**이 중요하고 그 판단은 actor가 한다.
+    // 여기서 한 번 더 거르면 어떤 테스트도 구분하지 못하는 가지가 생긴다.
+    let required_mb = ctx.limits.min_free_memory_mb;
+
+    let Some(available_mb) = ctx.inputs.available_memory_mb else {
+        return Ok(());
+    };
+
+    if available_mb >= required_mb {
+        return Ok(());
+    }
+
+    warn!(
+        app = %ctx.spec.name,
+        available_mb,
+        required_mb,
+        "refusing to wake: not enough free memory",
+    );
+    Err(AcquireError::InsufficientMemory {
+        available_mb,
+        required_mb,
+    })
 }
 
 fn begin_start(waiters: Vec<Waiter>, failures: FailureHistory, ctx: &Ctx<'_>) -> Step {
@@ -603,16 +670,18 @@ pub(super) struct Machine {
     spec: std::sync::Arc<AppSpec>,
     state: AppState,
     ids: Ids,
+    limits: Limits,
     /// 종료를 기다리는 쪽. process가 사라진 뒤에 [`Effect::ConfirmShutdown`]으로 나간다.
     shutdown_ack: Option<oneshot::Sender<()>>,
 }
 
 impl Machine {
-    pub(super) fn new(spec: std::sync::Arc<AppSpec>) -> Self {
+    pub(super) fn new(spec: std::sync::Arc<AppSpec>, limits: Limits) -> Self {
         Self {
             spec,
             state: AppState::Sleeping,
             ids: Ids::new(),
+            limits,
             shutdown_ack: None,
         }
     }
@@ -628,10 +697,13 @@ impl Machine {
         &mut self,
         command: AppCommand,
         now: Instant,
+        inputs: Inputs,
     ) -> (Vec<Effect>, ControlFlow<()>) {
         let ctx = Ctx {
             spec: &self.spec,
             ids: &self.ids,
+            limits: self.limits,
+            inputs,
             now,
             shutting_down: self.shutdown_ack.is_some(),
         };
@@ -677,6 +749,8 @@ impl Machine {
         let ctx = Ctx {
             spec: &self.spec,
             ids: &self.ids,
+            limits: self.limits,
+            inputs: Inputs::default(),
             now,
             shutting_down: true,
         };

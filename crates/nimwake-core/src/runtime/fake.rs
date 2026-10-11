@@ -29,6 +29,8 @@ pub struct FakeRuntimeConfig {
     pub stop_delay: Duration,
     /// 앞으로 `n`번의 `start`를 실패시킨다.
     pub failing_starts: usize,
+    /// 입장 제어가 볼 가용 메모리(MiB). `None`이면 "알 수 없음"이다. (PRD §78)
+    pub available_memory_mb: Option<u64>,
 }
 
 /// in-memory process. `ProcessHandle`의 control 경로이기도 하다.
@@ -99,6 +101,8 @@ pub fn detached_handle(process_id: ProcessId) -> ProcessHandle {
 struct State {
     config: FakeRuntimeConfig,
     processes: HashMap<ProcessId, Arc<FakeProcess>>,
+    /// 가용 메모리를 읽은 횟수. 입장 제어의 비용을 테스트가 보기 위한 것이다.
+    memory_reads: usize,
 }
 
 /// 결정적으로 조작 가능한 in-memory runtime.
@@ -123,6 +127,7 @@ impl FakeRuntime {
             state: Mutex::new(State {
                 config,
                 processes: HashMap::new(),
+                memory_reads: 0,
             }),
             process_ids: ProcessIdSeq::new(),
             start_count: AtomicUsize::new(0),
@@ -163,6 +168,20 @@ impl FakeRuntime {
     }
 
     /// 다음 `n`번의 `start`를 실패시킨다.
+    /// 입장 제어가 볼 가용 메모리를 정한다. (PRD §78)
+    pub fn set_available_memory_mb(&self, mb: Option<u64>) {
+        self.lock().config.available_memory_mb = mb;
+    }
+
+    /// 가용 메모리를 몇 번 읽었는가.
+    ///
+    /// 입장 제어가 꺼져 있으면 **0이어야 한다.** 요청마다 `/proc/meminfo`를
+    /// 읽으면 lease 반납처럼 흔한 경로에 비용이 붙는다. (PRD §78)
+    #[must_use]
+    pub fn memory_reads(&self) -> usize {
+        self.lock().memory_reads
+    }
+
     pub fn fail_next_starts(&self, n: usize) {
         self.lock().config.failing_starts = n;
     }
@@ -185,6 +204,12 @@ impl FakeRuntime {
 
 #[async_trait]
 impl Runtime for FakeRuntime {
+    fn available_memory_mb(&self) -> Option<u64> {
+        let mut state = self.lock();
+        state.memory_reads += 1;
+        state.config.available_memory_mb
+    }
+
     async fn start(&self, spec: &AppSpec) -> Result<StartedProcess, RuntimeError> {
         self.start_count.fetch_add(1, Ordering::SeqCst);
 
