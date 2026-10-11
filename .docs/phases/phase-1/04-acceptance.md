@@ -282,7 +282,7 @@ soak CSV에는 **구간 분해가 없다.** `seconds`는 HTTP 응답 시간이�
 | 동시 기동의 자원 한계 | Next.js 앱 8개를 동시에 깨우면 직렬화 없이 전부 0.87초에 뜬다. 앱당 96MB로 합계 768MB. 2GB 기기면 10개 남짓이 한계인데 제한 장치가 없다 (자원 관리는 Post-MVP) |
 | 장시간 운용 | CI에서의 최장 측정은 105초(stress) / 120초(sustained)다. **실기기에서는 50.4시간을 측정했다** — daemon 재시작 0회, 요청 실패 0/604, RSS 2104→1296KB(감소). 판정은 `nimwake-android` 소관이고 아래에 수치를 적어 둔다 |
 | crash-loop | backoff가 없다 (PRD §33, Post-MVP). **누수는 없음을 확인했다** — 동시 자식 ≤ app 수, 정착 후 zombie 0, RSS +1.8MB, FD 증가 없음. 다만 spawn 속도를 막는 것이 없다. 623 spawn/초를 쟀고 `startup_timeout`도 waiter 상한도 관여하지 않는다 |
-| manifest 재적재 | 없다. 앱 추가에 daemon 재시작이 필요하고 그러면 모든 앱이 내려간다 |
+| manifest 재적재 | `SIGHUP`으로 된다 (PRD §76). 바뀌지 않은 application은 건드리지 않는다. 검증 실패와 빈 집합은 거부하고 기존 상태를 유지한다 |
 | 운영 도구 | `nimwake status`도 admin IPC도 없다 (Post-MVP) |
 
 실측 근거는 [05. 설계 결정 기록](05-design-decisions.md)의 "실측: 실제 애플리케이션"에 있다.

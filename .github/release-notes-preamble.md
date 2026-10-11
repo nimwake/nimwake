@@ -35,7 +35,7 @@ Scale-to-Zero application lifecycle. 요청이 오면 깨우고, 쓰지 않으�
 | readiness의 의미 | TCP connect가 되는 시점을 쓴다. Next.js는 port를 열고도 첫 응답까지 190ms 더 걸린다 |
 | 동시 기동의 자원 한계 | Next.js 앱 하나가 118MB. 2GB 기기면 10~14개가 한계인데 제한 장치가 없다 |
 | 장시간 운용 | CI 측정 구간은 분 단위다. 실기기에서 50.4시간을 측정했다(daemon 재시작 0회 · 요청 실패 0/604). 72h 판정은 `nimwake-android` 소관 |
-| manifest 재적재 | 없다. application 추가에 daemon 재시작이 필요하다 |
+| manifest 재적재 | `SIGHUP`으로 된다. 돌고 있는 application은 건드리지 않는다 (PRD §76) |
 | 운영 도구 | `nimwake status`도 admin IPC도 없다 |
 
 [완료 체크리스트](.docs/phases/phase-1/04-acceptance.md)에 항목별 근거가 있다.

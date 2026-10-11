@@ -261,6 +261,16 @@ impl Daemon {
     }
 
     /// daemon이 지금까지 출력한 줄들.
+    /// manifest를 다시 읽게 한다. (PRD §76)
+    ///
+    /// 반환 뒤 바로 결과가 보이지는 않는다. 재적재는 비동기이므로 호출하는 쪽이
+    /// 출력(`reloaded:`)이나 상태를 기다려야 한다.
+    #[cfg(unix)]
+    pub fn reload(&self) {
+        let pid = nix::unistd::Pid::from_raw(i32::try_from(self.child.id()).unwrap_or(i32::MAX));
+        nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGHUP).expect("SIGHUP is delivered");
+    }
+
     pub fn output(&self) -> Vec<String> {
         lines(&self.output)
     }

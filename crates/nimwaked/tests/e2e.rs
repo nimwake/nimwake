@@ -781,3 +781,198 @@ fn the_node_example_shuts_down_gracefully() {
     );
     assert!(!is_listening(port), "the app outlived the daemon");
 }
+
+/// `SIGHUP`으로 application을 추가해도 **돌고 있던 것은 건드리지 않는다.** (PRD §76)
+///
+/// 이 테스트가 §76의 존재 이유다. 건드린다면 daemon 재시작과 다를 바 없다.
+///
+/// "건드리지 않았다"를 app process의 pid로 본다. `echo-server`가 자기 pid를
+/// body로 돌려주므로 재적재 전후를 HTTP로 직접 비교할 수 있다.
+#[test]
+fn a_reload_adds_an_app_without_touching_the_running_ones() {
+    let apps = Apps::new();
+    let blog_port = free_port();
+    let api_port = free_port();
+
+    echo(
+        &apps,
+        "blog",
+        blog_port,
+        Lifecycle {
+            idle: 300,
+            ..Lifecycle::default()
+        },
+    );
+
+    let daemon = Daemon::start(&apps);
+
+    // blog를 깨워 두고 pid를 기억한다.
+    let before = daemon.get("blog.localhost");
+    assert_eq!(before.status, 200);
+    let blog_pid = before.body.clone();
+    assert!(!blog_pid.is_empty(), "echo-server reports its pid");
+
+    // 아직 등록되지 않은 host는 404다.
+    assert_eq!(
+        daemon.get("api.localhost").status,
+        404,
+        "api is not registered yet",
+    );
+
+    // manifest를 더하고 재적재한다.
+    echo(
+        &apps,
+        "api",
+        api_port,
+        Lifecycle {
+            idle: 300,
+            ..Lifecycle::default()
+        },
+    );
+    daemon.reload();
+
+    wait_for("the reload to report", Duration::from_secs(10), || {
+        daemon
+            .output()
+            .iter()
+            .any(|line| line.contains("reloaded:"))
+    });
+
+    // 새 app이 서빙한다.
+    let api = daemon.get("api.localhost");
+    assert_eq!(api.status, 200, "the new app must serve after a reload");
+
+    // **blog는 같은 process다.**
+    let after = daemon.get("blog.localhost");
+    assert_eq!(after.status, 200);
+    assert_eq!(
+        after.body, blog_pid,
+        "the running app must not be restarted by a reload",
+    );
+
+    assert!(
+        is_listening(blog_port),
+        "blog must still be listening on its own port",
+    );
+}
+
+/// manifest에서 빼고 재적재하면 정지되고 routing에서 빠진다. (PRD §76)
+#[test]
+fn a_reload_stops_an_app_that_left_the_manifest() {
+    let apps = Apps::new();
+    let keep_port = free_port();
+    let drop_port = free_port();
+
+    for (name, port) in [("keep", keep_port), ("gone", drop_port)] {
+        echo(
+            &apps,
+            name,
+            port,
+            Lifecycle {
+                idle: 300,
+                ..Lifecycle::default()
+            },
+        );
+    }
+
+    let daemon = Daemon::start(&apps);
+
+    // 둘 다 깨워 둔다.
+    assert_eq!(daemon.get("keep.localhost").status, 200);
+    assert_eq!(daemon.get("gone.localhost").status, 200);
+    assert!(is_listening(drop_port));
+
+    // manifest를 지우고 재적재한다.
+    std::fs::remove_dir_all(apps.path().join("gone")).expect("the manifest is removed");
+    daemon.reload();
+
+    wait_for("the reload to report", Duration::from_secs(10), || {
+        daemon
+            .output()
+            .iter()
+            .any(|line| line.contains("reloaded:"))
+    });
+
+    // routing에서 빠졌다.
+    assert_eq!(
+        daemon.get("gone.localhost").status,
+        404,
+        "the route must be gone",
+    );
+
+    // process도 정지했다.
+    wait_for(
+        "the retired app to stop listening",
+        Duration::from_secs(10),
+        || !is_listening(drop_port),
+    );
+
+    // 남은 app은 그대로 서빙한다.
+    assert_eq!(
+        daemon.get("keep.localhost").status,
+        200,
+        "the remaining app must keep serving",
+    );
+}
+
+/// 잘못된 manifest 집합으로 재적재하면 **아무것도 바뀌지 않는다.** (PRD §76)
+///
+/// daemon은 종료하지 않는다. 기동 시점의 검증 실패는 종료 코드 `78`이지만(PRD §74),
+/// 재적재 실패는 이미 서빙 중인 application을 내릴 이유가 되지 않는다.
+#[test]
+fn a_reload_that_fails_validation_changes_nothing() {
+    let apps = Apps::new();
+    let port = free_port();
+
+    echo(
+        &apps,
+        "blog",
+        port,
+        Lifecycle {
+            idle: 300,
+            ..Lifecycle::default()
+        },
+    );
+
+    let daemon = Daemon::start(&apps);
+
+    let before = daemon.get("blog.localhost");
+    assert_eq!(before.status, 200);
+    let blog_pid = before.body.clone();
+
+    // 같은 port를 쓰는 app을 더한다. 집합 검증(§22)이 거부해야 한다.
+    echo(
+        &apps,
+        "clash",
+        port,
+        Lifecycle {
+            idle: 300,
+            ..Lifecycle::default()
+        },
+    );
+    daemon.reload();
+
+    wait_for("the reload to be rejected", Duration::from_secs(10), || {
+        daemon
+            .output()
+            .iter()
+            .any(|line| line.contains("reload rejected by validation"))
+    });
+
+    // 충돌하는 app은 등록되지 않았다.
+    assert_eq!(
+        daemon.get("clash.localhost").status,
+        404,
+        "nothing may be applied from an invalid set",
+    );
+
+    // 기존 app은 같은 process로 계속 서빙한다.
+    let after = daemon.get("blog.localhost");
+    assert_eq!(after.status, 200);
+    assert_eq!(
+        after.body, blog_pid,
+        "a rejected reload must not disturb the running app",
+    );
+
+    // daemon이 살아 있다는 것은 바로 위 요청이 응답한 것으로 이미 증명된다.
+}

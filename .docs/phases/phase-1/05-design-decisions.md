@@ -100,6 +100,87 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## manifest 재적재 (PRD §76)
+
+daemon 재시작 없이 application을 더하거나 뺀다. **실사용 불편 1순위였다** —
+app 하나를 추가하려고 나머지 전부를 중단시켰다.
+
+PRD에 조항이 없었다. §75(요청 timeout)와 같은 상황이므로 조항을 세우고 구현했다.
+
+### 고른 것과 고르지 않은 것
+
+```text
+SIGHUP        골랐다
+파일 감시      고르지 않았다
+nimwake CLI   §56 Post-MVP다
+```
+
+파일 감시를 쓰지 않은 이유가 중요하다. 에디터는 임시 파일을 쓰고 바꾸거나 여러
+파일을 차례로 저장한다. **그 중간 상태를 읽으면 운영자가 의도하지 않은 조합으로
+재적재한다.** 신호는 "지금 읽어라"를 운영자가 정한다.
+
+### 적용 규칙
+
+```text
+spec이 같다       건드리지 않는다
+없어졌다          정지시키고 routing에서 뺀다
+추가됐다          SLEEPING으로 등록한다
+바뀌었다          정지시킨다. 다음 요청이 새 spec으로 기동한다
+manifest 없음     거부한다. "전부 지웠다"와 "디렉터리를 잘못 건드렸다"를 구분할 수 없다
+검증 실패         아무것도 바꾸지 않는다
+```
+
+"바뀌었다"의 기준은 `AppSpec` 전체의 동등성이다. `[lifecycle]` timeout만 바뀐
+경우도 정지시킨다. 무엇이 바뀌었는지에 따라 다르게 처리하면 규칙이 늘어나고,
+정지는 scale-to-zero에서 정상 경로다.
+
+### 건드리지 않는다는 것을 어떻게 지키나
+
+**그것이 이 기능의 전부다.** 안 되면 daemon 재시작과 다를 바 없다.
+
+`echo-server`가 자기 pid를 body로 돌려주므로 재적재 전후를 HTTP로 직접 비교할
+수 있다. e2e에서 그렇게 단언한다.
+
+```text
+재적재 전 pid=1137  후 pid=1137
+```
+
+뮤테이션으로 확인했다. spec 동등 판정을 무력화해 전부 교체하게 만들면
+`a_reload_adds_an_app_without_touching_the_running_ones`가
+"the running app must not be restarted by a reload"에서 실패하고, core 쪽 테스트
+셋도 함께 깨진다.
+
+### 요청 경로에 잠금이 들어갔다
+
+재적재는 registry가 런타임에 바뀐다는 뜻이다. `resolve`가 더는 참조를 돌려줄 수
+없고 `RwLock` 뒤에서 handle을 복제해 나온다. `AppHandle`은 `Arc`와 channel
+sender뿐이라 복제가 싸다. **잠금을 들고 await하지 않는다.**
+
+비용을 쟀다. **같은 기계에서 rc3 바이너리를 따로 빌드해 번갈아 7회씩** 돌렸다.
+
+```text
+지표                     rc3 (min/중앙/max)      현재 (min/중앙/max)
+warm_p50_ms              0.451 0.486 0.740      0.423 0.509 0.708
+warm_p95_ms              0.986 1.211 7.758      0.917 1.372 3.743
+proxy_overhead_p50_ms    0.214 0.262 0.469      0.204 0.261 0.473
+proxy_overhead_p95_ms    0.592 0.724 7.084      0.584 0.903 3.269
+```
+
+**네 지표 모두 범위가 겹친다.** rc3의 p95 최악값이 현재보다 오히려 나쁘다.
+
+처음에 3회만 재고 "p95 +27%"를 보았다. 표본을 늘리니 잡음이었다.
+**비용이 없다고 말하지 않는다 — 이 측정의 해상도 아래에 있다고 말한다.**
+예상 비용은 경쟁 없는 `RwLock` 읽기와 `Arc` 복제 둘, 수십 나노초다.
+warm path가 450µs이므로 네 자리 수 아래다. D33(trace 비용)에서와 같은 상황이다.
+
+### 처음에는 로컬 수치를 CI baseline과 비교했다
+
+`warm_p50 0.45ms` vs rc3 baseline의 `1.23ms`를 보고 "빨라졌다"고 읽었다.
+**다른 기계다.** 이 세션에서 계속 경계해 온 실수를 스스로 했다. 같은 기계의
+before/after를 만들기 위해 rc3 태그의 worktree를 따로 빌드했다.
+
+---
+
 ## tarball의 바이너리 중 하나만 실행 확인되고 있었다
 
 soak이 끝나기 전에 처리할 것을 찾다가 발견했다. `release.yml`의 qemu smoke는
