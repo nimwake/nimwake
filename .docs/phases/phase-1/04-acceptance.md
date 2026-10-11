@@ -107,6 +107,7 @@ PRD를 코드와 한 절씩 대조한 결과다. **같은 일을 다시 하지 �
 | §75 Response Header Timeout | `test` 504로 끊고 **느린 body는 끊지 않는다** |
 | §76 Manifest Reload | `test` + `gate` `SIGHUP` 후 app pid가 그대로다 |
 | §77 Crash-Loop Backoff | `test` + `gate` 요청 8회에 기동 시도 3회. 창·지수·상한을 뮤테이션으로 확인 |
+| §78 Memory Admission Control | `test` + `gate` 부족하면 `503`·spawn 0회. 꺼져 있으면 `/proc` 판독 0회 |
 
 ### §18은 테스트가 아니라 구조가 보장한다
 
@@ -281,7 +282,7 @@ soak CSV에는 **구간 분해가 없다.** `seconds`는 HTTP 응답 시간이�
 | --- | --- |
 | 실제 서비스의 cold start | Next.js **기동 206ms**, 첫 응답 396ms. 목표 5초에 여유가 크다. 다만 한 페이지짜리 앱이므로 하한이다 |
 | readiness의 의미 | TCP connect는 application readiness가 아니다. Next.js는 port를 열고도 190ms 더 걸린다 |
-| 동시 기동의 자원 한계 | Next.js 앱 8개를 동시에 깨우면 직렬화 없이 전부 0.87초에 뜬다. 앱당 96MB로 합계 768MB. 2GB 기기면 10개 남짓이 한계인데 제한 장치가 없다 (자원 관리는 Post-MVP) |
+| 동시 기동의 자원 한계 | Next.js 앱 8개를 동시에 깨우면 직렬화 없이 전부 0.87초에 뜬다. 앱당 96MB로 합계 768MB. **입장 제어가 생겼다**(PRD §78, `--min-free-memory-mb`) — 하나씩 쌓이는 경우는 막는다. **동시에 깨어나는 경우는 막지 못한다**: app의 메모리 비용을 기동 전에 알 수 없다. eviction(§54)은 여전히 Post-MVP |
 | 장시간 운용 | CI에서의 최장 측정은 105초(stress) / 120초(sustained)다. **실기기에서는 50.4시간을 측정했다** — daemon 재시작 0회, 요청 실패 0/604, RSS 2104→1296KB(감소). 판정은 `nimwake-android` 소관이고 아래에 수치를 적어 둔다 |
 | crash-loop | backoff가 있다 (PRD §77). 같은 기계에서 before/after를 쟀다 — 20초 부하에 **기동 시도 3,653·4,728회 → 14·14회**(초당 183~236 → 0.7). 14는 설계가 예측한 값과 같다(앱당 즉시 3회 + 1·2·4·8·16초 지연 = 7회, 앱 2개). 누수는 전부터 없었다 — 동시 자식 ≤ app 수, 정착 후 zombie 0, FD 증가 없음 |
 | manifest 재적재 | `SIGHUP`으로 된다 (PRD §76). 바뀌지 않은 application은 건드리지 않는다. 검증 실패와 빈 집합은 거부하고 기존 상태를 유지한다 |

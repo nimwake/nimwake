@@ -40,4 +40,13 @@ pub trait Runtime: Send + Sync + 'static {
 
     /// graceful 종료를 시도하고, timeout을 넘기면 강제 종료한다.
     async fn stop(&self, handle: &ProcessHandle, timeout: Duration) -> Result<(), RuntimeError>;
+
+    /// 시스템의 가용 메모리를 MiB로. 알 수 없으면 `None`.
+    ///
+    /// 입장 제어가 이것을 본다. (PRD §78) `Runtime`에 두는 이유는 두 가지다 —
+    /// 가용 메모리는 플랫폼의 성질이고, 여기 두면 테스트가 값을 정할 수 있다.
+    ///
+    /// **기본 구현을 두지 않는다.** 새 runtime이 생각 없이 `None`을 돌려주면
+    /// 입장 제어가 조용히 꺼진다.
+    fn available_memory_mb(&self) -> Option<u64>;
 }

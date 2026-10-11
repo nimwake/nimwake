@@ -1123,3 +1123,155 @@ fn a_reload_clears_the_backoff() {
         "성공 응답에 Retry-After가 붙을 이유가 없다",
     );
 }
+
+/// 가용 메모리가 임계값 아래면 깨우지 않고 `503`으로 거절한다. (PRD §78)
+///
+/// 실제 기기의 가용량보다 큰 임계값을 주면 항상 부족한 상태가 된다.
+/// `Retry-After`가 **없어야** 한다 — 메모리가 언제 풀릴지 모른다.
+#[test]
+fn a_wake_is_refused_when_the_system_is_short_on_memory() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "blog", port, Lifecycle::default());
+
+    // 어떤 기기에서도 부족한 값. u64의 상한 근처를 쓰면 파싱 한계에 걸리므로
+    // 넉넉하면서 현실적으로 도달 불가능한 값을 쓴다 (1 PiB).
+    let daemon = Daemon::start_with(&apps, &["--min-free-memory-mb", "1073741824"]);
+
+    let response = daemon.get("blog.localhost");
+    assert_eq!(response.status, 503, "메모리가 부족하면 503이다");
+    assert!(
+        response.header("retry-after").is_none(),
+        "메모리는 언제 풀릴지 모른다. Retry-After를 붙이면 거짓말이다",
+    );
+    assert!(
+        response.body.contains("memory"),
+        "본문이 이유를 말해야 한다: {}",
+        response.body,
+    );
+
+    // **spawn하지 않았다.** port가 열리지 않아야 한다.
+    assert!(
+        !is_listening(port),
+        "거절했으면 process를 띄우지 않아야 한다",
+    );
+
+    // 로그가 운영자에게 숫자를 준다.
+    wait_for("the refusal to be logged", Duration::from_secs(5), || {
+        daemon
+            .output()
+            .iter()
+            .any(|line| line.contains("refusing to wake"))
+    });
+}
+
+/// 임계값이 `0`(기본)이면 평소대로 깨운다. (PRD §78)
+///
+/// 기본값이 서비스를 막지 않는다는 것이 이 테스트의 전부다.
+#[test]
+fn the_default_threshold_does_not_block_anything() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "blog", port, Lifecycle::default());
+
+    let daemon = Daemon::start_with(&apps, &["--min-free-memory-mb", "0"]);
+
+    let response = daemon.get("blog.localhost");
+    assert_eq!(response.status, 200, "기본값은 아무것도 막지 않는다");
+    assert!(is_listening(port));
+}
+
+/// 임계값을 넘길 만큼 넉넉하면 깨운다. (PRD §78)
+#[test]
+fn a_reachable_threshold_lets_the_wake_through() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "blog", port, Lifecycle::default());
+
+    // 1MiB. CI runner든 전화기든 이보다는 남아 있다.
+    let daemon = Daemon::start_with(&apps, &["--min-free-memory-mb", "1"]);
+
+    assert_eq!(daemon.get("blog.localhost").status, 200);
+    assert!(is_listening(port));
+}
+
+/// 숫자가 아닌 값은 설정 오류(`78`)다. (PRD §74, §78)
+#[test]
+fn a_non_numeric_threshold_is_a_config_error() {
+    let (code, output) = Daemon::run(&["--min-free-memory-mb", "lots"]);
+    assert_eq!(code, 78, "설정 오류는 78이다: {output}");
+    assert!(
+        output.contains("--min-free-memory-mb"),
+        "어느 인자가 틀렸는지 말해야 한다: {output}",
+    );
+}
+
+/// 임계값이 **실제 가용량과 같은 축척**으로 비교되는지 확인한다. (PRD §78)
+///
+/// 이 테스트가 없으면 1024배 단위 오류가 빠져나간다. 임계값 1MiB와 1PiB는
+/// `MemAvailable`을 kB로 읽든 MiB로 읽든 각각 통과·거절이므로 둘 다 통과한다.
+///
+/// 지금 가용량을 테스트가 직접 읽고 **그 값을 기준으로 양쪽을 고정한다.**
+/// 1GiB 여유를 두어 다른 process의 변동에 흔들리지 않게 한다.
+#[test]
+fn the_threshold_is_compared_at_the_real_scale() {
+    let available_mb = read_available_mb().expect("/proc/meminfo is readable on Linux");
+    assert!(
+        available_mb > 2_048,
+        "이 테스트는 2GiB 이상 여유가 있어야 한다: {available_mb}MiB",
+    );
+
+    // 지금보다 1GiB 더 요구하면 거절해야 한다.
+    {
+        let apps = Apps::new();
+        let port = free_port();
+        echo(&apps, "blog", port, Lifecycle::default());
+        let daemon = Daemon::start_with(
+            &apps,
+            &["--min-free-memory-mb", &(available_mb + 1_024).to_string()],
+        );
+
+        assert_eq!(
+            daemon.get("blog.localhost").status,
+            503,
+            "가용량보다 1GiB 더 요구하면 거절해야 한다 (가용 {available_mb}MiB)",
+        );
+        assert!(!is_listening(port), "거절했으면 띄우지 않아야 한다");
+    }
+
+    // 1GiB 적게 요구하면 통과해야 한다.
+    {
+        let apps = Apps::new();
+        let port = free_port();
+        echo(&apps, "blog", port, Lifecycle::default());
+        let daemon = Daemon::start_with(
+            &apps,
+            &["--min-free-memory-mb", &(available_mb - 1_024).to_string()],
+        );
+
+        assert_eq!(
+            daemon.get("blog.localhost").status,
+            200,
+            "가용량보다 1GiB 적게 요구하면 통과해야 한다 (가용 {available_mb}MiB)",
+        );
+    }
+}
+
+/// 테스트가 직접 `MemAvailable`을 읽는다.
+///
+/// daemon과 같은 값을 보기 위해 **같은 방식으로** 읽는다. 다른 출처를 쓰면
+/// 비교의 의미가 사라진다.
+fn read_available_mb() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            let mut parts = rest.split_whitespace();
+            let value: u64 = parts.next()?.parse().ok()?;
+            if parts.next()? != "kB" {
+                return None;
+            }
+            return Some(value / 1024);
+        }
+    }
+    None
+}

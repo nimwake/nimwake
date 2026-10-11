@@ -28,6 +28,7 @@ use common::{
 };
 use nimwake_core::app::AppSpec;
 use nimwake_core::runtime::ProcessRuntime;
+use nimwake_core::Limits;
 use nimwake_core::{AppRegistry, AppStateName, Gateway, DEFAULT_GATEWAY_PORT};
 
 /// 띄운 gateway와, 그것을 정리하는 방법.
@@ -41,9 +42,13 @@ impl Harness {
     /// gateway를 `port 0`에 bind하고 실제 배정된 값을 읽는다.
     /// 고정 port를 쓰면 테스트끼리 충돌한다.
     async fn start(specs: Vec<AppSpec>) -> Self {
-        let registry =
-            AppRegistry::build(specs, DEFAULT_GATEWAY_PORT, Arc::new(ProcessRuntime::new()))
-                .expect("specs validate");
+        let registry = AppRegistry::build(
+            specs,
+            DEFAULT_GATEWAY_PORT,
+            Arc::new(ProcessRuntime::new()),
+            Limits::default(),
+        )
+        .expect("specs validate");
         let registry = Arc::new(registry);
 
         let gateway = Gateway::bind(SocketAddr::from(([127, 0, 0, 1], 0)), Arc::clone(&registry))

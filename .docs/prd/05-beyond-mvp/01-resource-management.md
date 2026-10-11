@@ -34,6 +34,10 @@ minimum_free_memory_mb = 500
 
 새 application startup 이전에 available memory가 임계값 아래라면 eviction 후보를 찾는다.
 
+**입장 제어까지는 구현되어 있다.** 계약은
+[§78 Memory Admission Control](../02-architecture/06-gateway-and-requests.md)에 있다.
+메모리가 부족하면 새로 깨우지 않는다. eviction(§54)은 아직 아니다.
+
 ---
 
 ## 54. Eviction Policy

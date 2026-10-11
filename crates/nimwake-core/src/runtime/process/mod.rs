@@ -45,6 +45,10 @@ impl ProcessRuntime {
 
 #[async_trait]
 impl Runtime for ProcessRuntime {
+    fn available_memory_mb(&self) -> Option<u64> {
+        crate::memory::available_mb()
+    }
+
     /// spawn 후 readiness까지 확인한다. spawn 성공은 readiness가 아니다. (PRD §22)
     ///
     /// startup timeout은 호출자가 적용하며, 그때 이 future는 취소된다.

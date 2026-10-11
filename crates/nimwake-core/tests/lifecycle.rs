@@ -13,6 +13,7 @@ use nimwake_core::app;
 use nimwake_core::error::AcquireError;
 use nimwake_core::registry::{self, AppRegistry, DEFAULT_GATEWAY_PORT};
 use nimwake_core::runtime::FakeRuntime;
+use nimwake_core::Limits;
 use nimwake_core::{AppStateName, Runtime};
 
 fn spawn_app(runtime: &Arc<FakeRuntime>, idle_seconds: u64) -> nimwake_core::AppHandle {
@@ -147,6 +148,7 @@ async fn registry_routes_by_host_and_shutdown_stops_every_process() {
         vec![blog, api],
         DEFAULT_GATEWAY_PORT,
         Arc::clone(&runtime) as Arc<dyn Runtime>,
+        Limits::default(),
     )
     .expect("registry builds");
 
@@ -202,6 +204,7 @@ fn registry_of(runtime: &Arc<FakeRuntime>, specs: Vec<nimwake_core::app::AppSpec
         specs,
         DEFAULT_GATEWAY_PORT,
         Arc::clone(runtime) as Arc<dyn Runtime>,
+        Limits::default(),
     )
     .expect("registry builds")
 }
@@ -602,5 +605,102 @@ async fn processes_that_die_after_starting_also_back_off() {
     );
     assert_eq!(runtime.start_count(), 3, "backoff 중에는 spawn하지 않는다",);
 
+    handle.shutdown().await;
+}
+
+// 메모리 입장 제어. (PRD §78)
+
+/// 입장 제어가 **꺼져 있으면 `/proc/meminfo`를 읽지 않는다.** (PRD §78)
+///
+/// 이것이 기본값의 비용이다. 요청마다 읽으면 lease 반납처럼 흔한 경로에
+/// 비용이 붙는다. 기본으로 켜지 않기로 한 만큼, 꺼져 있을 때 공짜여야 한다.
+#[tokio::test(start_paused = true)]
+async fn the_check_costs_nothing_when_it_is_off() {
+    let runtime = Arc::new(FakeRuntime::default());
+    let handle = spawn_app(&runtime, 60);
+
+    let lease = handle.acquire().await.expect("cold start succeeds");
+    drop(lease);
+    common::wait_for_active_requests(&handle, 0).await;
+    let _second = handle.acquire().await.expect("warm request succeeds");
+
+    assert_eq!(
+        runtime.memory_reads(),
+        0,
+        "꺼져 있으면 한 번도 읽지 않아야 한다",
+    );
+
+    handle.shutdown().await;
+}
+
+/// 켜져 있으면 **깨우는 요청에서만** 읽는다. (PRD §78)
+#[tokio::test(start_paused = true)]
+async fn the_check_reads_only_when_waking() {
+    let runtime = Arc::new(FakeRuntime::default());
+    runtime.set_available_memory_mb(Some(10_000));
+    let handle = app::spawn_with_limits(
+        Arc::new(common::spec(60, 64)),
+        Arc::clone(&runtime) as Arc<dyn Runtime>,
+        Limits {
+            min_free_memory_mb: 500,
+        },
+    );
+
+    // 깨우는 요청 하나 → 판독 1회.
+    let lease = handle.acquire().await.expect("cold start succeeds");
+    assert_eq!(runtime.memory_reads(), 1, "깨울 때 한 번 읽는다");
+
+    // lease 반납은 Acquire가 아니다. 읽지 않는다.
+    drop(lease);
+    common::wait_for_active_requests(&handle, 0).await;
+    assert_eq!(runtime.memory_reads(), 1, "lease 반납에는 읽지 않는다");
+
+    // 이미 RUNNING이어도 Acquire이므로 읽는다. 결정 자체는 통과시킨다.
+    let _warm = handle.acquire().await.expect("warm request succeeds");
+    assert_eq!(runtime.memory_reads(), 2);
+
+    handle.shutdown().await;
+}
+
+/// 메모리가 부족하면 실제로 **spawn하지 않는다.** (PRD §78)
+///
+/// 전이 테스트는 effect를 보고, 이쪽은 runtime의 `start_count`를 본다.
+/// 거절만 하고 실제로는 spawn하는 것이 가장 나쁜 결과다.
+#[tokio::test(start_paused = true)]
+async fn a_short_system_does_not_spawn() {
+    let runtime = Arc::new(FakeRuntime::default());
+    runtime.set_available_memory_mb(Some(100));
+    let handle = app::spawn_with_limits(
+        Arc::new(common::spec(60, 64)),
+        Arc::clone(&runtime) as Arc<dyn Runtime>,
+        Limits {
+            min_free_memory_mb: 500,
+        },
+    );
+
+    let error = handle.acquire().await.expect_err("memory is short");
+    match error {
+        AcquireError::InsufficientMemory {
+            available_mb,
+            required_mb,
+        } => {
+            assert_eq!(available_mb, 100);
+            assert_eq!(required_mb, 500);
+        }
+        other => panic!("메모리 부족이어야 한다: {other}"),
+    }
+    assert_eq!(runtime.start_count(), 0, "spawn하지 않아야 한다");
+    assert_eq!(
+        handle.status().await.expect("manager is alive").state,
+        AppStateName::Sleeping,
+        "상태는 그대로다",
+    );
+
+    // 메모리가 풀리면 깨어난다.
+    runtime.set_available_memory_mb(Some(800));
+    let lease = handle.acquire().await.expect("memory is available now");
+    assert_eq!(runtime.start_count(), 1);
+
+    drop(lease);
     handle.shutdown().await;
 }

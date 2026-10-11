@@ -17,6 +17,7 @@ use common::{bin, cmd, free_port, is_listening, request, spec, with_runtime, wit
 use nimwake_core::app::{AppSpec, AppStateName, StopReason};
 use nimwake_core::error::{AcquireError, AppError};
 use nimwake_core::runtime::ProcessRuntime;
+use nimwake_core::Limits;
 use nimwake_core::{AppHandle, AppRegistry, DEFAULT_GATEWAY_PORT};
 
 fn start_actor(spec: AppSpec) -> AppHandle {
@@ -186,8 +187,13 @@ async fn registry_shutdown_leaves_no_managed_child() {
         ),
     ];
 
-    let registry = AppRegistry::build(specs, DEFAULT_GATEWAY_PORT, Arc::new(ProcessRuntime::new()))
-        .expect("specs validate");
+    let registry = AppRegistry::build(
+        specs,
+        DEFAULT_GATEWAY_PORT,
+        Arc::new(ProcessRuntime::new()),
+        Limits::default(),
+    )
+    .expect("specs validate");
 
     for name in ["one", "two"] {
         let app = registry.get(name).expect("app is registered");

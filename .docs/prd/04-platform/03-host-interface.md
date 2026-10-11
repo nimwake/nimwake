@@ -30,6 +30,7 @@ nimwaked [APPS_DIR] [OPTIONS]
 | `--apps <DIR>`  | manifest 디렉터리. 위치 인자와 같다                          |
 | `--listen <ADDR>` | gateway listen 주소. 기본 `127.0.0.1:8080`                 |
 | `--port <PORT>` | listen 주소의 port만 바꾼다. `0`이면 비어 있는 port를 고른다 |
+| `--min-free-memory-mb <MB>` | 잠든 app을 깨우기 전 필요한 가용 메모리. 기본 `0`은 검사하지 않는다 → [§78](../02-architecture/06-gateway-and-requests.md) |
 | `--trace-json`  | 구간 계측을 JSON 한 줄씩 출력한다 → [§72](../03-delivery/05-instrumentation.md) |
 
 환경 변수 `NIMWAKE_LISTEN`이 기본 listen 주소를 정한다. 명령줄 인자가 우선한다.

@@ -17,6 +17,7 @@ use tracing::info;
 
 use crate::app::{self, AppHandle, AppSpec};
 use crate::error::{ManifestError, ValidationError};
+use crate::limits::Limits;
 use crate::runtime::Runtime;
 
 /// Gateway 기본 listen port. (PRD §23)
@@ -50,14 +51,14 @@ struct Inner {
 }
 
 impl Inner {
-    fn from_specs(specs: Vec<AppSpec>, runtime: &Arc<dyn Runtime>) -> Self {
+    fn from_specs(specs: Vec<AppSpec>, runtime: &Arc<dyn Runtime>, limits: Limits) -> Self {
         let mut by_host = HashMap::with_capacity(specs.len());
         let mut by_name = HashMap::with_capacity(specs.len());
 
         for spec in specs {
             let host = normalize_host(&spec.server.host);
             let name = spec.name.clone();
-            let handle = app::spawn(Arc::new(spec), Arc::clone(runtime));
+            let handle = app::spawn_with_limits(Arc::new(spec), Arc::clone(runtime), limits);
             by_host.insert(host, handle.clone());
             by_name.insert(name, handle);
         }
@@ -88,6 +89,7 @@ pub struct AppRegistry {
     inner: RwLock<Inner>,
     runtime: Arc<dyn Runtime>,
     gateway_port: u16,
+    limits: Limits,
 }
 
 impl AppRegistry {
@@ -98,13 +100,15 @@ impl AppRegistry {
         specs: Vec<AppSpec>,
         gateway_port: u16,
         runtime: Arc<dyn Runtime>,
+        limits: Limits,
     ) -> Result<Self, ValidationError> {
         validate(&specs, gateway_port)?;
 
         Ok(Self {
-            inner: RwLock::new(Inner::from_specs(specs, &runtime)),
+            inner: RwLock::new(Inner::from_specs(specs, &runtime, limits)),
             runtime,
             gateway_port,
+            limits,
         })
     }
 
@@ -201,7 +205,7 @@ impl AppRegistry {
 
         // 새 actor를 띄우고 유지할 것과 합쳐 **한 번에** 교체한다.
         {
-            let mut next = Inner::from_specs(fresh, &self.runtime);
+            let mut next = Inner::from_specs(fresh, &self.runtime, self.limits);
             for (name, handle) in keep {
                 next.insert(name, handle);
             }

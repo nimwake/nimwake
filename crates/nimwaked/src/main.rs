@@ -137,10 +137,16 @@ fn serve(specs: Vec<AppSpec>, options: &Options) -> Result<(), Failure> {
 
     let requested = options.listen;
     let apps_dir = options.apps_dir.clone();
+    let limits = options.limits;
 
     runtime.block_on(async move {
-        let registry = AppRegistry::build(specs, requested.port(), Arc::new(ProcessRuntime::new()))
-            .map_err(|error| Failure::config(format!("registry validation failed: {error}")))?;
+        let registry = AppRegistry::build(
+            specs,
+            requested.port(),
+            Arc::new(ProcessRuntime::new()),
+            limits,
+        )
+        .map_err(|error| Failure::config(format!("registry validation failed: {error}")))?;
         let registry = Arc::new(registry);
 
         // bind 실패는 시간이 해결할 수 있다. 이전 인스턴스가 아직 port를 쥐고 있을 수 있다.

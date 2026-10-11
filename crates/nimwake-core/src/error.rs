@@ -44,6 +44,16 @@ pub enum AcquireError {
     #[error("application is backing off after repeated failures")]
     BackingOff { retry_after: std::time::Duration },
 
+    /// 가용 메모리가 임계값 아래여서 깨우지 않았다. Gateway는 `503`으로 응답한다.
+    ///
+    /// `Retry-After`를 붙이지 않는다. 메모리가 언제 풀릴지 **모른다.**
+    ///
+    /// 요구사항: PRD §78 Memory Admission Control.
+    #[error(
+        "not enough free memory to start: {available_mb}MiB available, {required_mb}MiB required"
+    )]
+    InsufficientMemory { available_mb: u64, required_mb: u64 },
+
     /// AppManager가 이미 종료되어 요청을 받을 수 없다.
     #[error("application manager is unavailable")]
     Unavailable,

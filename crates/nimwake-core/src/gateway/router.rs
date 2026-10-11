@@ -36,9 +36,10 @@ pub(super) fn host_of<B>(request: &Request<B>) -> Option<&str> {
 /// overload는 바로 다시 보내면 될 수 있고, backoff는 남은 시간 동안 소용이 없다.
 pub(super) const fn status_for(error: &AcquireError) -> StatusCode {
     match error {
-        AcquireError::Overloaded | AcquireError::Unavailable | AcquireError::BackingOff { .. } => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
+        AcquireError::Overloaded
+        | AcquireError::Unavailable
+        | AcquireError::BackingOff { .. }
+        | AcquireError::InsufficientMemory { .. } => StatusCode::SERVICE_UNAVAILABLE,
         AcquireError::StartFailed(_) => StatusCode::BAD_GATEWAY,
     }
 }
@@ -46,6 +47,9 @@ pub(super) const fn status_for(error: &AcquireError) -> StatusCode {
 /// `acquire()` 실패를 응답으로 옮긴다.
 ///
 /// backoff일 때만 `Retry-After`를 붙인다. 그것이 overload와 가르는 신호다. (PRD §77)
+///
+/// 메모리 부족(§78)에는 붙이지 않는다. 언제 풀릴지 **모른다** — 모르는 것을
+/// 숫자로 적으면 거짓말이 된다.
 pub(super) fn response_for(error: &AcquireError) -> Response<GatewayBody> {
     let mut response = text(status_for(error), &error.to_string());
 
