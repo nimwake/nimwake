@@ -193,6 +193,13 @@ overload도 `503`이지만(§69) `Retry-After`를 붙이지 않는다. 그것이
 신호다. overload는 바로 다시 보내면 될 수 있고, backoff는 남은 시간 동안
 보내도 소용이 없다.
 
+### 재적재는 backoff를 지운다
+
+§76이 spec이 바뀐 application의 actor를 교체하므로 이력도 함께 사라진다.
+**그것이 의도다.** 실사용에서 가장 흔한 순서다 — 앱이 crash loop에 빠지고,
+운영자가 원인을 고치고, `SIGHUP`을 보낸다. 거기서 30초를 더 기다리게 만들면
+고친 보람이 없다.
+
 ### backoff는 상태가 아니다
 
 `FAILED`에 머문다. 여섯 번째 상태를 만들지 않는다. backoff는 "`FAILED`에서
