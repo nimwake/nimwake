@@ -1,5 +1,6 @@
 //! Application lifecycle.
 
+mod backoff;
 mod command;
 mod effect;
 mod handle;

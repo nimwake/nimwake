@@ -327,17 +327,20 @@ impl Report {
         );
         let _ = writeln!(
             out,
-            "backoff는 Post-MVP다. 여기서 보는 것은 **그 없이도 경계가 있는가**다. (PRD §33)
+            "**초당 기동 시도**가 이 표의 핵심이다. backoff가 내리려는 수치다. (PRD §77)
 "
         );
         let _ = writeln!(out, "| | |");
         let _ = writeln!(out, "| --- | ---: |");
+        let _ = writeln!(out, "| requests | {} |", crash_loop.requests);
         let _ = writeln!(
             out,
-            "| requests (모두 502여야 한다) | {} |",
-            crash_loop.requests
+            "| **초당 기동 시도** | {:.1} |",
+            crash_loop.spawns_per_second()
         );
-        let _ = writeln!(out, "| 502가 아닌 응답 | {} |", crash_loop.unexpected);
+        let _ = writeln!(out, "| 시도하고 실패 (502) | {} |", crash_loop.attempted);
+        let _ = writeln!(out, "| backoff로 거절 (503) | {} |", crash_loop.backed_off);
+        let _ = writeln!(out, "| 502도 503도 아닌 응답 | {} |", crash_loop.unexpected);
         let _ = writeln!(
             out,
             "| 동시 자식 최대 (<= {}) | {} |",
