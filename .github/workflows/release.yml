@@ -67,6 +67,20 @@ jobs:
             cargo pkgid -p nimwaked >&2
             exit 1
           fi
+
+          # `pkgid`는 **`Cargo.lock`**에서 읽고 daemon은 `CARGO_PKG_VERSION`
+          # (= `Cargo.toml`)으로 자기 버전을 알린다. 버전을 올리고 lock을 커밋하지
+          # 않으면 둘이 어긋나고, 그러면 gate가 엉뚱한 값으로 태그를 판정한다.
+          #
+          # 실제로 rc2를 찍으면서 겪었다. Cargo.toml은 0.1.0-rc2인데 lock이
+          # 갱신되기 전이라 pkgid가 0.1.0을 돌려주었다.
+          declared=$(sed -n '/^\[workspace.package\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p'             Cargo.toml | head -1)
+          if [ "${version}" != "${declared}" ]; then
+            echo "::error::Cargo.lock (${version}) and Cargo.toml (${declared}) disagree"
+            echo "run a build and commit the regenerated Cargo.lock" >&2
+            exit 1
+          fi
+
           echo "nimwaked ${version}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
