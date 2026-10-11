@@ -35,6 +35,15 @@ pub enum AcquireError {
     #[error("application failed to start: {0}")]
     StartFailed(#[source] AppError),
 
+    /// crash loop로 판정해 재시도를 미루고 있다. Gateway는 `503`과 `Retry-After`로 응답한다.
+    ///
+    /// `StartFailed`와 구분하는 이유: 그쪽은 시도하고 실패했다는 뜻이고,
+    /// 이쪽은 **시도하지 않았다**는 뜻이다.
+    ///
+    /// 요구사항: PRD §77 Crash-Loop Backoff.
+    #[error("application is backing off after repeated failures")]
+    BackingOff { retry_after: std::time::Duration },
+
     /// AppManager가 이미 종료되어 요청을 받을 수 없다.
     #[error("application manager is unavailable")]
     Unavailable,

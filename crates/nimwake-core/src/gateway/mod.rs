@@ -151,9 +151,8 @@ async fn handle(
     let lease = match app.acquire().await {
         Ok(lease) => lease,
         Err(error) => {
-            let status = router::status_for(&error);
-            warn!(app = app.name(), %status, %error, "acquire failed");
-            let response = router::text(status, &error.to_string());
+            let response = router::response_for(&error);
+            warn!(app = app.name(), status = %response.status(), %error, "acquire failed");
             return Ok(finish(&mut trace, app.name(), response));
         }
     };

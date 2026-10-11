@@ -226,9 +226,22 @@ pub fn wait_for(what: &str, deadline: Duration, condition: impl FnMut() -> bool)
 pub struct HttpResponse {
     pub status: u16,
     pub body: String,
+    /// 응답 header. 이름은 소문자로 맞춰 둔다. HTTP header 이름은 대소문자를
+    /// 구분하지 않으므로 그대로 두면 테스트가 서버의 표기에 묶인다.
+    pub headers: Vec<(String, String)>,
 }
 
 impl HttpResponse {
+    /// header 하나를 이름으로 찾는다. 이름은 대소문자를 구분하지 않는다.
+    #[must_use]
+    pub fn header(&self, name: &str) -> Option<String> {
+        let name = name.to_ascii_lowercase();
+        self.headers
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| value.clone())
+    }
+
     /// fixture는 pid를 body로 돌려준다. (`serve_forever`)
     ///
     /// # Panics
@@ -318,9 +331,17 @@ pub fn request_within(
         .and_then(|code| code.parse().ok())
         .unwrap_or_else(|| panic!("no status code in: {head:?}"));
 
+    let headers = head
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_owned()))
+        .collect();
+
     Ok(HttpResponse {
         status,
         body: body.to_owned(),
+        headers,
     })
 }
 

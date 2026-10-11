@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nimwake_core::app;
+use nimwake_core::error::AcquireError;
 use nimwake_core::registry::{self, AppRegistry, DEFAULT_GATEWAY_PORT};
 use nimwake_core::runtime::FakeRuntime;
 use nimwake_core::{AppStateName, Runtime};
@@ -403,4 +404,203 @@ async fn reloading_the_same_set_is_a_no_op() {
 
     drop(lease);
     registry.shutdown().await;
+}
+
+// crash-loop backoff. (PRD §77)
+
+/// 실패 3회 뒤에는 **기동을 시도하지 않는다.** (PRD §77)
+///
+/// 이 테스트가 §77의 전부다. backoff 판정이 맞아도 상태 기계가 그것을 쓰지
+/// 않으면 아무것도 바뀌지 않는다. 그래서 `start_count`로 **spawn 횟수**를 본다.
+#[tokio::test(start_paused = true)]
+async fn repeated_failures_stop_spawning() {
+    let runtime = Arc::new(FakeRuntime::default());
+    let handle = spawn_app(&runtime, 60);
+
+    // 계속 실패하게 만든다.
+    runtime.fail_next_starts(usize::MAX);
+
+    // 실패 3회. 셋 다 실제로 기동을 시도한다.
+    for attempt in 1..=3 {
+        let error = handle.acquire().await.expect_err("startup fails");
+        assert!(
+            matches!(error, AcquireError::StartFailed(_)),
+            "시도 {attempt}회차는 시도한 실패여야 한다: {error}",
+        );
+    }
+    assert_eq!(runtime.start_count(), 3, "세 번은 시도한다");
+
+    // 네 번째는 시도하지 않는다.
+    let error = handle.acquire().await.expect_err("backing off");
+    match error {
+        AcquireError::BackingOff { retry_after } => {
+            assert!(
+                retry_after > Duration::ZERO && retry_after <= Duration::from_secs(1),
+                "첫 backoff는 1초다: {retry_after:?}",
+            );
+        }
+        other => panic!("backoff여야 한다: {other}"),
+    }
+    assert_eq!(
+        runtime.start_count(),
+        3,
+        "backoff 중에는 spawn하지 않는다 — 이것이 §77의 목적이다",
+    );
+
+    handle.shutdown().await;
+}
+
+/// 지연이 지나면 다시 시도한다. backoff는 영구 정지가 아니다. (PRD §77)
+#[tokio::test(start_paused = true)]
+async fn the_backoff_expires_and_the_next_request_retries() {
+    let runtime = Arc::new(FakeRuntime::default());
+    let handle = spawn_app(&runtime, 60);
+    runtime.fail_next_starts(3);
+
+    for _ in 0..3 {
+        let _ = handle.acquire().await;
+    }
+    assert_eq!(runtime.start_count(), 3);
+
+    // 지연 안에는 거절한다.
+    assert!(
+        matches!(handle.acquire().await, Err(AcquireError::BackingOff { .. })),
+        "지연 안에는 거절한다",
+    );
+
+    // 지연이 지나면 시도하고, 이제 runtime은 성공한다.
+    tokio::time::advance(Duration::from_secs(2)).await;
+    let lease = handle.acquire().await.expect("지연이 지나면 다시 기동한다");
+    assert_eq!(runtime.start_count(), 4);
+    assert_eq!(
+        handle.status().await.expect("manager is alive").state,
+        AppStateName::Running
+    );
+
+    drop(lease);
+    handle.shutdown().await;
+}
+
+/// 실패 1, 2회는 즉시 재시도한다. (PRD §77)
+///
+/// 일시적 실패까지 기다리게 만들면 "다음 요청이 앱을 깨운다"는 약속이 깨진다.
+#[tokio::test(start_paused = true)]
+async fn one_failure_does_not_delay_the_next_request() {
+    let runtime = Arc::new(FakeRuntime::default());
+    let handle = spawn_app(&runtime, 60);
+
+    // 한 번만 실패한다.
+    runtime.fail_next_starts(1);
+    assert!(handle.acquire().await.is_err(), "첫 시도는 실패한다");
+
+    // 시간을 보내지 않고 바로 다시 요청한다.
+    let lease = handle
+        .acquire()
+        .await
+        .expect("한 번의 실패는 기다리게 만들지 않는다");
+    assert_eq!(runtime.start_count(), 2);
+
+    drop(lease);
+    handle.shutdown().await;
+}
+
+/// 창 밖으로 벌어진 실패는 backoff를 만들지 않는다. (PRD §77)
+///
+/// 하루를 정상으로 돌다가 한 번 죽은 application은 crash loop가 아니다.
+#[tokio::test(start_paused = true)]
+async fn failures_spread_beyond_the_window_never_back_off() {
+    let runtime = Arc::new(FakeRuntime::default());
+    let handle = spawn_app(&runtime, 60);
+    runtime.fail_next_starts(usize::MAX);
+
+    // 창(60초)보다 넓게 벌려 5회 실패시킨다.
+    for _ in 0..5 {
+        let error = handle.acquire().await.expect_err("startup fails");
+        assert!(
+            matches!(error, AcquireError::StartFailed(_)),
+            "창 밖의 실패는 언제나 시도한 실패다: {error}",
+        );
+        tokio::time::advance(Duration::from_secs(120)).await;
+    }
+
+    assert_eq!(
+        runtime.start_count(),
+        5,
+        "드문 실패는 전부 시도해야 한다 — spawn 속도가 이미 무해하다",
+    );
+
+    handle.shutdown().await;
+}
+
+/// 정상으로 돌다가 idle로 멈추면 이력이 초기화된다. (PRD §77)
+#[tokio::test(start_paused = true)]
+async fn a_successful_idle_cycle_clears_the_history() {
+    let runtime = Arc::new(FakeRuntime::default());
+    let handle = spawn_app(&runtime, 1);
+
+    // 실패 2회를 쌓는다. 아직 임계값 아래다.
+    runtime.fail_next_starts(2);
+    for _ in 0..2 {
+        let _ = handle.acquire().await;
+    }
+
+    // 성공하고 idle로 잠든다.
+    let lease = handle.acquire().await.expect("세 번째는 성공한다");
+    drop(lease);
+    common::wait_for_active_requests(&handle, 0).await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    common::wait_for_state(&handle, AppStateName::Sleeping).await;
+
+    // 이제 2회를 더 실패시킨다. 이력이 초기화됐으므로 backoff가 아니다.
+    runtime.fail_next_starts(2);
+    for attempt in 1..=2 {
+        let error = handle.acquire().await.expect_err("startup fails");
+        assert!(
+            matches!(error, AcquireError::StartFailed(_)),
+            "초기화 뒤 {attempt}회차는 시도한 실패여야 한다: {error}",
+        );
+    }
+
+    handle.shutdown().await;
+}
+
+/// 기동은 성공하고 돌다가 죽는 application도 crash loop다. (PRD §77, §32)
+///
+/// 이 경로를 놓치면 가장 흔한 crash loop를 놓친다 — port를 열고 readiness를
+/// 통과한 뒤 첫 요청에 죽는 앱이다. 기동은 매번 성공하므로 기동 실패만 세면
+/// 영원히 backoff에 들어가지 않는다.
+#[tokio::test(start_paused = true)]
+async fn processes_that_die_after_starting_also_back_off() {
+    let runtime = Arc::new(FakeRuntime::default());
+    let handle = spawn_app(&runtime, 60);
+
+    // 깨우고 죽이기를 3회. 기동은 매번 성공한다.
+    for round in 1..=3 {
+        let lease = handle
+            .acquire()
+            .await
+            .unwrap_or_else(|error| panic!("{round}회차 기동은 성공해야 한다: {error}"));
+        let process = handle
+            .status()
+            .await
+            .expect("manager is alive")
+            .process_id
+            .expect("running has a process");
+
+        drop(lease);
+        runtime.crash(process);
+        common::wait_for_state(&handle, AppStateName::Failed).await;
+    }
+
+    assert_eq!(runtime.start_count(), 3, "세 번 기동했다");
+
+    // 네 번째 요청은 시도하지 않는다.
+    let error = handle.acquire().await.expect_err("backing off");
+    assert!(
+        matches!(error, AcquireError::BackingOff { .. }),
+        "비정상 종료도 실패로 세야 한다: {error}",
+    );
+    assert_eq!(runtime.start_count(), 3, "backoff 중에는 spawn하지 않는다",);
+
+    handle.shutdown().await;
 }

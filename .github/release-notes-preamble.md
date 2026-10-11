@@ -18,7 +18,6 @@ Scale-to-Zero application lifecycle. 요청이 오면 깨우고, 쓰지 않으�
 | process adoption | daemon을 재시작하면 기존 application process를 재발견하거나 인수하지 않는다. port가 이미 쓰이고 있으면 시작을 거부한다(502) |
 | WebSocket / SSE | 보장하지 않는다. 대용량 스트리밍 업로드도 마찬가지다 |
 | 성능 수치 | baseline이며 SLA가 아니다. runner 편차가 크다 |
-| crash-loop backoff | 없다. 계속 실패하는 application은 요청마다 기동을 재시도한다 |
 | dynamic port allocation | 없다. manifest의 static port를 쓴다 |
 
 근거: [PRD §24](.docs/prd/02-architecture/06-gateway-and-requests.md) ·
@@ -36,6 +35,7 @@ Scale-to-Zero application lifecycle. 요청이 오면 깨우고, 쓰지 않으�
 | 동시 기동의 자원 한계 | Next.js 앱 하나가 118MB. 2GB 기기면 10~14개가 한계인데 제한 장치가 없다 |
 | 장시간 운용 | CI 측정 구간은 분 단위다. 실기기에서 50.4시간을 측정했다(daemon 재시작 0회 · 요청 실패 0/604). 72h 판정은 `nimwake-android` 소관 |
 | manifest 재적재 | `SIGHUP`으로 된다. 돌고 있는 application은 건드리지 않는다 (PRD §76) |
+| crash-loop backoff | 60초 안에 실패 3회면 재시도를 미룬다. 1초부터 2배씩, 상한 30초 (PRD §77) |
 | 운영 도구 | `nimwake status`도 admin IPC도 없다 |
 
 [완료 체크리스트](.docs/phases/phase-1/04-acceptance.md)에 항목별 근거가 있다.

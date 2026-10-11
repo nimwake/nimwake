@@ -94,7 +94,7 @@ PRD를 코드와 한 절씩 대조한 결과다. **같은 일을 다시 하지 �
 | §29 Stale Timer | `test` · 세대 비교는 **주된 보호가 아니다** (설계 기록 참조) |
 | §30 Graceful Shutdown | `test` SIGTERM → timeout → SIGKILL · process group |
 | §31–§32 STOPPING 중 요청 · Crash | `test` waiter 이월 · 교체된 process의 event 무시 |
-| §33 Failure Recovery | `report` crash loop — backoff는 Post-MVP이고 경계를 측정했다 |
+| §33 Failure Recovery | `test` `FAILED`에서 다음 `acquire`가 재시도한다 → §77 |
 | §43 Stress | `gate` lifecycle stress · sustained · crash loop |
 | §44 CI Strategy | `gate` 차단 기준 다섯 전부 (deadlock은 단계별 기한으로) |
 | §50 Android 비교 | `report` `baseline.txt`가 비교 항목 다섯을 담는다 |
@@ -105,6 +105,8 @@ PRD를 코드와 한 절씩 대조한 결과다. **같은 일을 다시 하지 �
 | §73 Performance Report | `report` release마다 baseline 누적 · 직전 대비 |
 | §74 Host Interface | `test` listen 주소 · 종료 코드 · health probe |
 | §75 Response Header Timeout | `test` 504로 끊고 **느린 body는 끊지 않는다** |
+| §76 Manifest Reload | `test` + `gate` `SIGHUP` 후 app pid가 그대로다 |
+| §77 Crash-Loop Backoff | `test` + `gate` 요청 8회에 기동 시도 3회. 창·지수·상한을 뮤테이션으로 확인 |
 
 ### §18은 테스트가 아니라 구조가 보장한다
 
@@ -281,7 +283,7 @@ soak CSV에는 **구간 분해가 없다.** `seconds`는 HTTP 응답 시간이�
 | readiness의 의미 | TCP connect는 application readiness가 아니다. Next.js는 port를 열고도 190ms 더 걸린다 |
 | 동시 기동의 자원 한계 | Next.js 앱 8개를 동시에 깨우면 직렬화 없이 전부 0.87초에 뜬다. 앱당 96MB로 합계 768MB. 2GB 기기면 10개 남짓이 한계인데 제한 장치가 없다 (자원 관리는 Post-MVP) |
 | 장시간 운용 | CI에서의 최장 측정은 105초(stress) / 120초(sustained)다. **실기기에서는 50.4시간을 측정했다** — daemon 재시작 0회, 요청 실패 0/604, RSS 2104→1296KB(감소). 판정은 `nimwake-android` 소관이고 아래에 수치를 적어 둔다 |
-| crash-loop | backoff가 없다 (PRD §33, Post-MVP). **누수는 없음을 확인했다** — 동시 자식 ≤ app 수, 정착 후 zombie 0, RSS +1.8MB, FD 증가 없음. 다만 spawn 속도를 막는 것이 없다. 623 spawn/초를 쟀고 `startup_timeout`도 waiter 상한도 관여하지 않는다 |
+| crash-loop | backoff가 있다 (PRD §77). 같은 기계에서 before/after를 쟀다 — 20초 부하에 **기동 시도 3,653·4,728회 → 14·14회**(초당 183~236 → 0.7). 14는 설계가 예측한 값과 같다(앱당 즉시 3회 + 1·2·4·8·16초 지연 = 7회, 앱 2개). 누수는 전부터 없었다 — 동시 자식 ≤ app 수, 정착 후 zombie 0, FD 증가 없음 |
 | manifest 재적재 | `SIGHUP`으로 된다 (PRD §76). 바뀌지 않은 application은 건드리지 않는다. 검증 실패와 빈 집합은 거부하고 기존 상태를 유지한다 |
 | 운영 도구 | `nimwake status`도 admin IPC도 없다 (Post-MVP) |
 

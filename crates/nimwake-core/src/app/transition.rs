@@ -45,6 +45,7 @@ use crate::id::{
 };
 use crate::runtime::{ExitStatus, ProcessHandle, StartedProcess};
 
+use super::backoff::{self, FailureHistory};
 use super::command::{AppCommand, StopReason};
 use super::effect::Effect;
 use super::spec::AppSpec;
@@ -103,12 +104,40 @@ impl Step {
 /// 둘을 나누면 그 사이에 idle shutdown이 끼어들 수 있다. (PRD §26)
 pub(super) fn on_acquire(state: AppState, waiter: Waiter, ctx: &Ctx<'_>) -> Step {
     match state {
-        AppState::Sleeping | AppState::Failed { .. } => begin_start(vec![waiter], ctx),
+        AppState::Sleeping => begin_start(vec![waiter], FailureHistory::default(), ctx),
+
+        // crash loop라면 지금 재시도하지 않는다. (PRD §77)
+        AppState::Failed {
+            error,
+            failed_at,
+            failures,
+        } => match backoff::remaining_backoff(&failures, failed_at, ctx.now) {
+            Some(retry_after) => {
+                warn!(
+                    app = %ctx.spec.name,
+                    retry_after_ms = retry_after.as_millis(),
+                    "request rejected while backing off",
+                );
+                Step::with(
+                    AppState::Failed {
+                        error,
+                        failed_at,
+                        failures,
+                    },
+                    vec![Effect::RejectWaiter {
+                        waiter,
+                        error: AcquireError::BackingOff { retry_after },
+                    }],
+                )
+            }
+            None => begin_start(vec![waiter], failures, ctx),
+        },
 
         AppState::Starting {
             operation_id,
             started_at,
             waiters,
+            failures,
         } => {
             let (waiters, effects) = enqueue(waiters, waiter, ctx);
             Step::with(
@@ -116,6 +145,7 @@ pub(super) fn on_acquire(state: AppState, waiter: Waiter, ctx: &Ctx<'_>) -> Step
                     operation_id,
                     started_at,
                     waiters,
+                    failures,
                 },
                 effects,
             )
@@ -205,7 +235,7 @@ pub(super) fn on_request_finished(state: AppState, lease_id: LeaseId, ctx: &Ctx<
     Step::with(AppState::Running(running), vec![effect])
 }
 
-fn begin_start(waiters: Vec<Waiter>, ctx: &Ctx<'_>) -> Step {
+fn begin_start(waiters: Vec<Waiter>, failures: FailureHistory, ctx: &Ctx<'_>) -> Step {
     let operation_id = ctx.ids.operations.next_id();
     info!(app = %ctx.spec.name, %operation_id, "starting application");
 
@@ -214,6 +244,7 @@ fn begin_start(waiters: Vec<Waiter>, ctx: &Ctx<'_>) -> Step {
             operation_id,
             started_at: ctx.now,
             waiters,
+            failures,
         },
         vec![Effect::Start {
             operation_id,
@@ -232,11 +263,19 @@ pub(super) fn on_start_completed(
         AppState::Starting {
             operation_id: current,
             waiters,
+            mut failures,
             ..
         } if current == operation_id => match result {
-            Ok(started) => enter_running(started, waiters, ctx),
+            Ok(started) => enter_running(started, waiters, failures, ctx),
             Err(error) => {
-                warn!(app = %ctx.spec.name, %operation_id, %error, "startup failed");
+                failures.record(ctx.now);
+                warn!(
+                    app = %ctx.spec.name,
+                    %operation_id,
+                    %error,
+                    failures_in_window = failures.count_within(ctx.now, backoff::FAILURE_WINDOW),
+                    "startup failed",
+                );
                 let effects = waiters
                     .into_iter()
                     .map(|waiter| Effect::RejectWaiter {
@@ -249,6 +288,7 @@ pub(super) fn on_start_completed(
                     AppState::Failed {
                         error,
                         failed_at: ctx.now,
+                        failures,
                     },
                     effects,
                 )
@@ -290,7 +330,12 @@ fn discard_stale_start(
     }
 }
 
-fn enter_running(started: StartedProcess, waiters: Vec<Waiter>, ctx: &Ctx<'_>) -> Step {
+fn enter_running(
+    started: StartedProcess,
+    waiters: Vec<Waiter>,
+    failures: FailureHistory,
+    ctx: &Ctx<'_>,
+) -> Step {
     info!(
         app = %ctx.spec.name,
         process = %started.handle.id(),
@@ -310,6 +355,7 @@ fn enter_running(started: StartedProcess, waiters: Vec<Waiter>, ctx: &Ctx<'_>) -
         leases: HashSet::new(),
         last_request_at: ctx.now,
         idle_generation: ctx.ids.idle_generations.next_id(),
+        failures,
     };
 
     // 모든 waiter가 같은 backend를 받고, 동시에 active request로 예약된다. (PRD §16)
@@ -386,17 +432,23 @@ pub(super) fn on_process_exited(
 ) -> Step {
     match state {
         AppState::Running(running) if running.process.id() == process_id => {
+            // 기동은 성공하고 첫 요청에 죽는 application도 crash loop다. (PRD §77)
+            let mut failures = running.failures;
+            failures.record(ctx.now);
+
             warn!(
                 app = %ctx.spec.name,
                 process = %process_id,
                 %status,
                 leases = running.leases.len(),
+                failures_in_window = failures.count_within(ctx.now, backoff::FAILURE_WINDOW),
                 "application process exited unexpectedly",
             );
             // 살아 있던 lease는 모두 무효가 된다. (PRD §32)
             Step::new(AppState::Failed {
                 error: AppError::ProcessExited(status.to_string()),
                 failed_at: ctx.now,
+                failures,
             })
         }
 
@@ -434,7 +486,9 @@ fn finish_stop(waiters: Vec<Waiter>, ctx: &Ctx<'_>) -> Step {
         Step::new(AppState::Sleeping)
     } else {
         // stop을 기다리던 요청이 있으면 바로 다시 기동한다. waiter는 유실하지 않는다. (PRD §31)
-        begin_start(waiters, ctx)
+        //
+        // 이력을 초기화한다. 여기 도달했다는 것은 정상으로 돌다가 멈췄다는 뜻이다. (PRD §77)
+        begin_start(waiters, FailureHistory::default(), ctx)
     }
 }
 

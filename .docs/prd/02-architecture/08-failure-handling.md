@@ -2,7 +2,7 @@
 
 > **Nimwake PRD** › 아키텍처
 >
-> 원문 구간: `PRD.md` §31–§33, §71
+> 원문 구간: `PRD.md` §31–§33, §71, §77
 
 ---
 
@@ -98,7 +98,7 @@ acquire
 STARTING
 ```
 
-crash-loop backoff는 Post-MVP에서 추가한다.
+crash-loop backoff의 계약은 [§77](#77-crash-loop-backoff)에 있다.
 
 예:
 
@@ -108,8 +108,106 @@ crash-loop backoff는 Post-MVP에서 추가한다.
      BACKOFF
 ```
 
-MVP에서는 backoff 없이 재시도하되, 반복 실패가 무한 spawn으로 이어지지 않도록
-`startup_timeout_seconds`와 bounded waiter 상한에 의존한다.
+`startup_timeout_seconds`와 bounded waiter 상한은 한 번의 기동에만 걸린다.
+즉시 실패하는 명령에는 상한이 되지 않으므로 §77이 창과 지연을 따로 정한다.
+
+---
+
+## 77. Crash-Loop Backoff
+
+§33은 backoff를 Post-MVP로 미루면서 모양만 예로 보였다. 이 절이 그 계약이다.
+
+### 무엇이 문제였나
+
+backoff가 없으면 **계속 실패하는 application은 요청마다 기동을 재시도한다.**
+
+측정된 상한은 초당 623회 spawn이다. 전화기에서 이것은 배터리와 CPU를 태우고
+로그를 채운다. `startup_timeout_seconds`는 한 번의 기동에만 걸리므로 즉시
+실패하는 명령(`command`가 틀린 경우)에는 아무 상한이 되지 않는다.
+
+### 언제 crash loop로 판정하나
+
+```text
+60초 안에 실패 3회  →  backoff
+```
+
+창(window)으로 본다. **연속 실패 횟수로 보지 않는다.** 하루를 정상으로 돌다가
+한 번 죽은 application은 crash loop가 아니다. 창은 그 둘을 구분한다.
+
+창을 쓰면 초기화 조건을 따로 정하지 않아도 된다. 실패가 드물어지면 창에서
+저절로 빠진다. 1분에 한 번 실패하는 application의 spawn 속도는 이미 무해하다.
+
+### 얼마나 기다리나
+
+```text
+실패 1, 2회     즉시 재시도한다
+실패 3회        1초
+실패 4회        2초
+실패 5회        4초
+...             2배씩
+상한            30초
+```
+
+1, 2회를 즉시 재시도하는 것이 중요하다. port가 잠깐 잡혀 있던 것 같은 일시적
+실패까지 기다리게 만들면 **다음 요청이 앱을 깨운다는 약속이 깨진다.**
+
+상한이 30초인 이유는 창이 60초이기 때문이다. 30초 간격이면 최근 실패 3회가
+60초 안에 들어오므로 backoff가 유지된다. 상한을 창보다 크게 두면 backoff에서
+빠졌다 들어오기를 반복한다.
+
+최악의 spawn 속도는 30초당 1회다. 623회/초에서 내려온다.
+
+### 설정 항목을 만들지 않는다
+
+네 값은 코드 상수다. `[lifecycle]`에 넣지 않는다. 조정이 필요하다는 근거가
+아직 없고, manifest 항목은 한 번 내보내면 계약이 된다.
+
+### 실패 이력은 어디에 있나
+
+```text
+STARTING    싣는다
+RUNNING     싣는다
+FAILED      싣는다
+SLEEPING    싣지 않는다 — 초기화된다
+STOPPING    싣지 않는다
+```
+
+`RUNNING`이 싣는 이유가 있다. 기동은 성공하고 첫 요청에 죽는 application도
+crash loop다. §32의 비정상 종료 경로도 실패로 센다.
+
+`SLEEPING`에 도달하려면 **정상으로 돌다가 idle로 멈춰야 한다.** 그것은
+application이 동작한다는 가장 분명한 증거이므로 거기서 초기화하는 것은
+정보 손실이 아니라 의도다.
+
+### backoff 중의 요청
+
+```text
+503 Service Unavailable
+Retry-After: <남은 초>
+```
+
+`502`가 아니다. `502`는 기동을 시도했고 실패했다는 뜻이다. backoff 중에는
+**시도하지 않는다.**
+
+overload도 `503`이지만(§69) `Retry-After`를 붙이지 않는다. 그것이 둘을 가르는
+신호다. overload는 바로 다시 보내면 될 수 있고, backoff는 남은 시간 동안
+보내도 소용이 없다.
+
+### 재적재는 backoff를 지운다
+
+§76이 spec이 바뀐 application의 actor를 교체하므로 이력도 함께 사라진다.
+**그것이 의도다.** 실사용에서 가장 흔한 순서다 — 앱이 crash loop에 빠지고,
+운영자가 원인을 고치고, `SIGHUP`을 보낸다. 거기서 30초를 더 기다리게 만들면
+고친 보람이 없다.
+
+### backoff는 상태가 아니다
+
+`FAILED`에 머문다. 여섯 번째 상태를 만들지 않는다. backoff는 "`FAILED`에서
+언제 재시도할 수 있는가"일 뿐이고, §11의 상태 모델과 `is_settled`(Invariant 10)는
+그대로 둔다.
+
+→ [§33 Failure Recovery](#33-failure-recovery) · [§32 Process Crash](#32-process-crash) ·
+[§69 Backpressure](06-gateway-and-requests.md)
 
 ---
 

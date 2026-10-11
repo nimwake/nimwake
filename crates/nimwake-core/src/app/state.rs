@@ -12,6 +12,8 @@ use tokio::time::Instant;
 use tokio::sync::oneshot;
 
 use crate::error::{AcquireError, AppError};
+
+use super::backoff::FailureHistory;
 use crate::id::{IdleGeneration, LeaseId, OperationId, ProcessId};
 use crate::runtime::{Backend, ProcessHandle};
 
@@ -28,6 +30,8 @@ pub(crate) enum AppState {
         operation_id: OperationId,
         started_at: Instant,
         waiters: Vec<Waiter>,
+        /// 지금까지의 실패 이력. 기동이 또 실패하면 여기에 쌓인다. (PRD §77)
+        failures: FailureHistory,
     },
 
     Running(RunningState),
@@ -41,6 +45,8 @@ pub(crate) enum AppState {
     Failed {
         error: AppError,
         failed_at: Instant,
+        /// 이 실패까지의 이력. 다음 `acquire`가 재시도 가능 여부를 여기서 본다. (PRD §77)
+        failures: FailureHistory,
     },
 }
 
@@ -56,6 +62,11 @@ pub(crate) struct RunningState {
     pub leases: HashSet<LeaseId>,
     pub last_request_at: Instant,
     pub idle_generation: IdleGeneration,
+    /// 기동 전까지의 실패 이력.
+    ///
+    /// `RUNNING`이 이것을 싣는 이유: 기동은 성공하고 첫 요청에 죽는 application도
+    /// crash loop다. §32의 비정상 종료도 실패로 센다. (PRD §77)
+    pub failures: FailureHistory,
 }
 
 impl AppState {

@@ -297,7 +297,13 @@ pub struct CrashLoopResult {
     pub duration: Duration,
     pub apps: usize,
     pub requests: usize,
-    /// 502가 아닌 응답. 계속 실패하는 application은 모든 요청에 502여야 한다.
+    /// 기동을 시도하고 실패한 응답(502)의 수. **하나가 spawn 하나다.**
+    ///
+    /// backoff가 재는 대상이 이것이다. (PRD §77)
+    pub attempted: usize,
+    /// backoff로 거절된 응답(503)의 수. 시도하지 않은 요청이다. (PRD §77)
+    pub backed_off: usize,
+    /// 502도 503도 아닌 응답.
     pub unexpected: usize,
     /// 동시에 살아 있던 자식의 최대값. application 수를 넘으면 안 된다.
     pub max_children: usize,
@@ -312,13 +318,33 @@ pub struct CrashLoopResult {
     pub samples: Vec<Resources>,
 }
 
+/// crash loop 중의 응답 분류.
+#[derive(Default)]
+struct Counts {
+    sent: usize,
+    attempted: usize,
+    backed_off: usize,
+    unexpected: usize,
+}
+
 impl CrashLoopResult {
+    /// 초당 기동 시도 횟수. **backoff가 내리려는 수치다.** (PRD §77)
+    pub fn spawns_per_second(&self) -> f64 {
+        let seconds = self.duration.as_secs_f64();
+        if seconds <= 0.0 {
+            return 0.0;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let attempted = self.attempted as f64;
+        attempted / seconds
+    }
+
     pub fn leaks(&self) -> Vec<String> {
         let mut found = Vec::new();
 
         if self.unexpected > 0 {
             found.push(format!(
-                "{} response(s) were not 502 from a crash-looping app",
+                "{} response(s) from a crash-looping app were neither 502 nor 503",
                 self.unexpected
             ));
         }
@@ -407,23 +433,31 @@ pub fn crash_loop(
             std::thread::Builder::new()
                 .stack_size(64 * 1024)
                 .spawn(move || {
-                    let (mut sent, mut unexpected) = (0usize, 0usize);
+                    let mut counts = Counts::default();
                     let mut next = index;
                     while Instant::now() < deadline {
                         let host = &hosts[next % hosts.len()];
                         next = next.wrapping_add(1);
                         match get(gateway, host) {
-                            // 기동에 실패한 application은 502다. (PRD §26)
-                            Ok(response) if response.status == 502 => sent += 1,
+                            // 기동을 시도하고 실패했다. 502 하나가 spawn 하나다. (PRD §26)
+                            Ok(response) if response.status == 502 => {
+                                counts.sent += 1;
+                                counts.attempted += 1;
+                            }
+                            // backoff다. 시도하지 않았다. (PRD §77)
+                            Ok(response) if response.status == 503 => {
+                                counts.sent += 1;
+                                counts.backed_off += 1;
+                            }
                             Ok(_) => {
-                                sent += 1;
-                                unexpected += 1;
+                                counts.sent += 1;
+                                counts.unexpected += 1;
                             }
                             // 연결 자체가 실패한 것은 gateway가 답하지 않은 것이다.
-                            Err(_) => unexpected += 1,
+                            Err(_) => counts.unexpected += 1,
                         }
                     }
-                    (sent, unexpected)
+                    counts
                 })
                 .expect("load thread spawns")
         })
@@ -450,11 +484,13 @@ pub fn crash_loop(
     }
     samples.push(Resources::observe(daemon.pid()));
 
-    let (mut requests, mut unexpected) = (0usize, 0usize);
+    let mut totals = Counts::default();
     for worker in workers {
-        let (sent, bad) = worker.join().map_err(|_| "load thread panicked")?;
-        requests += sent;
-        unexpected += bad;
+        let counts = worker.join().map_err(|_| "load thread panicked")?;
+        totals.sent += counts.sent;
+        totals.attempted += counts.attempted;
+        totals.backed_off += counts.backed_off;
+        totals.unexpected += counts.unexpected;
     }
 
     // 부하가 멈춘 뒤에 본다. 거둘 시간을 주지 않고 세면 정상적인 일시 zombie를
@@ -465,8 +501,10 @@ pub fn crash_loop(
     Ok(CrashLoopResult {
         duration,
         apps,
-        requests,
-        unexpected,
+        requests: totals.sent,
+        attempted: totals.attempted,
+        backed_off: totals.backed_off,
+        unexpected: totals.unexpected,
         max_children,
         zombies,
         max_zombies_seen,

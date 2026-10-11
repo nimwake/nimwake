@@ -976,3 +976,150 @@ fn a_reload_that_fails_validation_changes_nothing() {
 
     // daemon이 살아 있다는 것은 바로 위 요청이 응답한 것으로 이미 증명된다.
 }
+
+/// 계속 실패하는 application은 **요청마다 기동을 재시도하지 않는다.** (PRD §77)
+///
+/// 이 테스트가 §77의 존재 이유다. backoff가 없으면 요청 8회가 spawn 8회가 된다.
+/// 측정된 상한은 초당 623회였다.
+///
+/// 기동 시도 횟수를 daemon 로그에서 센다. 상태 코드만 보면 "시도하고 실패했다"와
+/// "시도하지 않았다"를 구분할 수 없다 — 그 구분이 이 기능의 전부다.
+#[test]
+fn a_crash_looping_app_stops_being_respawned() {
+    let apps = Apps::new();
+    let port = free_port();
+
+    // `crash-server`는 port를 bind하지 않고 바로 종료한다.
+    apps.app(
+        "boom",
+        port,
+        &[fixture("crash-server").display().to_string()],
+        Lifecycle {
+            idle: 60,
+            startup: 3,
+            ..Lifecycle::default()
+        },
+    );
+
+    let daemon = Daemon::start(&apps);
+
+    let mut codes = Vec::new();
+    let mut retry_after = Vec::new();
+    for _ in 0..8 {
+        let response = daemon.get("boom.localhost");
+        codes.push(response.status);
+        retry_after.push(response.header("retry-after"));
+    }
+
+    // 처음 세 번은 시도하고 실패한다. `502`다. (PRD §24)
+    assert_eq!(
+        &codes[..3],
+        &[502, 502, 502],
+        "임계값까지는 시도해야 한다: {codes:?}",
+    );
+    assert!(
+        retry_after[..3].iter().all(Option::is_none),
+        "시도한 실패에는 Retry-After를 붙이지 않는다: {retry_after:?}",
+    );
+
+    // 그 뒤로는 시도하지 않는다. `503`과 `Retry-After`다. (PRD §77)
+    assert!(
+        codes[3..].iter().all(|code| *code == 503),
+        "backoff는 503이다: {codes:?}",
+    );
+    for value in &retry_after[3..] {
+        let seconds = value
+            .as_deref()
+            .expect("backoff에는 Retry-After가 붙는다")
+            .parse::<u64>()
+            .expect("Retry-After는 초 단위 정수다");
+        assert!(
+            (1..=30).contains(&seconds),
+            "Retry-After가 범위를 벗어났다: {seconds}",
+        );
+    }
+
+    // **요청 8회에 기동 시도는 3회뿐이다.**
+    let attempts = daemon
+        .output()
+        .iter()
+        .filter(|line| line.contains("starting application"))
+        .count();
+    assert_eq!(
+        attempts, 3,
+        "요청 8회가 spawn 8회가 되면 안 된다: {attempts}회 시도",
+    );
+}
+
+/// 고친 manifest를 재적재하면 **backoff가 걸려 있어도 바로 기동한다.** (PRD §76, §77)
+///
+/// 실사용에서 가장 흔한 순서다 — 앱이 crash loop에 빠지고, 운영자가 원인을
+/// 고치고, `SIGHUP`을 보낸다. 거기서 30초를 더 기다리게 만들면 고친 보람이 없다.
+///
+/// §76이 spec이 바뀐 application의 actor를 교체하므로 실패 이력도 함께 사라진다.
+/// 그것이 의도인지 확인한다.
+#[test]
+fn a_reload_clears_the_backoff() {
+    let apps = Apps::new();
+    let broken_port = free_port();
+    let good_port = free_port();
+
+    // 깨진 앱: port를 bind하지 않고 바로 죽는다.
+    apps.app(
+        "fixme",
+        broken_port,
+        &[fixture("crash-server").display().to_string()],
+        Lifecycle {
+            idle: 60,
+            startup: 3,
+            ..Lifecycle::default()
+        },
+    );
+
+    let daemon = Daemon::start(&apps);
+
+    // backoff에 들어갈 때까지 요청한다.
+    for _ in 0..4 {
+        daemon.get("fixme.localhost");
+    }
+    let backing_off = daemon.get("fixme.localhost");
+    assert_eq!(backing_off.status, 503, "backoff에 들어가야 한다");
+    assert!(
+        backing_off.header("retry-after").is_some(),
+        "backoff에는 Retry-After가 붙는다",
+    );
+
+    // 명령을 고치고 재적재한다. port까지 바꾼다 — spec이 바뀌면 교체된다.
+    apps.app(
+        "fixme",
+        good_port,
+        &[
+            fixture("echo-server").display().to_string(),
+            good_port.to_string(),
+        ],
+        Lifecycle {
+            idle: 60,
+            startup: 10,
+            ..Lifecycle::default()
+        },
+    );
+    daemon.reload();
+
+    wait_for("the reload to report", Duration::from_secs(10), || {
+        daemon
+            .output()
+            .iter()
+            .any(|line| line.contains("reloaded:"))
+    });
+
+    // 기다리지 않고 바로 서빙한다.
+    let fixed = daemon.get("fixme.localhost");
+    assert_eq!(
+        fixed.status, 200,
+        "고친 뒤에는 backoff가 남아 있으면 안 된다",
+    );
+    assert!(
+        fixed.header("retry-after").is_none(),
+        "성공 응답에 Retry-After가 붙을 이유가 없다",
+    );
+}

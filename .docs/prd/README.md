@@ -24,7 +24,7 @@ Nimwake 제품 요구사항 정의서. **이 트리가 원장(Single Source of T
 - [Application Manifest와 Readiness](02-architecture/05-manifest-and-readiness.md) — `§21–§22`, `§76`
 - [Gateway Routing과 Request Lease](02-architecture/06-gateway-and-requests.md) — `§23–§26`, `§69`, `§75`
 - [Scale-to-Zero와 Graceful Shutdown](02-architecture/07-scale-to-zero.md) — `§27–§30`
-- [Failure Handling](02-architecture/08-failure-handling.md) — `§31–§33`, `§71`
+- [Failure Handling](02-architecture/08-failure-handling.md) — `§31–§33`, `§71`, `§77`
 - [Repository Architecture와 Technology Stack](02-architecture/09-repository-and-stack.md) — `§34–§36`
 
 ## 딜리버리 — `03-delivery/`
@@ -62,7 +62,7 @@ Nimwake 제품 요구사항 정의서. **이 트리가 원장(Single Source of T
 `§N`은 문서 간 참조를 위한 **안정 식별자**다.
 
 - 섹션을 다른 파일로 옮기더라도 번호는 유지한다.
-- 새 섹션은 기존 번호 사이에 끼워 넣지 않고 **다음 빈 번호를 사용한다.** (현재 최대: `§76`)
+- 새 섹션은 기존 번호 사이에 끼워 넣지 않고 **다음 빈 번호를 사용한다.** (현재 최대: `§77`)
 - 따라서 파일 안에서 번호가 연속하지 않을 수 있다. 읽는 순서는 파일 이름의 `NN` 접두사가 결정한다.
 
 ### 설계 리뷰로 추가된 섹션
@@ -78,6 +78,7 @@ Nimwake 제품 요구사항 정의서. **이 트리가 원장(Single Source of T
 | `§74` | Host Interface           | [Host Interface](04-platform/03-host-interface.md)             |
 | `§75` | Response Header Timeout  | [Gateway와 Request Lease](02-architecture/06-gateway-and-requests.md) |
 | `§76` | Manifest Reload          | [Application Manifest와 Readiness](02-architecture/05-manifest-and-readiness.md) |
+| `§77` | Crash-Loop Backoff       | [Failure Handling](02-architecture/08-failure-handling.md)    |
 
 ---
 
