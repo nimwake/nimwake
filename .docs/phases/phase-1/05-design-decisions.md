@@ -202,10 +202,32 @@ end-to-end로는 재지 않았다. §76에서 배운 것이 있다 — 이 bench
 비교)와 다른 선택을 했다 — 그쪽은 더 나은 보호 장치가 따로 없어 남기고
 문서화했고, 이쪽은 있다.
 
+### 1024배 오류가 빠져나갈 수 있었다
+
+e2e를 임계값 1MiB(통과)와 1PiB(거절)로 썼다. **둘 다 단위 오류를 통과시킨다.**
+`MemAvailable`을 kB로 읽든 MiB로 읽든 1MiB는 넘고 1PiB는 못 넘기 때문이다.
+
+파싱 단위 테스트는 `15597656 kB → 15232 MiB`를 고정하지만, 그것은 파서만 본다.
+`ProcessRuntime` → 실제 `/proc` → 결정으로 이어지는 경로의 축척은 열려 있었다.
+
+테스트가 직접 `MemAvailable`을 읽고 **그 값 ±1GiB로 양쪽을 고정하게** 바꿨다.
+1GiB 여유는 다른 process의 변동을 흡수한다.
+
+확인했다. `value / 1024`를 `value`로 바꾸면
+
+```text
+---- the_threshold_is_compared_at_the_real_scale ----
+assertion failed: 가용량보다 1GiB 더 요구하면 거절해야 한다 (가용 15200MiB)
+3 passed; 1 failed
+```
+
+**새 테스트만 잡는다.** 기존 세 개는 전부 통과했다.
+
 ### 뮤테이션
 
 ```text
 검사 무력화 → 항상 통과          a_wake_is_refused_when_memory_is_short 외 2개
+kB를 MiB로 그대로 (1024배)       the_threshold_is_compared_at_the_real_scale
 경계를 배타로 (>= → >)           exactly_the_threshold_is_enough
 읽을 수 없으면 거절              an_unknown_reading_lets_the_wake_through
 꺼져 있어도 읽는다               the_check_costs_nothing_when_it_is_off
