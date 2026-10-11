@@ -56,6 +56,24 @@ pub struct Summary {
     pub rps: f64,
 }
 
+/// 여러 기동 구간에서 백분위를 뽑는다. (PRD §42, §50)
+///
+/// cold start 분해를 **표본 하나로 내면 안 된다.** readiness는 probe 간격
+/// (50ms)에 양자화되어 첫 시도에 붙으면 0ms, 한 번 더 기다리면 50ms가 된다.
+/// 그 하나로 "지배적인 구간"을 고르면 같은 코드가 실행마다 다른 답을 낸다.
+/// 실제로 `v0.1.0-rc2`와 그 직전 run이 상반된 결론을 냈다.
+///
+/// 비어 있으면 `None`.
+#[must_use]
+pub fn percentile_of(values: &[Duration], percent: f64) -> Option<Duration> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    Some(percentile(&sorted, percent))
+}
+
 /// 처리량 곡선이 평평해지기 시작하는 지점. (PRD §50 concurrency knee point)
 ///
 /// "최대 처리량을 낸 동시성"으로 정의하지 않는다. 포화된 뒤에는 어느 단계가

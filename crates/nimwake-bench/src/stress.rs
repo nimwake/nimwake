@@ -60,6 +60,12 @@ pub struct StressResult {
     pub before: Resources,
     pub after: Resources,
     pub wall: Duration,
+    /// cycle마다 하나씩 쌓인 기동 구간. **cold start 분해는 여기서 낸다.**
+    ///
+    /// cold-start storm은 기동 중복 제거를 증명하려고 일부러 spawn을 하나만
+    /// 만든다. 표본이 하나이므로 readiness가 probe 간격(50ms)에 양자화되어
+    /// 0ms 또는 50ms로 튄다. 실제로 같은 코드가 상반된 결론을 냈다.
+    pub spans: Vec<crate::daemon::StartupSpans>,
 }
 
 impl StressResult {
@@ -150,6 +156,9 @@ pub fn run(
     let after = Resources::observe(daemon.pid());
     let zombies = zombies_under(daemon.pid());
 
+    // cycle마다 하나씩 쌓였다. daemon을 내리기 전에 거둬야 한다.
+    let spans = daemon.startups();
+
     // daemon을 정상 종료시킨 뒤에 본다. child의 수명은 daemon의 수명을 넘지 않는다. (PRD §71)
     drop(daemon);
     std::thread::sleep(Duration::from_millis(500));
@@ -171,6 +180,7 @@ pub fn run(
         before,
         after,
         wall,
+        spans,
     })
 }
 

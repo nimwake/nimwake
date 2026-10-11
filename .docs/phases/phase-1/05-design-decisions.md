@@ -100,6 +100,62 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## cold start 분해를 표본 하나로 내고 있었다
+
+`v0.1.0-rc2`를 찍고 baseline을 보다가 발견했다. 직전 run과 비교하니 같은 지표가
+28배 달랐다.
+
+```text
+직전 run   cold_start_readiness_ms = 50.979   → 리포트: "지배적인 구간: app readiness"
+rc2 run    cold_start_readiness_ms =  0.074   → 리포트: "지배적인 구간: process spawn"
+```
+
+**같은 코드, 같은 fixture인데 결론이 뒤집혔다.**
+
+### 원인은 표본 수와 양자화다
+
+cold-start storm은 **기동 중복 제거를 증명하는 것이 목적**이다. 1000개 동시 요청이
+process 하나만 띄워야 한다. 그래서 `spawn count = 1`이고 기동 구간 표본도 **하나**다.
+
+그 하나가 `READINESS_PROBE_INTERVAL = 50ms`에 양자화된다.
+
+```text
+첫 connect에 붙으면      readiness ≈ 0ms
+한 번 더 기다리면         readiness ≈ 50ms
+```
+
+표본이 하나이므로 어느 쪽에 걸리는지가 그대로 결론이 된다. 50ms 쪽은 드물게
+일어나는데(40 표본에서 p95도 0.04ms), 드물다는 것이 더 나쁘다 — 대부분은 맞게
+나오고 가끔 틀리게 나온다.
+
+### lifecycle stress가 표본을 버리고 있었다
+
+stress는 cycle마다 cold start를 한다. 1000 cycle = 기동 1000건이다.
+`daemon.startups()`가 그것을 모으고 있었는데 `StressResult`가 담지 않았다.
+
+담게 하고, 분해를 **p50과 p95**로 낸다.
+
+```text
+회차 1   queue 0.034 · readiness 0.046 · spawn 0.189 · total 1.053   (40 표본)
+회차 2   queue 0.036 · readiness 0.037 · spawn 0.144 · total 0.557   (40 표본)
+```
+
+재현된다. `cold_start_samples`도 baseline에 담아 읽는 쪽이 표본 수를 안다.
+
+p95를 함께 적는 이유가 있다. 양자화된 꼬리가 있으면 **p95에 드러난다.**
+p50만 적으면 "가끔 50ms"가 보이지 않는다.
+
+### storm 절은 단일 표본임을 명시했다
+
+지우지 않았다. storm의 기동 한 건도 정보다. 다만 리포트가 그것으로 "지배적인
+구간"을 고르지 않게 하고, 표본이 하나라서 구간 비교에 쓰지 않는다고 적었다.
+
+### §50 비교를 이 값으로 할 수 없었다
+
+기기와 CI를 나란히 놓으려던 그 숫자다. 고치지 않았으면 **동전 던지기를 비교**했다.
+
+---
+
 ## 같은 함정을 다른 테스트도 밟고 있었다
 
 §19 작업의 교훈이 "한 파일의 경고가 옆 파일에 닿지 않았다"였으므로 전체를

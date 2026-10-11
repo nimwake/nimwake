@@ -5,6 +5,7 @@
 //! 수치를 판정하지 않는다. 다음 release가 직전과 비교할 수 있도록 형식을 고정할 뿐이다.
 
 use std::fmt::Write;
+use std::time::Duration;
 
 use crate::baseline::{self, Baseline};
 use crate::stats::{self, delta_ms, ms, Summary};
@@ -86,11 +87,30 @@ impl Report {
 
         // cold start는 구간별로 담는다. §50의 비교 항목이
         // "spawn / readiness / proxy connect" 단위이기 때문이다.
-        if let Some(spans) = self.storm.as_ref().and_then(|storm| storm.spans.first()) {
-            baseline.set("cold_start_total_ms", millis(spans.total));
-            baseline.set("cold_start_queue_ms", millis(spans.queue));
-            baseline.set("cold_start_spawn_ms", millis(spans.spawn));
-            baseline.set("cold_start_readiness_ms", millis(spans.readiness));
+        //
+        // **표본은 lifecycle stress에서 가져온다.** cold-start storm은 기동 중복
+        // 제거를 증명하려고 spawn을 하나만 만들고, 그 하나는 readiness probe
+        // 간격(50ms)에 양자화되어 0ms 또는 50ms로 튄다. stress는 cycle마다
+        // cold start를 하므로 표본이 수백 개다.
+        if let Some(stress) = &self.stress {
+            let p50 = |pick: fn(&crate::daemon::StartupSpans) -> Duration| {
+                let values: Vec<Duration> = stress.spans.iter().map(pick).collect();
+                stats::percentile_of(&values, 0.50)
+            };
+
+            if let Some(total) = p50(|s| s.total) {
+                baseline.set("cold_start_total_ms", millis(total));
+            }
+            if let Some(queue) = p50(|s| s.queue) {
+                baseline.set("cold_start_queue_ms", millis(queue));
+            }
+            if let Some(spawn) = p50(|s| s.spawn) {
+                baseline.set("cold_start_spawn_ms", millis(spawn));
+            }
+            if let Some(readiness) = p50(|s| s.readiness) {
+                baseline.set("cold_start_readiness_ms", millis(readiness));
+            }
+            baseline.set("cold_start_samples", stress.spans.len() as f64);
         }
 
         // 처리량 곡선이 평평해지는 지점. 저사양 환경에서 얼마나 앞으로
@@ -211,6 +231,46 @@ impl Report {
             megabytes(stress.before.rss),
             megabytes(stress.after.rss)
         );
+
+        // **cold start 분해는 여기서 낸다.** cycle마다 기동이 하나씩 쌓여
+        // 표본이 수백 개다. storm은 중복 제거를 증명하려고 spawn을 하나만
+        // 만들고, 그 하나는 readiness probe 간격(50ms)에 양자화된다. (PRD §42)
+        if !stress.spans.is_empty() {
+            let p50 = |pick: fn(&crate::daemon::StartupSpans) -> Duration| {
+                let values: Vec<Duration> = stress.spans.iter().map(pick).collect();
+                stats::percentile_of(&values, 0.50).unwrap_or_default()
+            };
+            let median = crate::daemon::StartupSpans {
+                queue: p50(|s| s.queue),
+                spawn: p50(|s| s.spawn),
+                readiness: p50(|s| s.readiness),
+                total: p50(|s| s.total),
+            };
+
+            let _ = writeln!(out, "구간별 분해 — 표본 {}개의 p50:\n", stress.spans.len());
+            let _ = writeln!(out, "| 구간 | p50 | p95 |");
+            let _ = writeln!(out, "| --- | ---: | ---: |");
+            for (label, pick) in [
+                (
+                    "actor queue",
+                    (|s: &crate::daemon::StartupSpans| s.queue) as fn(&_) -> _,
+                ),
+                ("process spawn", |s: &crate::daemon::StartupSpans| s.spawn),
+                ("app readiness", |s: &crate::daemon::StartupSpans| {
+                    s.readiness
+                }),
+                ("**total**", |s: &crate::daemon::StartupSpans| s.total),
+            ] {
+                let values: Vec<Duration> = stress.spans.iter().map(pick).collect();
+                let _ = writeln!(
+                    out,
+                    "| {label} | {} | {} |",
+                    ms(stats::percentile_of(&values, 0.50).unwrap_or_default()),
+                    ms(stats::percentile_of(&values, 0.95).unwrap_or_default()),
+                );
+            }
+            let _ = writeln!(out, "\n지배적인 구간: **{}**\n", dominant(&median));
+        }
 
         let leaks = stress.leaks();
         if leaks.is_empty() {
@@ -387,20 +447,24 @@ impl Report {
         let _ = writeln!(out, "| failed requests | {} |", storm.failures);
         let _ = writeln!(out, "| wall clock | {} |\n", ms(storm.wall));
 
-        // cold start를 단일 숫자로 기록하지 않는다. (PRD §42)
-        let Some(spans) = storm.spans.first() else {
-            let _ = writeln!(out, "구간 계측이 수집되지 않았다.\n");
-            return;
-        };
-
-        let _ = writeln!(out, "구간별 분해:\n");
-        let _ = writeln!(out, "| 구간 | |");
-        let _ = writeln!(out, "| --- | ---: |");
-        let _ = writeln!(out, "| actor queue | {} |", ms(spans.queue));
-        let _ = writeln!(out, "| process spawn | {} |", ms(spans.spawn));
-        let _ = writeln!(out, "| app readiness | {} |", ms(spans.readiness));
-        let _ = writeln!(out, "| **total** | **{}** |\n", ms(spans.total));
-        let _ = writeln!(out, "지배적인 구간: **{}**\n", dominant(spans));
+        // storm은 기동 중복 제거를 증명하는 것이 목적이고 **spawn이 하나**다.
+        // 그 하나로 분해를 적으면 readiness가 probe 간격(50ms)에 양자화되어
+        // 0ms 또는 50ms로 튀고, "지배적인 구간"이 실행마다 뒤집힌다.
+        // 분해는 lifecycle stress 절에서 표본 수백 개로 낸다. (PRD §42)
+        if let Some(spans) = storm.spans.first() {
+            let _ = writeln!(
+                out,
+                "이 storm의 기동 한 건: queue {} · spawn {} · readiness {} · total {}",
+                ms(spans.queue),
+                ms(spans.spawn),
+                ms(spans.readiness),
+                ms(spans.total),
+            );
+            let _ = writeln!(
+                out,
+                "\n표본이 하나이므로 구간 비교에는 쓰지 않는다. readiness는 probe 간격(50ms)에 양자화된다. 분해는 lifecycle stress 절에 있다.\n"
+            );
+        }
     }
 
     fn render_sweep(&self, out: &mut String) {
