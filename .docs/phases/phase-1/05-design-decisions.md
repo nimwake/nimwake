@@ -100,6 +100,56 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## tarball의 바이너리 중 하나만 실행 확인되고 있었다
+
+soak이 끝나기 전에 처리할 것을 찾다가 발견했다. `release.yml`의 qemu smoke는
+**`nimwaked`만** 돌린다. tarball에는 여섯이 들어간다.
+
+```text
+nimwaked              smoke 있음
+nimwake-bench         없음   ← §50 비교를 만드는 도구
+echo-server           없음
+crash-server          없음
+group-server          없음
+slow-start-server     없음
+```
+
+`nimwake-bench`가 특히 나쁘다. #26에서 tarball에 넣은 뒤로 **aarch64에서 한 번도
+실행된 적이 없다.** 기기에서 처음 돌리다 못 뜨는 것을 발견하면 그날 측정을 못 하고,
+soak이 끝난 직후가 바로 그 날이다.
+
+### 각 바이너리의 깔끔한 실패 모드를 먼저 쟀다
+
+추측하지 않고 하나씩 돌려 확인했다.
+
+```text
+nimwaked                      인자 없음        → 78   (EX_CONFIG)
+nimwake-bench --nimwaked X    경로 없음        → 1    "not found at X"
+echo-server                   port 인자 없음   → 101  (panic)
+group-server                  같음             → 101
+slow-start-server             같음             → 101
+crash-server                  인자를 안 쓴다    → 1    "failing on purpose"
+```
+
+`nimwake-bench`를 **인자 없이** 부르면 옆 바이너리를 찾아 **전체 벤치를 돌린다**
+(5초 timeout에 걸려 124가 나왔다). smoke에는 없는 경로를 주어 경로 검사에서
+끝나게 한다.
+
+### 깨뜨려 확인했다
+
+smoke 스크립트를 workflow에서 추출해 네이티브로 돌렸다.
+
+```text
+nimwake-bench를 깨진 파일로    ::error::nimwake-bench did not run (exit 127)
+echo-server를 빼면             ::error::echo-server did not run (exit 127, expected 101)
+복원                            통과
+```
+
+통과만 보고 넘기면 아무것도 지키지 않는 smoke가 남는다. 이번 세션에서 네 번째로
+같은 확인을 했다.
+
+---
+
 ## cold start 분해를 표본 하나로 내고 있었다
 
 `v0.1.0-rc2`를 찍고 baseline을 보다가 발견했다. 직전 run과 비교하니 같은 지표가

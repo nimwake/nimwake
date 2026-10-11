@@ -245,6 +245,51 @@ jobs:
           grep -q "no manifests found" smoke.log
           echo "aarch64 binary runs and reports a configuration failure"
 
+          # tarball에 들어가는 나머지 바이너리도 **실행은 되는지** 본다.
+          #
+          # 지금까지 smoke는 nimwaked만 돌렸다. nimwake-bench는 §50 비교를
+          # 만드는 도구인데 #26에서 tarball에 넣은 뒤로 aarch64에서 한 번도
+          # 실행된 적이 없었다. 기기에서 처음 돌리다 못 뜨는 것을 발견하면
+          # 그날 측정을 못 한다.
+          #
+          # 인자 없이 부르면 bench는 옆 바이너리를 찾아 **전체 벤치를 돌린다.**
+          # 그래서 없는 경로를 주어 경로 검사에서 끝나게 한다.
+          set +e
+          qemu-aarch64-static "${OUT_DIR}/nimwake-bench" --nimwaked /nonexistent >bench-smoke.log 2>&1
+          code=$?
+          set -e
+
+          cat bench-smoke.log
+          if [ "${code}" != "1" ]; then
+            echo "::error::nimwake-bench did not run (exit ${code})"
+            exit 1
+          fi
+          grep -q "not found at /nonexistent" bench-smoke.log
+          echo "nimwake-bench runs on aarch64"
+
+          # fixture server는 port 인자가 없으면 panic(101)한다.
+          # crash-server는 인자를 쓰지 않고 일부러 1로 끝난다.
+          for binary in echo-server group-server slow-start-server; do
+            set +e
+            qemu-aarch64-static "${OUT_DIR}/${binary}" >/dev/null 2>&1
+            code=$?
+            set -e
+            if [ "${code}" != "101" ]; then
+              echo "::error::${binary} did not run (exit ${code}, expected 101)"
+              exit 1
+            fi
+          done
+
+          set +e
+          qemu-aarch64-static "${OUT_DIR}/crash-server" >/dev/null 2>&1
+          code=$?
+          set -e
+          if [ "${code}" != "1" ]; then
+            echo "::error::crash-server did not run (exit ${code}, expected 1)"
+            exit 1
+          fi
+          echo "every binary in the tarball executes on aarch64"
+
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
