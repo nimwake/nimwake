@@ -219,6 +219,57 @@ baseline       label=v0.1.0-rc1 + 지표 6개. 다음 release가 이것과 비�
 
 ---
 
+## Android 실기기 장시간 측정 (참고)
+
+판정은 `nimwake-android`의 리포트가 한다. 여기에는 **Core가 그 수치를 받아
+읽을 수 있도록** 기록만 남긴다. PRD §51의 관찰 항목에 대응한다.
+
+```text
+기기        Samsung Galaxy A51 5G · Android 13 · Termux + proot Ubuntu 26.04
+Core        v0.1.0-rc1 이후 main (aarch64-unknown-linux-musl)
+workload    5분마다 요청 하나. 매번 잠든 앱을 깨운다
+구간        2026-10-09 13:44 ~ 10-11 16:08 (50.4시간, 표본 604개, 진행 중)
+```
+
+| §51 관찰 항목 | 결과 |
+| --- | --- |
+| daemon survival | **pid 12821 하나.** 604 표본 전부 같은 pid — 재시작 0회 |
+| Android background killing | 관측되지 않았다. state가 604회 모두 `RUNNING` |
+| memory usage | RSS 2104 → 1296 KB. **줄었다.** 12시간 뒤 약 1240KB에서 평평하다 |
+| battery usage | 100% → 84%. 시간당 0.32% |
+| temperature | 27~29 °C. 추세 없음 |
+| wake reliability | 요청 실패 **0건 / 604건.** `apps_before`가 604회 모두 0이므로 매번 진짜 cold start다 |
+| network recovery | 이 구간에서 끊김이 관측되지 않았다 (별도 시나리오는 A5) |
+| orphan process | app process 601개 / 표본 604개. 요청마다 새 process이고 쌓이지 않았다 |
+| storage growth | free 99608 → 98408 MB. 50시간에 1.2GB — 로그(`nimwaked.log` 950KB)보다 크므로 다른 요인이 섞여 있다 |
+| repeated lifecycle stability | cold start p50 47.6 · p95 56.1 · p99 108.7 · max 132.6 ms |
+
+### RSS가 줄었다
+
+누수를 찾으러 본 지표인데 반대로 나왔다.
+
+```text
+ 0–6h    평균 2211 KB
+ 6–12h   평균 1659 KB
+12–18h   평균 1239 KB
+18–50h   평균 1234~1247 KB   (평평하다)
+```
+
+12시간쯤에 자리를 잡고 38시간 동안 변하지 않는다. allocator arena가 정리되거나
+Android의 page reclaim이 작용한 것으로 보이며, 어느 쪽이든 **증가가 없다**는 것이
+이 측정의 결론이다.
+
+### 이 수치로 §50 비교를 끝낼 수는 없다
+
+soak CSV에는 **구간 분해가 없다.** `seconds`는 HTTP 응답 시간이고 CI의
+`cold_start_total_ms`는 기동 구간(queue+spawn+readiness)이다. **다른 것을 재는
+값이므로 나란히 놓으면 안 된다.**
+
+§50이 묻는 "어느 구간이 먼저 무너지는지"를 답하려면 기기에서 `nimwake-bench`를
+한 번 돌려야 한다. 그래서 그 바이너리를 aarch64 asset에 넣었다. (이슈 #25)
+
+---
+
 ## 이 체크리스트가 보장하지 않는 것
 
 전 항목이 체크되어도 아래는 **측정되지 않은 상태**다.
@@ -229,7 +280,7 @@ baseline       label=v0.1.0-rc1 + 지표 6개. 다음 release가 이것과 비�
 | 실제 서비스의 cold start | Next.js **기동 206ms**, 첫 응답 396ms. 목표 5초에 여유가 크다. 다만 한 페이지짜리 앱이므로 하한이다 |
 | readiness의 의미 | TCP connect는 application readiness가 아니다. Next.js는 port를 열고도 190ms 더 걸린다 |
 | 동시 기동의 자원 한계 | Next.js 앱 8개를 동시에 깨우면 직렬화 없이 전부 0.87초에 뜬다. 앱당 96MB로 합계 768MB. 2GB 기기면 10개 남짓이 한계인데 제한 장치가 없다 (자원 관리는 Post-MVP) |
-| 장시간 운용 | 최장 측정이 105초(stress) / 120초(sustained). 24h·72h는 Android 소관 |
+| 장시간 운용 | CI에서의 최장 측정은 105초(stress) / 120초(sustained)다. **실기기에서는 50.4시간을 측정했다** — daemon 재시작 0회, 요청 실패 0/604, RSS 2104→1296KB(감소). 판정은 `nimwake-android` 소관이고 아래에 수치를 적어 둔다 |
 | crash-loop | backoff가 없다 (PRD §33, Post-MVP). **누수는 없음을 확인했다** — 동시 자식 ≤ app 수, 정착 후 zombie 0, RSS +1.8MB, FD 증가 없음. 다만 spawn 속도를 막는 것이 없다. 623 spawn/초를 쟀고 `startup_timeout`도 waiter 상한도 관여하지 않는다 |
 | manifest 재적재 | 없다. 앱 추가에 daemon 재시작이 필요하고 그러면 모든 앱이 내려간다 |
 | 운영 도구 | `nimwake status`도 admin IPC도 없다 (Post-MVP) |
