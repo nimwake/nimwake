@@ -222,79 +222,71 @@ baseline       label=v0.1.0-rc1 + 지표 6개. 다음 release가 이것과 비�
 
 ---
 
-## §50 CI Linux ↔ Android 실기기 비교 (v0.1.0-rc4)
+## §50 CI Linux ↔ Android 실기기 비교 (v0.1.0-rc5)
 
 같은 `nimwake-bench`를 같은 workload로 CI runner와 실기기에서 돌려 비교한다.
-cold start 분해는 양쪽 모두 **표본 1,000개**다.
+**다섯 항목을 모두 채웠다.**
 
 | 지표 | CI Linux | Android 기기 | 배수 |
 | --- | ---: | ---: | ---: |
-| cold start queue | 0.027 ms | 1.106 ms | **41.0×** |
-| cold start spawn | 0.170 ms | 5.762 ms | **33.9×** |
-| cold start readiness | 0.046 ms | 0.851 ms | 18.5× |
-| cold start total | 0.916 ms | 10.687 ms | 11.7× |
-| daemon RSS | 5.56 MB | **2.05 MB** | 0.4× |
-| CPU (wall 대비) | 103.2 % | **9.3 %** | 0.1× |
-| concurrency knee | 50 (11,036 rps) | **1 (122 rps)** | — |
-| knee p95 | 6.05 ms | 12.36 ms | 2.0× |
+| proxy overhead p50 | 0.938 ms | 5.907 ms | 6.3× |
+| proxy overhead p95 | 1.974 ms | 13.277 ms | 6.7× |
+| cold start queue | 0.037 ms | 0.737 ms | 19.9× |
+| cold start spawn | 0.169 ms | **5.178 ms** | **30.6×** |
+| cold start readiness | 0.054 ms | 0.863 ms | 16.0× |
+| cold start total | 1.129 ms | 8.898 ms | 7.9× |
+| daemon RSS | 5.60 MB | **2.11 MB** | 0.4× |
+| CPU (wall 대비) | 100.1 % | **8.7 %** | 0.1× |
+| concurrency knee | 50 (7,188 rps) | **1 (129 rps)** | — |
+| knee p95 | 8.75 ms | 11.39 ms | 1.3× |
+
+cold start 분해는 표본 1,000개(CI) · 993개(기기)다.
+
+### overhead는 농도가 다르다
+
+```text
+CI     8 동시 연결 (무릎 50 아래)
+기기   1 동시 연결 (무릎이 1이다)
+```
+
+**같은 농도로 잴 수 없다.** 기기의 무릎이 1이므로 그 위에서 재면 `echo-server`
+fixture가 먼저 막혀 비교 기준이 병목이 된다 — rc4에서 8로 재니 overhead가
+`-13.4ms`로 나왔다. 두 수치는 각자의 농도에서 유효하고 배수는 참고값이다.
 
 ### 먼저 무너지는 것은 process spawn이다
 
-절대 배수로는 actor queue가 41배로 가장 크지만 값이 1.1ms다. **분해에서 차지하는
-비중을 보면 답이 분명하다.**
-
 ```text
          queue    spawn     readiness   나머지
-CI        2.9%    18.6%      5.0%       73.5%
-기기     10.3%    53.9%      8.0%       27.8%
+CI        3.3%    15.0%      4.8%       77.0%
+기기      8.3%    58.2%      9.7%       23.8%
 ```
 
-기기에서 cold start의 **절반 이상이 process spawn**이다. CI에서는 5분의 1이다.
+기기에서 cold start의 **58%가 process spawn**이다. CI에서는 15%다.
 proot(ptrace)이 fork/exec를 감싸는 비용이 여기 드러난다.
 
-"나머지"는 total에서 세 구간을 뺀 값이고 proxy connect와 app 응답이 들어 있다.
-CI에서 그쪽이 지배적인 것은 구간이 워낙 짧아 상대적으로 커 보이는 것이다.
+절대 배수로는 queue가 19.9배, spawn이 30.6배다. **spawn은 배수도 비중도 가장 크다.**
 
 ### daemon은 기기에서 병목이 아니다
 
 RSS가 CI의 0.4배, CPU가 0.1배다. **적게 쓰는 것이 좋은 소식이 아니다** — 처리량이
-다른 곳에서 막혀 daemon이 할 일이 없다는 뜻이다. 무릎이 동시성 1이고 122 rps다.
+다른 곳에서 막혀 daemon이 할 일이 없다는 뜻이다. 무릎이 동시성 1이고 129 rps다.
 
 막는 것은 proot(ptrace) 비용과 커널 `somaxconn 128`이다. Nimwake 고유 구간이
 아니다. → `nimwake-android` `.docs/validation/08`
 
 ### lifecycle stress는 기기에서 깨끗하다
 
-1000 사이클 × 10 app을 218초에 돌렸다.
+rc4에서 1000 사이클 × 10 app을 218초에 돌렸다. spawn 1000 · 실패 0 · 고아 0 ·
+좀비 0 · 열린 port 0 · FD 12 → 12. **깨우고 재우기를 1000번 반복해도 새는 것이
+없다.** rc5는 런타임이 같다.
 
-```text
-spawned processes   1000
-failed requests     0
-orphan processes    0
-zombie processes    0
-ports left open     0
-FD                  12 → 12
-RSS                 2.2 → 2.5 MB
-```
+### 아직 분해에 없는 것
 
-**깨우고 재우기를 1000번 반복해도 새는 것이 없다.** 이것이 기기에서 처음 측정됐다 —
-d7c5590 실행은 `--stress` 없이 돌아 이 절이 없었다.
+`proxy connect` 구간은 `nimwake::startup`이 아니라 `nimwake::request`의
+`proxy_connect_us`에 있다. `--trace-json`으로 꺼낼 수 있지만 bench가 요청 trace를
+모으지 않아 cold start 분해에 들어가지 않는다.
 
-### 채우지 못한 두 항목
-
-```text
-proxy overhead     기기 무릎이 1인데 warm 측정이 8 동시 연결이다
-proxy connect 구간  startup trace에 없다. request trace의 proxy_connect_us에 있다
-```
-
-**proxy overhead** — 무릎을 넘긴 농도로 재면 `echo-server` fixture가 먼저 막혀
-비교 기준이 병목이 된다. 기기에서 direct p50 27.7ms, gateway p50 15.1ms로
-gateway가 더 빨라 `p50`이 **-13.4ms**로 나왔다. `--warm-connections`를 더해
-고쳤지만(#54) 그 코드가 rc4에 없다. 농도 1로 재야 한다.
-
-**proxy connect** — cold start 분해는 `nimwake::startup`의 세 구간(queue · spawn ·
-readiness)이다. proxy connect는 `nimwake::request`의 `proxy_connect_us`에 있고
-`--trace-json`으로 꺼낼 수 있다. bench가 요청 trace를 모으지 않아 분해에 없다.
+위 표의 "나머지"(CI 77.0% · 기기 23.8%)가 그 구간과 app 응답을 담고 있다.
 
 ---
 
