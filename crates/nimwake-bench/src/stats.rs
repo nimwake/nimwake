@@ -129,12 +129,6 @@ pub fn ms(duration: Duration) -> String {
     format!("{:.2} ms", duration.as_secs_f64() * 1000.0)
 }
 
-/// 두 값의 차이. 음수도 그대로 보여 준다.
-pub fn delta_ms(slower: Duration, faster: Duration) -> String {
-    let delta = slower.as_secs_f64() - faster.as_secs_f64();
-    format!("{:+.2} ms", delta * 1000.0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -8,13 +8,13 @@ use std::fmt::Write;
 use std::time::Duration;
 
 use crate::baseline::{self, Baseline};
-use crate::stats::{self, delta_ms, ms, Summary};
+use crate::stats::{self, ms};
 use crate::stress::{cpu_used, CrashLoopResult, Resources, StressResult, SustainedResult};
 use crate::{StormResult, SweepRow, WarmResult};
 
 pub struct Report {
     commit: String,
-    warm: Option<(Summary, WarmResult)>,
+    warm: Option<WarmResult>,
     storm: Option<StormResult>,
     sweep: Vec<SweepRow>,
     stress: Option<StressResult>,
@@ -37,8 +37,8 @@ impl Report {
         }
     }
 
-    pub fn warm_path(&mut self, direct: Summary, nimwake: WarmResult) {
-        self.warm = Some((direct, nimwake));
+    pub fn warm_path(&mut self, warm: WarmResult) {
+        self.warm = Some(warm);
     }
 
     pub fn cold_start(&mut self, storm: StormResult) {
@@ -69,24 +69,29 @@ impl Report {
     pub fn baseline(&self) -> Baseline {
         let mut baseline = Baseline::new(&self.commit);
 
-        if let Some((direct, nimwake)) = &self.warm {
-            baseline.set("warm_p50_ms", millis(nimwake.summary.p50));
-            baseline.set("warm_p95_ms", millis(nimwake.summary.p95));
-            baseline.set(
-                "proxy_overhead_p50_ms",
-                millis(nimwake.summary.p50) - millis(direct.p50),
-            );
-            baseline.set(
-                "proxy_overhead_p95_ms",
-                millis(nimwake.summary.p95) - millis(direct.p95),
-            );
+        if let Some(warm) = &self.warm {
+            let direct = &warm.paired.direct;
+            let nimwake = &warm.paired.gateway;
+            baseline.set("warm_p50_ms", millis(nimwake.p50));
+            baseline.set("warm_p95_ms", millis(nimwake.p95));
+
+            // **쌍마다의 차이에서 낸다.** 백분위를 뺀 값이 아니다. (PRD §50)
+            //
+            // 정의가 바뀌었다. 이전 baseline의 같은 키는 `p95(nimwake) - p95(direct)`
+            // 였고, 두 실행의 부하가 달라 기기에서 음수까지 나왔다.
+            if let Some(ns) = warm.paired.overhead_p50_ns {
+                baseline.set("proxy_overhead_p50_ms", ns as f64 / 1_000_000.0);
+            }
+            if let Some(ns) = warm.paired.overhead_p95_ns {
+                baseline.set("proxy_overhead_p95_ms", ns as f64 / 1_000_000.0);
+            }
             // direct 쪽과 양쪽 rps를 함께 남긴다. overhead가 음수로 나왔을 때
             // **왜 그런지 재구성할 수 있어야 한다.** 기기에서 그럴 일이 있었다.
             baseline.set("warm_direct_p50_ms", millis(direct.p50));
             baseline.set("warm_direct_p95_ms", millis(direct.p95));
             baseline.set("warm_direct_rps", direct.rps);
-            baseline.set("warm_rps", nimwake.summary.rps);
-            if let Some(rss) = nimwake.rss {
+            baseline.set("warm_rps", nimwake.rps);
+            if let Some(rss) = warm.rss {
                 baseline.set("daemon_rss_mb", rss as f64 / (1024.0 * 1024.0));
             }
         }
@@ -409,68 +414,59 @@ impl Report {
     }
 
     fn render_warm(&self, out: &mut String) {
-        let Some((direct, nimwake)) = &self.warm else {
+        let Some(warm) = &self.warm else {
             return;
         };
-        let proxy = &nimwake.summary;
+        let paired = &warm.paired;
+        let direct = &paired.direct;
+        let proxy = &paired.gateway;
 
         let _ = writeln!(out, "## Warm path\n");
-        let _ = writeln!(out, "| | direct backend | nimwake | overhead |");
-        let _ = writeln!(out, "| --- | ---: | ---: | ---: |");
+        let _ = writeln!(
+            out,
+            "direct backend와 gateway를 **번갈아** 때린다. 두 경로가 같은 worker 수와 \
+             같은 순간의 기계 상태를 공유한다. (PRD §50)\n"
+        );
+        let _ = writeln!(out, "| | direct backend | nimwake |");
+        let _ = writeln!(out, "| --- | ---: | ---: |");
         for (label, a, b) in [
             ("p50", direct.p50, proxy.p50),
             ("p95", direct.p95, proxy.p95),
             ("p99", direct.p99, proxy.p99),
         ] {
-            let _ = writeln!(
-                out,
-                "| {label} | {} | {} | {} |",
-                ms(a),
-                ms(b),
-                delta_ms(b, a)
-            );
+            let _ = writeln!(out, "| {label} | {} | {} |", ms(a), ms(b));
         }
         let _ = writeln!(
             out,
-            "| requests/sec | {:.0} | {:.0} | |",
+            "| requests/sec | {:.0} | {:.0} |",
             direct.rps, proxy.rps
         );
-        let _ = writeln!(out, "| errors | {} | {} | |\n", direct.errors, proxy.errors);
-        // **overhead 열을 어떻게 읽어야 하는지 적는다.**
-        //
-        // `p95(nimwake) - p95(direct)`는 서로 다른 두 실행의 순서통계량 차이다.
-        // 두 실행은 같은 worker 수로 돌지만 **같은 부하를 밀지 않는다** — direct가
-        // 원래 빠르므로 2배 가까운 rps를 낸다. 더 센 부하는 그쪽 지연을 올리고,
-        // 따라서 차이는 실제 overhead보다 **작게** 나온다.
-        //
-        // CI에서는 여유가 있어 그 왜곡이 작다. 포화된 기기에서는 부호까지 뒤집혔다 —
-        // direct 50 rps · nimwake 25 rps에서 p50/p95/p99 모두 음수였다.
-        // proxy를 한 번 더 거치는데 더 빠를 수는 없다.
-        //
-        // 제대로 고치려면 direct와 gateway 요청을 **번갈아** 보내 같은 조건에서
-        // 짝지어야 한다. 부하 생성기를 다시 짜는 일이므로 여기서는 읽는 법만 적는다.
-        let _ = writeln!(
-            out,
-            "두 실행은 같은 부하를 밀지 않는다 (direct {:.0} rps · nimwake {:.0} rps). \
-             direct가 더 센 부하를 받으므로 overhead 열은 **실제보다 작게** 나온다.",
-            direct.rps, proxy.rps,
-        );
+        let _ = writeln!(out, "| errors | {} | {} |\n", direct.errors, proxy.errors);
 
-        // 음수는 비교가 뒤집혔다는 뜻이다. 숫자로 읽히게 두지 않는다.
-        if proxy.p50 < direct.p50 || proxy.p95 < direct.p95 || proxy.p99 < direct.p99 {
+        // **overhead는 쌍마다의 차이에서 낸다.**
+        //
+        // 백분위를 빼면 서로 다른 두 분포의 순서통계량 차이가 되고, 두 실행의
+        // 부하가 다르면 그것은 overhead가 아니다. 기기에서 direct 50 rps 대
+        // nimwake 25 rps로 direct 쪽이 더 느려져 **부호까지 뒤집혔다.**
+        let _ = writeln!(out, "| overhead (쌍마다의 차이) | |");
+        let _ = writeln!(out, "| --- | ---: |");
+        let _ = writeln!(out, "| p50 | {} |", signed_ms(paired.overhead_p50_ns));
+        let _ = writeln!(out, "| p95 | {} |", signed_ms(paired.overhead_p95_ns));
+        let _ = writeln!(out, "| 쌍 | {} |", paired.pairs);
+        let _ = writeln!(out, "| gateway가 더 빨랐던 쌍 | {} |\n", paired.inverted);
+
+        if paired.pairs > 0 && paired.inverted * 2 > paired.pairs {
             let _ = writeln!(
                 out,
-                "> **overhead 열을 읽지 않는다.** 음수가 나왔다 — 기기가 포화되어 \
-                 direct 쪽이 더 느려진 것이고, proxy가 더 빠른 것이 아니다.",
+                "> **overhead를 읽지 않는다.** 쌍의 절반 이상에서 gateway가 더 빨랐다. \
+                 proxy를 한 번 더 거치는데 그럴 수는 없으므로, 기계가 포화되어 \
+                 측정이 잡음에 묻혔다는 뜻이다.\n"
             );
         }
-
-        let _ = writeln!(out);
-
         let _ = writeln!(out, "| daemon | |");
         let _ = writeln!(out, "| --- | ---: |");
-        let _ = writeln!(out, "| RSS | {} |", megabytes(nimwake.rss));
-        let _ = writeln!(out, "| open fds | {} |\n", optional(nimwake.fds));
+        let _ = writeln!(out, "| RSS | {} |", megabytes(warm.rss));
+        let _ = writeln!(out, "| open fds | {} |\n", optional(warm.fds));
     }
 
     fn render_cold_start(&self, out: &mut String) {
@@ -597,6 +593,15 @@ fn optional(value: Option<usize>) -> String {
     value.map_or_else(|| "n/a".to_owned(), |value| value.to_string())
 }
 
+/// 부호 있는 나노초를 ms로. `None`은 표본이 없었다는 뜻이다.
+fn signed_ms(nanos: Option<i64>) -> String {
+    match nanos {
+        #[allow(clippy::cast_precision_loss)]
+        Some(ns) => format!("{:+.2} ms", ns as f64 / 1_000_000.0),
+        None => "—".to_owned(),
+    }
+}
+
 fn millis(duration: std::time::Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
@@ -667,6 +672,7 @@ fn mb(bytes: u64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use crate::stats::Summary;
     use std::time::Duration;
 
     use super::*;
