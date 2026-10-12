@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use nimwake_core::app;
 use nimwake_core::error::AcquireError;
+use nimwake_core::eviction;
 use nimwake_core::registry::{self, AppRegistry, DEFAULT_GATEWAY_PORT};
 use nimwake_core::runtime::FakeRuntime;
 use nimwake_core::Limits;
@@ -703,4 +704,279 @@ async fn a_short_system_does_not_spawn() {
 
     drop(lease);
     handle.shutdown().await;
+}
+
+// 유휴 시간 노출. eviction이 "가장 오래 유휴인 것"을 고르는 근거다. (PRD §80)
+
+/// `idle_for`는 **마지막 요청**부터다. 기동부터가 아니다. (PRD §80)
+///
+/// 이것이 틀리면 오래 돌았지만 바쁜 application이 eviction 대상이 된다.
+#[tokio::test(start_paused = true)]
+async fn idle_for_measures_from_the_last_request_not_the_start() {
+    let runtime = Arc::new(FakeRuntime::default());
+    let handle = spawn_app(&runtime, 600);
+
+    let lease = handle.acquire().await.expect("cold start succeeds");
+
+    // 오래 돌게 둔다. 그동안 lease를 쥐고 있다 — 바쁜 app이다.
+    tokio::time::advance(Duration::from_secs(300)).await;
+    let busy = handle.status().await.expect("manager is alive");
+    assert_eq!(busy.active_requests, 1);
+    assert!(
+        busy.since.expect("running has uptime") >= Duration::from_secs(300),
+        "기동부터는 300초가 지났다",
+    );
+
+    // lease를 반납하면 그 순간이 마지막 요청이다.
+    drop(lease);
+    common::wait_for_active_requests(&handle, 0).await;
+
+    let after = handle.status().await.expect("manager is alive");
+    assert!(
+        after.idle_for.expect("running has idle_for") < Duration::from_secs(1),
+        "마지막 요청 직후이므로 유휴 시간은 0에 가깝다: {:?}",
+        after.idle_for,
+    );
+    assert!(
+        after.since.expect("running has uptime") >= Duration::from_secs(300),
+        "기동부터는 여전히 300초다 — 둘은 다른 값이다",
+    );
+
+    // 시간이 지나면 유휴 시간만 자란다.
+    tokio::time::advance(Duration::from_secs(120)).await;
+    let later = handle.status().await.expect("manager is alive");
+    assert!(
+        later.idle_for.expect("running has idle_for") >= Duration::from_secs(120),
+        "유휴 시간이 자라야 한다: {:?}",
+        later.idle_for,
+    );
+
+    handle.shutdown().await;
+}
+
+/// 잠든 application에는 유휴 시간이 없다. (PRD §80)
+///
+/// eviction 후보는 `RUNNING`뿐이다. 잠든 것은 이미 메모리를 쓰지 않는다.
+#[tokio::test(start_paused = true)]
+async fn a_sleeping_app_has_no_idle_time() {
+    let runtime = Arc::new(FakeRuntime::default());
+    let handle = spawn_app(&runtime, 1);
+
+    let status = handle.status().await.expect("manager is alive");
+    assert_eq!(status.state, AppStateName::Sleeping);
+    assert!(status.idle_for.is_none(), "잠든 app에는 유휴 시간이 없다");
+
+    handle.shutdown().await;
+}
+
+/// 메모리 때문에 내린 것은 `Idle`과 구분된다. (PRD §80)
+#[tokio::test(start_paused = true)]
+async fn memory_pressure_is_a_distinct_stop_reason() {
+    let runtime = Arc::new(FakeRuntime::default());
+    let handle = spawn_app(&runtime, 600);
+
+    let lease = handle.acquire().await.expect("cold start succeeds");
+    drop(lease);
+    common::wait_for_active_requests(&handle, 0).await;
+
+    handle
+        .stop(nimwake_core::StopReason::MemoryPressure)
+        .await
+        .expect("the app accepts the stop");
+    common::wait_for_state(&handle, AppStateName::Sleeping).await;
+    assert_eq!(runtime.alive_processes(), 0, "process가 사라져야 한다");
+
+    // 이름이 달라야 로그에서 가를 수 있다.
+    assert_eq!(
+        nimwake_core::StopReason::MemoryPressure.to_string(),
+        "memory pressure",
+    );
+    assert_ne!(
+        nimwake_core::StopReason::MemoryPressure.to_string(),
+        nimwake_core::StopReason::Idle.to_string(),
+    );
+
+    handle.shutdown().await;
+}
+
+// eviction sweep — 압박부터 정지까지. (PRD §80)
+
+fn limits_mb(mb: u64) -> Limits {
+    Limits {
+        min_free_memory_mb: mb,
+    }
+}
+
+/// eviction 테스트용 spec. **idle timeout을 길게 둔다.**
+///
+/// `app_spec`의 60초로는 유휴 시간을 벌리는 동안 app이 스스로 잠들어 후보에서
+/// 빠진다. 실제로 그렇게 한 번 틀렸다 — 보려던 것은 eviction의 선택이고
+/// idle timeout이 아니다.
+fn long_lived_spec(name: &str, port: u16) -> nimwake_core::app::AppSpec {
+    let mut spec = common::spec(3600, 64);
+    spec.name = name.to_owned();
+    spec.server.host = format!("{name}.localhost");
+    spec.server.port = port;
+    spec
+}
+
+/// **메모리가 부족하면 가장 오래 유휴인 것을 내린다.** (PRD §80)
+///
+/// 이 테스트가 §80의 전부다. 압박 판단 · 후보 선택 · 정지가 한 줄로 이어진다.
+#[tokio::test(start_paused = true)]
+async fn a_sweep_evicts_the_longest_idle_app() {
+    let runtime = Arc::new(FakeRuntime::default());
+    runtime.set_available_memory_mb(Some(10_000));
+    let registry = AppRegistry::build(
+        vec![
+            long_lived_spec("older", 3101),
+            long_lived_spec("fresher", 3102),
+        ],
+        DEFAULT_GATEWAY_PORT,
+        Arc::clone(&runtime) as Arc<dyn Runtime>,
+        limits_mb(500),
+    )
+    .expect("registry builds");
+    let shared: Arc<dyn Runtime> = Arc::clone(&runtime) as Arc<dyn Runtime>;
+
+    // older를 먼저 깨우고 유휴로 둔다.
+    let older = registry.get("older").expect("older is registered");
+    let lease = older.acquire().await.expect("cold start succeeds");
+    drop(lease);
+    common::wait_for_active_requests(&older, 0).await;
+
+    // 시간을 보내 older의 유휴 시간을 벌린다.
+    tokio::time::advance(Duration::from_secs(120)).await;
+
+    // 이제 fresher를 깨운다 — 유휴 시간이 짧다.
+    let fresher = registry.get("fresher").expect("fresher is registered");
+    let lease = fresher.acquire().await.expect("cold start succeeds");
+    drop(lease);
+    common::wait_for_active_requests(&fresher, 0).await;
+
+    // 넉넉하면 아무것도 내리지 않는다.
+    let evicted = eviction::sweep(&registry, &shared, limits_mb(500))
+        .await
+        .expect("sweep succeeds");
+    assert_eq!(evicted, None, "메모리가 넉넉하면 내리지 않는다");
+
+    // 메모리가 마르면 **older**가 내려가야 한다.
+    runtime.set_available_memory_mb(Some(100));
+    let evicted = eviction::sweep(&registry, &shared, limits_mb(500))
+        .await
+        .expect("sweep succeeds");
+    assert_eq!(
+        evicted.as_deref(),
+        Some("older"),
+        "가장 오래 유휴인 것을 내려야 한다",
+    );
+
+    common::wait_for_state(&older, AppStateName::Sleeping).await;
+    assert_eq!(
+        fresher.status().await.expect("manager is alive").state,
+        AppStateName::Running,
+        "최근에 쓴 것은 그대로 둔다",
+    );
+
+    registry.shutdown().await;
+}
+
+/// **활성 요청이 있으면 내리지 않는다.** (PRD §80)
+///
+/// 더 오래 유휴여도 바쁜 쪽을 고르면 lease를 쥔 요청이 깨진다.
+#[tokio::test(start_paused = true)]
+async fn a_sweep_never_evicts_a_serving_app() {
+    let runtime = Arc::new(FakeRuntime::default());
+    runtime.set_available_memory_mb(Some(10_000));
+    let registry = AppRegistry::build(
+        vec![long_lived_spec("busy", 3101)],
+        DEFAULT_GATEWAY_PORT,
+        Arc::clone(&runtime) as Arc<dyn Runtime>,
+        limits_mb(500),
+    )
+    .expect("registry builds");
+    let shared: Arc<dyn Runtime> = Arc::clone(&runtime) as Arc<dyn Runtime>;
+
+    // lease를 **쥔 채로** 둔다 — 요청을 처리하는 중이다.
+    let busy = registry.get("busy").expect("busy is registered");
+    let lease = busy.acquire().await.expect("cold start succeeds");
+    tokio::time::advance(Duration::from_secs(9999)).await;
+
+    runtime.set_available_memory_mb(Some(1));
+    let evicted = eviction::sweep(&registry, &shared, limits_mb(500))
+        .await
+        .expect("sweep succeeds");
+    assert_eq!(evicted, None, "바쁜 app을 내리면 안 된다");
+    assert_eq!(
+        busy.status().await.expect("manager is alive").state,
+        AppStateName::Running,
+    );
+
+    drop(lease);
+    registry.shutdown().await;
+}
+
+/// 임계값이 `0`(기본)이면 메모리를 읽지도 않는다. (PRD §78, §80)
+#[tokio::test(start_paused = true)]
+async fn a_sweep_is_free_when_the_threshold_is_off() {
+    let runtime = Arc::new(FakeRuntime::default());
+    runtime.set_available_memory_mb(Some(1));
+    let registry = AppRegistry::build(
+        vec![long_lived_spec("blog", 3101)],
+        DEFAULT_GATEWAY_PORT,
+        Arc::clone(&runtime) as Arc<dyn Runtime>,
+        Limits::default(),
+    )
+    .expect("registry builds");
+    let shared: Arc<dyn Runtime> = Arc::clone(&runtime) as Arc<dyn Runtime>;
+
+    let blog = registry.get("blog").expect("blog is registered");
+    let lease = blog.acquire().await.expect("cold start succeeds");
+    drop(lease);
+    common::wait_for_active_requests(&blog, 0).await;
+
+    let reads_before = runtime.memory_reads();
+    let evicted = eviction::sweep(&registry, &shared, Limits::default())
+        .await
+        .expect("sweep succeeds");
+    assert_eq!(evicted, None);
+    assert_eq!(
+        runtime.memory_reads(),
+        reads_before,
+        "꺼져 있으면 메모리를 읽지 않는다",
+    );
+
+    registry.shutdown().await;
+}
+
+/// 가용량을 읽을 수 없으면 아무것도 내리지 않는다. (PRD §78, §80)
+#[tokio::test(start_paused = true)]
+async fn an_unknown_reading_evicts_nothing() {
+    let runtime = Arc::new(FakeRuntime::default());
+    runtime.set_available_memory_mb(Some(10_000));
+    let registry = AppRegistry::build(
+        vec![long_lived_spec("blog", 3101)],
+        DEFAULT_GATEWAY_PORT,
+        Arc::clone(&runtime) as Arc<dyn Runtime>,
+        limits_mb(500),
+    )
+    .expect("registry builds");
+    let shared: Arc<dyn Runtime> = Arc::clone(&runtime) as Arc<dyn Runtime>;
+
+    let blog = registry.get("blog").expect("blog is registered");
+    let lease = blog.acquire().await.expect("cold start succeeds");
+    drop(lease);
+    common::wait_for_active_requests(&blog, 0).await;
+
+    runtime.set_available_memory_mb(None);
+    let evicted = eviction::sweep(&registry, &shared, limits_mb(500))
+        .await
+        .expect("sweep succeeds");
+    assert_eq!(evicted, None, "읽을 수 없으면 내리지 않는다");
+    assert_eq!(
+        blog.status().await.expect("manager is alive").state,
+        AppStateName::Running,
+    );
+
+    registry.shutdown().await;
 }

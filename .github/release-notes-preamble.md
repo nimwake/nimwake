@@ -32,7 +32,7 @@ Scale-to-Zero application lifecycle. 요청이 오면 깨우고, 쓰지 않으�
 | --- | --- |
 | 실제 서비스의 cold start | Next.js 기동 206ms · 첫 응답 396ms. 다만 한 페이지짜리 앱이라 하한이다 |
 | readiness의 의미 | TCP connect가 되는 시점을 쓴다. Next.js는 port를 열고도 첫 응답까지 190ms 더 걸린다 |
-| 동시 기동의 자원 한계 | `--min-free-memory-mb`로 입장 제어를 켤 수 있다 (기본 꺼짐, PRD §78). 하나씩 쌓이는 경우는 막고 **동시에 깨어나는 경우는 막지 못한다**. eviction은 없다 |
+| 동시 기동의 자원 한계 | `--min-free-memory-mb`로 입장 제어와 유휴 eviction을 켤 수 있다 (기본 꺼짐, PRD §78·§80). 부족하면 가장 오래 유휴인 app을 내리고 그래도 부족하면 거절한다. **동시에 깨어나는 경우는 막지 못한다** |
 | 장시간 운용 | CI 측정 구간은 분 단위다. 실기기에서 **72.0시간을 완주했다**(daemon 재시작 0회 · 요청 실패 0/862 · RSS 감소). 그 build는 `d7c5590`이고 §76·§77·§78은 기기에서 돌지 않았다. 판정은 `nimwake-android` 소관 |
 | manifest 재적재 | `SIGHUP`으로 된다. 돌고 있는 application은 건드리지 않는다 (PRD §76) |
 | crash-loop backoff | 60초 안에 실패 3회면 재시도를 미룬다. 1초부터 2배씩, 상한 30초 (PRD §77) |

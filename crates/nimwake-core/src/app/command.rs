@@ -72,6 +72,11 @@ pub enum StopReason {
     Idle,
     Requested,
     DaemonShutdown,
+    /// 메모리가 부족해 내렸다. (PRD §80)
+    ///
+    /// `Idle`과 구분한다. 운영자가 "스스로 잠든 것"과 "메모리 때문에 내린 것"을
+    /// 가를 수 있어야 한다.
+    MemoryPressure,
 }
 
 impl std::fmt::Display for StopReason {
@@ -80,6 +85,7 @@ impl std::fmt::Display for StopReason {
             Self::Idle => "idle",
             Self::Requested => "requested",
             Self::DaemonShutdown => "daemon shutdown",
+            Self::MemoryPressure => "memory pressure",
         };
         f.write_str(text)
     }
