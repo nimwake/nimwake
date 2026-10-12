@@ -80,6 +80,12 @@ impl Report {
                 "proxy_overhead_p95_ms",
                 millis(nimwake.summary.p95) - millis(direct.p95),
             );
+            // direct 쪽과 양쪽 rps를 함께 남긴다. overhead가 음수로 나왔을 때
+            // **왜 그런지 재구성할 수 있어야 한다.** 기기에서 그럴 일이 있었다.
+            baseline.set("warm_direct_p50_ms", millis(direct.p50));
+            baseline.set("warm_direct_p95_ms", millis(direct.p95));
+            baseline.set("warm_direct_rps", direct.rps);
+            baseline.set("warm_rps", nimwake.summary.rps);
             if let Some(rss) = nimwake.rss {
                 baseline.set("daemon_rss_mb", rss as f64 / (1024.0 * 1024.0));
             }
@@ -430,6 +436,36 @@ impl Report {
             direct.rps, proxy.rps
         );
         let _ = writeln!(out, "| errors | {} | {} | |\n", direct.errors, proxy.errors);
+        // **overhead 열을 어떻게 읽어야 하는지 적는다.**
+        //
+        // `p95(nimwake) - p95(direct)`는 서로 다른 두 실행의 순서통계량 차이다.
+        // 두 실행은 같은 worker 수로 돌지만 **같은 부하를 밀지 않는다** — direct가
+        // 원래 빠르므로 2배 가까운 rps를 낸다. 더 센 부하는 그쪽 지연을 올리고,
+        // 따라서 차이는 실제 overhead보다 **작게** 나온다.
+        //
+        // CI에서는 여유가 있어 그 왜곡이 작다. 포화된 기기에서는 부호까지 뒤집혔다 —
+        // direct 50 rps · nimwake 25 rps에서 p50/p95/p99 모두 음수였다.
+        // proxy를 한 번 더 거치는데 더 빠를 수는 없다.
+        //
+        // 제대로 고치려면 direct와 gateway 요청을 **번갈아** 보내 같은 조건에서
+        // 짝지어야 한다. 부하 생성기를 다시 짜는 일이므로 여기서는 읽는 법만 적는다.
+        let _ = writeln!(
+            out,
+            "두 실행은 같은 부하를 밀지 않는다 (direct {:.0} rps · nimwake {:.0} rps). \
+             direct가 더 센 부하를 받으므로 overhead 열은 **실제보다 작게** 나온다.",
+            direct.rps, proxy.rps,
+        );
+
+        // 음수는 비교가 뒤집혔다는 뜻이다. 숫자로 읽히게 두지 않는다.
+        if proxy.p50 < direct.p50 || proxy.p95 < direct.p95 || proxy.p99 < direct.p99 {
+            let _ = writeln!(
+                out,
+                "> **overhead 열을 읽지 않는다.** 음수가 나왔다 — 기기가 포화되어 \
+                 direct 쪽이 더 느려진 것이고, proxy가 더 빠른 것이 아니다.",
+            );
+        }
+
+        let _ = writeln!(out);
 
         let _ = writeln!(out, "| daemon | |");
         let _ = writeln!(out, "| --- | ---: |");
