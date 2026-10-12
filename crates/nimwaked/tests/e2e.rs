@@ -1315,3 +1315,90 @@ fn logs_carry_no_ansi_escapes_when_redirected() {
         colored.first(),
     );
 }
+
+/// `SIGUSR1`이 지금 상태를 로그에 쓴다. (PRD §79)
+///
+/// **버전이 보이는 것이 핵심이다.** `deploy`는 떠 있는 process를 바꾸지 않으므로
+/// 디스크의 바이너리와 돌고 있는 것이 다를 수 있다. 실기기에서 그 차이를 모르고
+/// 72시간 측정을 시작할 뻔했다 — 기동 로그를 grep해서 겨우 알아냈다.
+///
+/// **OS pid도 맞아야 한다.** `ProcessId`(`proc#1`)는 내부 식별자이고 `ps`와 맞춰
+/// 볼 수 없다. `echo-server`가 자기 pid를 body로 돌려주므로 직접 비교한다.
+#[test]
+fn a_status_snapshot_reports_the_version_and_each_app() {
+    let apps = Apps::new();
+    let blog_port = free_port();
+    let api_port = free_port();
+    echo(&apps, "blog", blog_port, Lifecycle::default());
+    echo(&apps, "api", api_port, Lifecycle::default());
+
+    let daemon = Daemon::start(&apps);
+
+    // 둘 다 잠든 상태에서 한 번.
+    daemon.snapshot();
+    wait_for("the first snapshot", Duration::from_secs(10), || {
+        daemon
+            .output()
+            .iter()
+            .any(|line| line.contains("status snapshot"))
+    });
+
+    let output = daemon.output();
+    let header = output
+        .iter()
+        .find(|line| line.contains("status snapshot"))
+        .expect("a snapshot header is logged");
+    assert!(
+        header.contains(env!("CARGO_PKG_VERSION")),
+        "버전이 보여야 한다: {header}",
+    );
+    assert!(header.contains("apps=2"), "app 수가 보여야 한다: {header}");
+
+    // 잠든 app은 SLEEPING이고 pid가 없다.
+    let sleeping: Vec<&String> = output
+        .iter()
+        .filter(|line| line.contains("state=SLEEPING"))
+        .collect();
+    assert_eq!(sleeping.len(), 2, "둘 다 잠들어 있어야 한다: {sleeping:?}");
+
+    // blog를 깨우고 다시 찍는다.
+    let response = daemon.get("blog.localhost");
+    assert_eq!(response.status, 200);
+    let app_pid = response.body.trim().to_owned();
+    assert!(!app_pid.is_empty(), "echo-server reports its pid");
+
+    let before = daemon.output().len();
+    daemon.snapshot();
+    // 출력을 한 번만 읽는다. 두 번 읽으면 그 사이에 자라 서로 다른 것을 본다.
+    wait_for("the second snapshot", Duration::from_secs(10), || {
+        let output = daemon.output();
+        output.len() > before
+            && output[before..]
+                .iter()
+                .any(|line| line.contains("status snapshot"))
+    });
+
+    let output = daemon.output();
+    let running = output[before..]
+        .iter()
+        .find(|line| line.contains("app=\"blog\"") && line.contains("state=RUNNING"))
+        .expect("blog is reported as running");
+
+    // **OS pid가 맞아야 한다.** `proc#N`은 내부 식별자라 ps와 맞출 수 없다.
+    assert!(
+        running.contains(&format!("pid=\"{app_pid}\"")),
+        "보고된 OS pid가 app이 알린 것과 달라야 하지 않는다 (app={app_pid}): {running}",
+    );
+    assert!(
+        running.contains("process=\"proc#"),
+        "내부 식별자도 함께 보여야 한다: {running}",
+    );
+
+    // api는 여전히 잠들어 있다 — 스냅샷이 상태를 바꾸지 않는다.
+    assert!(
+        output[before..]
+            .iter()
+            .any(|line| line.contains("app=\"api\"") && line.contains("state=SLEEPING")),
+        "스냅샷은 어떤 app도 깨우지 않는다",
+    );
+}

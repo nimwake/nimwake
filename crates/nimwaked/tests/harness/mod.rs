@@ -261,6 +261,14 @@ impl Daemon {
     }
 
     /// daemon이 지금까지 출력한 줄들.
+    /// 지금 상태를 로그에 쓰게 한다. (PRD §79)
+    #[cfg(unix)]
+    pub fn snapshot(&self) {
+        let pid = nix::unistd::Pid::from_raw(i32::try_from(self.child.id()).unwrap_or(i32::MAX));
+        nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGUSR1)
+            .expect("SIGUSR1 is delivered");
+    }
+
     /// manifest를 다시 읽게 한다. (PRD §76)
     ///
     /// 반환 뒤 바로 결과가 보이지는 않는다. 재적재는 비동기이므로 호출하는 쪽이

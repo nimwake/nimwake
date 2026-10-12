@@ -42,7 +42,7 @@ Nimwake 제품 요구사항 정의서. **이 트리가 원장(Single Source of T
 
 - [Target Environments와 외부 의존성](04-platform/01-environments.md) — `§46–§48`
 - [Android Deployment와 검증](04-platform/02-android.md) — `§49–§51`
-- [Host Interface](04-platform/03-host-interface.md) — `§74`
+- [Host Interface](04-platform/03-host-interface.md) — `§74`, `§79`
 
 ## Post Core MVP — `05-beyond-mvp/`
 
@@ -62,7 +62,7 @@ Nimwake 제품 요구사항 정의서. **이 트리가 원장(Single Source of T
 `§N`은 문서 간 참조를 위한 **안정 식별자**다.
 
 - 섹션을 다른 파일로 옮기더라도 번호는 유지한다.
-- 새 섹션은 기존 번호 사이에 끼워 넣지 않고 **다음 빈 번호를 사용한다.** (현재 최대: `§78`)
+- 새 섹션은 기존 번호 사이에 끼워 넣지 않고 **다음 빈 번호를 사용한다.** (현재 최대: `§79`)
 - 따라서 파일 안에서 번호가 연속하지 않을 수 있다. 읽는 순서는 파일 이름의 `NN` 접두사가 결정한다.
 
 ### 설계 리뷰로 추가된 섹션
@@ -80,6 +80,7 @@ Nimwake 제품 요구사항 정의서. **이 트리가 원장(Single Source of T
 | `§76` | Manifest Reload          | [Application Manifest와 Readiness](02-architecture/05-manifest-and-readiness.md) |
 | `§77` | Crash-Loop Backoff       | [Failure Handling](02-architecture/08-failure-handling.md)    |
 | `§78` | Memory Admission Control | [Gateway와 Request Lease](02-architecture/06-gateway-and-requests.md) |
+| `§79` | Status Snapshot          | [Host Interface](04-platform/03-host-interface.md)            |
 
 ---
 

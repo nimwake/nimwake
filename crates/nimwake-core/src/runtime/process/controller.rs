@@ -37,6 +37,14 @@ enum Control {
 pub(super) struct ControllerHandle {
     control: mpsc::Sender<Control>,
     exit: watch::Receiver<Option<ExitStatus>>,
+    /// OS의 pid. 운영자가 `ps`·`/proc`과 맞춰 보는 값이다. (PRD §79)
+    os_pid: u32,
+}
+
+impl ControllerHandle {
+    pub(super) const fn os_pid(&self) -> u32 {
+        self.os_pid
+    }
 }
 
 #[async_trait]
@@ -126,6 +134,7 @@ pub(super) fn spawn(
     Ok(Arc::new(ControllerHandle {
         control: control_tx,
         exit: exit_rx,
+        os_pid: pid,
     }))
 }
 

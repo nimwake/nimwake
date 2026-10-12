@@ -36,7 +36,7 @@ Scale-to-Zero application lifecycle. 요청이 오면 깨우고, 쓰지 않으�
 | 장시간 운용 | CI 측정 구간은 분 단위다. 실기기에서 **72.0시간을 완주했다**(daemon 재시작 0회 · 요청 실패 0/862 · RSS 감소). 그 build는 `d7c5590`이고 §76·§77·§78은 기기에서 돌지 않았다. 판정은 `nimwake-android` 소관 |
 | manifest 재적재 | `SIGHUP`으로 된다. 돌고 있는 application은 건드리지 않는다 (PRD §76) |
 | crash-loop backoff | 60초 안에 실패 3회면 재시도를 미룬다. 1초부터 2배씩, 상한 30초 (PRD §77) |
-| 운영 도구 | `nimwake status`도 admin IPC도 없다 |
+| 운영 도구 | `SIGUSR1`로 상태를 로그에 찍는다 (PRD §79). `nimwake status` CLI와 admin IPC는 없다 |
 
 [완료 체크리스트](.docs/phases/phase-1/04-acceptance.md)에 항목별 근거가 있다.
 

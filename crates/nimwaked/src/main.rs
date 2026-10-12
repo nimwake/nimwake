@@ -142,6 +142,8 @@ fn load(apps_dir: &Path, gateway_port: u16) -> Result<Vec<AppSpec>, Failure> {
 fn serve(specs: Vec<AppSpec>, options: &Options) -> Result<(), Failure> {
     use std::sync::Arc;
 
+    use tokio::signal::unix::SignalKind;
+
     use nimwake_core::runtime::ProcessRuntime;
     use nimwake_core::{AppRegistry, Gateway};
     use tracing::{info, warn};
@@ -177,6 +179,15 @@ fn serve(specs: Vec<AppSpec>, options: &Options) -> Result<(), Failure> {
             Failure::other(format!("failed to read the listen address: {error}"))
         })?;
 
+        // **신호를 알림보다 먼저 등록한다.**
+        //
+        // `SIGHUP`과 `SIGUSR1`의 기본 동작은 **프로세스 종료**다. 아래 `listening on`
+        // 줄을 보고 바로 신호를 보내는 쪽(supervisor·스크립트·테스트)이 있으므로,
+        // 등록이 늦으면 그 창에서 daemon이 죽는다. 창이 좁아 재현은 어렵지만
+        // 기본 동작이 종료인 신호에 경쟁을 남겨 둘 이유가 없다.
+        let hangup = signal_stream(SignalKind::hangup(), "SIGHUP");
+        let user1 = signal_stream(SignalKind::user_defined1(), "SIGUSR1");
+
         if !addr.ip().is_loopback() {
             // 외부 노출은 opt-in이다. 선택했다는 사실을 남긴다. (PRD §74, §46)
             warn!(%addr, "gateway is reachable beyond loopback; Nimwake provides no TLS or auth");
@@ -192,13 +203,18 @@ fn serve(specs: Vec<AppSpec>, options: &Options) -> Result<(), Failure> {
         //
         // gateway와 같은 수명이다. serve가 끝나면 더 받을 이유가 없다.
         let reloader = tokio::spawn(reload_on_hangup(
+            hangup,
             Arc::clone(&registry),
             apps_dir,
             requested.port(),
         ));
 
+        // `SIGUSR1`마다 상태를 로그에 쓴다. (PRD §79)
+        let reporter = tokio::spawn(report_on_usr1(user1, Arc::clone(&registry)));
+
         gateway.serve(shutdown_signal()).await;
         reloader.abort();
+        reporter.abort();
 
         // child process의 수명은 daemon의 수명을 넘지 않는다. (Invariant 10 / PRD §71)
         info!("stopping every application");
@@ -206,6 +222,84 @@ fn serve(specs: Vec<AppSpec>, options: &Options) -> Result<(), Failure> {
 
         Ok(())
     })
+}
+
+/// 신호 스트림을 등록한다. 실패하면 그 신호 기능만 꺼진다.
+///
+/// 등록을 **알림(`listening on`)보다 먼저** 해야 한다. `SIGHUP`·`SIGUSR1`의 기본
+/// 동작은 프로세스 종료이기 때문이다.
+#[cfg(unix)]
+fn signal_stream(
+    kind: tokio::signal::unix::SignalKind,
+    name: &str,
+) -> Option<tokio::signal::unix::Signal> {
+    match tokio::signal::unix::signal(kind) {
+        Ok(stream) => Some(stream),
+        Err(error) => {
+            error!(%error, signal = name, "failed to listen for a signal; that feature is off");
+            None
+        }
+    }
+}
+
+/// `SIGUSR1`마다 지금 상태를 로그에 한 번 쓴다. (PRD §79)
+///
+/// **돌고 있는 daemon에게 "무슨 버전이고 지금 무엇을 하고 있나"를 물을 창구다.**
+///
+/// `deploy`는 떠 있는 process를 바꾸지 않으므로 디스크의 바이너리와 돌고 있는
+/// 것이 다를 수 있다. 실제로 그 차이를 모르고 72시간 측정을 시작할 뻔했다.
+///
+/// gateway에 붙이지 않는다. §74는 외부 노출을 opt-in으로 두고 Core는 인증을
+/// 제공하지 않는다 — `--listen 0.0.0.0`으로 열면 application 이름과 pid가 LAN의
+/// 누구에게나 보인다. 신호는 같은 uid를 요구하므로 새 공격면이 없다.
+///
+/// 상태를 바꾸지 않는다. `Status`는 actor를 깨우지 않고 현재 상태만 읽는다.
+#[cfg(unix)]
+async fn report_on_usr1(
+    user1: Option<tokio::signal::unix::Signal>,
+    registry: std::sync::Arc<nimwake_core::AppRegistry>,
+) {
+    use tracing::{info, warn};
+
+    let Some(mut user1) = user1 else { return };
+
+    while user1.recv().await.is_some() {
+        let apps = registry.apps();
+
+        // 사람이 읽는다. 기계가 읽는 형식을 약속하지 않는다. (PRD §79)
+        //
+        // `println!`이 아니라 로그로 보내면 timestamp가 붙고 supervisor가 이미
+        // 모으고 있는 곳에 들어간다.
+        info!(
+            version = env!("CARGO_PKG_VERSION"),
+            apps = apps.len(),
+            "status snapshot",
+        );
+
+        for handle in apps {
+            match handle.status().await {
+                Ok(status) => info!(
+                    app = status.name,
+                    host = handle.host(),
+                    state = %status.state,
+                    pid = status.os_pid.map_or_else(|| "-".to_owned(), |pid| pid.to_string()),
+                    process = status.process_id.map_or_else(|| "-".to_owned(), |id| id.to_string()),
+                    active = status.active_requests,
+                    pending = status.pending_waiters,
+                    since_ms = status.since.map_or(0, |since| since.as_millis()),
+                    error = status.last_error.map(|error| error.to_string()).unwrap_or_default(),
+                    "  app",
+                ),
+                // actor가 내려갔으면 그 사실이 상태다. 전체를 멈추지 않는다.
+                Err(error) => warn!(
+                    app = handle.name(),
+                    host = handle.host(),
+                    %error,
+                    "  app is unreachable",
+                ),
+            }
+        }
+    }
 }
 
 /// `SIGHUP`마다 manifest를 다시 읽어 차이만 적용한다. (PRD §76)
@@ -217,20 +311,14 @@ fn serve(specs: Vec<AppSpec>, options: &Options) -> Result<(), Failure> {
 /// 구분할 수 없고, 후자일 때 전부 내리면 복구가 어렵다.
 #[cfg(unix)]
 async fn reload_on_hangup(
+    hangup: Option<tokio::signal::unix::Signal>,
     registry: std::sync::Arc<nimwake_core::AppRegistry>,
     apps_dir: std::path::PathBuf,
     gateway_port: u16,
 ) {
-    use tokio::signal::unix::{signal, SignalKind};
     use tracing::{info, warn};
 
-    let mut hangup = match signal(SignalKind::hangup()) {
-        Ok(signal) => signal,
-        Err(error) => {
-            error!(%error, "failed to listen for SIGHUP; manifest reload is unavailable");
-            return;
-        }
-    };
+    let Some(mut hangup) = hangup else { return };
 
     let _ = gateway_port;
 

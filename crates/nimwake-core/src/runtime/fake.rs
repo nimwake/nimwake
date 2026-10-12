@@ -94,7 +94,7 @@ impl ProcessControl for DetachedProcess {
 /// 실재하지 않는 process를 가리키는 [`ProcessHandle`]을 만든다. 테스트 전용이다.
 #[must_use]
 pub fn detached_handle(process_id: ProcessId) -> ProcessHandle {
-    ProcessHandle::new(process_id, Arc::new(DetachedProcess))
+    ProcessHandle::new(process_id, None, Arc::new(DetachedProcess))
 }
 
 #[derive(Debug)]
@@ -242,7 +242,7 @@ impl Runtime for FakeRuntime {
 
         let addr = SocketAddr::from(([127, 0, 0, 1], spec.server.port));
         Ok(StartedProcess {
-            handle: ProcessHandle::new(process_id, process),
+            handle: ProcessHandle::new(process_id, None, process),
             backend: Backend::new(addr),
             timings: StartTimings::instant(),
         })
