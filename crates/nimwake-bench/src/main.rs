@@ -41,6 +41,12 @@ const STORM_REQUESTS: usize = 1000;
 /// warm path 표본 수.
 const WARM_REQUESTS: usize = 2000;
 
+/// warm path의 기본 동시 연결 수.
+///
+/// CI runner의 무릎은 50이므로 8은 그 아래다. 저사양 기기에서는 `--warm-connections`로
+/// 내려야 한다. (PRD §50)
+const WARM_CONNECTIONS: usize = 8;
+
 /// lifecycle stress 기본값. (PRD §43)
 const STRESS_CYCLES: usize = 1000;
 const STRESS_APPS: usize = 10;
@@ -164,6 +170,13 @@ struct Options {
     baseline_out: Option<PathBuf>,
     commit: String,
     max_concurrency: usize,
+    /// warm path를 몇 개의 동시 연결로 재는가.
+    ///
+    /// **무릎보다 높게 재면 뜻이 없다.** 기기의 무릎은 동시성 1이었고 기본값
+    /// 8로 재니 direct backend 쪽이 더 느려져 overhead가 음수로 나왔다 —
+    /// `echo-server` fixture가 그 농도에서 nimwaked보다 느리기 때문이다.
+    /// 비교 기준이 병목이면 overhead를 재는 것이 아니다. (PRD §50)
+    warm_connections: usize,
     stress: bool,
     stress_cycles: usize,
     stress_apps: usize,
@@ -187,6 +200,7 @@ impl Options {
             baseline_out: None,
             commit: std::env::var("GITHUB_SHA").unwrap_or_else(|_| "unknown".to_owned()),
             max_concurrency: usize::MAX,
+            warm_connections: WARM_CONNECTIONS,
             stress: false,
             stress_cycles: STRESS_CYCLES,
             stress_apps: STRESS_APPS,
@@ -219,6 +233,13 @@ impl Options {
                         .parse()
                         .map_err(|_| "`--stress-apps` expects a number".to_owned())?;
                 }
+                "--warm-connections" => {
+                    options.warm_connections = value()?
+                        .parse::<usize>()
+                        .map_err(|_| "`--warm-connections` expects a number".to_owned())?
+                        .max(1);
+                }
+
                 "--max-concurrency" => {
                     options.max_concurrency = value()?
                         .parse()
@@ -273,16 +294,18 @@ fn measure_warm(options: &Options) -> Result<WarmResult, String> {
     get(daemon.port(), "warm.localhost").map_err(|error| format!("warm-up failed: {error}"))?;
 
     // 쌍마다 두 요청을 보내므로 쌍 수는 절반이다. 총 요청 수는 같다.
+    let connections = options.warm_connections;
     let paired = load_paired(
         direct_port,
         daemon.port(),
         "warm.localhost",
-        8,
-        WARM_REQUESTS / 16,
+        connections,
+        (WARM_REQUESTS / 2).div_ceil(connections * 2).max(1),
     );
 
     let result = WarmResult {
         paired,
+        connections,
         rss: daemon::resident_memory(daemon.pid()),
         fds: daemon::open_descriptors(daemon.pid()),
     };
@@ -417,6 +440,8 @@ pub struct PairedLoad {
 
 pub struct WarmResult {
     pub paired: PairedLoad,
+    /// 이 측정에 쓴 동시 연결 수. 무릎과 비교해야 뜻이 있다. (PRD §50)
+    pub connections: usize,
     pub rss: Option<u64>,
     pub fds: Option<usize>,
 }
