@@ -73,9 +73,8 @@ fn run() -> Result<String, String> {
     let options = Options::from_args()?;
     let mut report = Report::new(&options.commit);
 
-    let direct = measure_direct(&options)?;
     let warm = measure_warm(&options)?;
-    report.warm_path(direct, warm);
+    report.warm_path(warm);
 
     let storm = measure_cold_start_storm(&options)?;
     report.cold_start(storm);
@@ -245,22 +244,17 @@ impl Options {
     }
 }
 
-/// Nimwake를 거치지 않은 baseline. 같은 runner에서 재야 비교가 성립한다. (PRD §42)
-fn measure_direct(options: &Options) -> Result<stats::Summary, String> {
-    let port = free_port();
-    let mut backend = Backend::start(&options.echo_server, port)?;
-
+/// 이미 RUNNING인 app으로 가는 요청과 **같은 조건의** direct 요청. (PRD §42, §50)
+///
+/// 두 경로를 한 번에 잰다. 따로 재면 각자 최대 rps로 밀어 부하가 달라지고,
+/// 그 상태로 백분위를 빼면 overhead가 아니다. (`load_paired` 참고)
+fn measure_warm(options: &Options) -> Result<WarmResult, String> {
+    let direct_port = free_port();
+    let mut backend = Backend::start(&options.echo_server, direct_port)?;
     wait_for("the backend to listen", Duration::from_secs(10), || {
-        is_listening(port)
+        is_listening(direct_port)
     });
 
-    let summary = load(port, "direct.localhost", 8, WARM_REQUESTS / 8);
-    backend.stop();
-    Ok(summary)
-}
-
-/// 이미 RUNNING인 app에 보내는 요청. Nimwake 자체의 overhead만 남는다. (PRD §42)
-fn measure_warm(options: &Options) -> Result<WarmResult, String> {
     let apps = Apps::new("warm").map_err(|error| error.to_string())?;
     let app_port = free_port();
     apps.app(
@@ -278,17 +272,151 @@ fn measure_warm(options: &Options) -> Result<WarmResult, String> {
     // 측정 전에 깨워 둔다. cold start가 warm 표본에 섞이면 안 된다.
     get(daemon.port(), "warm.localhost").map_err(|error| format!("warm-up failed: {error}"))?;
 
-    let summary = load(daemon.port(), "warm.localhost", 8, WARM_REQUESTS / 8);
+    // 쌍마다 두 요청을 보내므로 쌍 수는 절반이다. 총 요청 수는 같다.
+    let paired = load_paired(
+        direct_port,
+        daemon.port(),
+        "warm.localhost",
+        8,
+        WARM_REQUESTS / 16,
+    );
 
-    Ok(WarmResult {
-        summary,
+    let result = WarmResult {
+        paired,
         rss: daemon::resident_memory(daemon.pid()),
         fds: daemon::open_descriptors(daemon.pid()),
-    })
+    };
+    backend.stop();
+    Ok(result)
+}
+/// direct backend와 gateway를 **번갈아** 때린다. (PRD §50)
+///
+/// 두 경로를 따로 돌리면 각자 낼 수 있는 최대 rps로 밀기 때문에 기계에 걸리는
+/// 부하가 다르다. 그 상태로 백분위를 빼면 overhead가 아니다 — 기기에서는
+/// direct 50 rps 대 nimwake 25 rps로 direct 쪽이 더 느려져 **부호까지 뒤집혔다.**
+///
+/// 번갈아 보내면 두 경로가 같은 worker 수, 같은 순간의 기계 상태를 공유한다.
+/// 그리고 **요청 쌍마다 차이를 기록한다** — 백분위를 빼는 것이 아니라
+/// 차이의 백분위를 낸다. 전자는 순서통계량 차이이고 후자가 overhead다.
+fn load_paired(
+    direct_port: u16,
+    gateway_port: u16,
+    gateway_host: &str,
+    connections: usize,
+    per_connection: usize,
+) -> PairedLoad {
+    let started = Instant::now();
+
+    let workers: Vec<_> = (0..connections)
+        .map(|_| {
+            let gateway_host = gateway_host.to_owned();
+            spawn_client(move || {
+                let mut direct = Samples::default();
+                let mut gateway = Samples::default();
+                // 부호 있는 나노초로 담는다. `Duration`은 음수를 담지 못하고,
+                // 음수를 0으로 내리면 분포가 위로 치우쳐 overhead를 **크게** 만든다.
+                let mut diffs: Vec<i64> = Vec::with_capacity(per_connection);
+
+                for _ in 0..per_connection {
+                    // 순서를 고정한다. direct가 늘 먼저이므로 gateway는 조금 뒤의
+                    // 기계 상태를 본다. 그 치우침은 overhead를 크게 만드는 쪽이다 —
+                    // 작게 만드는 쪽으로 틀리지 않는다.
+                    let at = Instant::now();
+                    let direct_ok =
+                        matches!(get(direct_port, "direct.localhost"), Ok(r) if r.status == 200);
+                    let direct_latency = at.elapsed();
+
+                    let at = Instant::now();
+                    let gateway_ok =
+                        matches!(get(gateway_port, &gateway_host), Ok(r) if r.status == 200);
+                    let gateway_latency = at.elapsed();
+
+                    if direct_ok {
+                        direct.record(direct_latency);
+                    } else {
+                        direct.record_error();
+                    }
+
+                    if gateway_ok {
+                        gateway.record(gateway_latency);
+                    } else {
+                        gateway.record_error();
+                    }
+
+                    // 둘 다 성공한 쌍만 센다. 한쪽이 실패한 쌍의 차이는 뜻이 없다.
+                    if direct_ok && gateway_ok {
+                        let g = i64::try_from(gateway_latency.as_nanos()).unwrap_or(i64::MAX);
+                        let d = i64::try_from(direct_latency.as_nanos()).unwrap_or(i64::MAX);
+                        diffs.push(g - d);
+                    }
+                }
+
+                (direct, gateway, diffs)
+            })
+        })
+        .collect();
+
+    let mut direct = Samples::default();
+    let mut gateway = Samples::default();
+    let mut diffs: Vec<i64> = Vec::new();
+
+    for worker in workers {
+        if let Ok((partial_direct, partial_gateway, partial_diffs)) = worker.join() {
+            direct.merge(partial_direct);
+            gateway.merge(partial_gateway);
+            diffs.extend(partial_diffs);
+        }
+    }
+
+    let wall = started.elapsed();
+    direct.set_wall(wall);
+    gateway.set_wall(wall);
+
+    let inverted = diffs.iter().filter(|diff| **diff < 0).count();
+
+    PairedLoad {
+        direct: direct.summarize(),
+        gateway: gateway.summarize(),
+        overhead_p50_ns: signed_percentile(&mut diffs, 0.50),
+        overhead_p95_ns: signed_percentile(&mut diffs, 0.95),
+        pairs: diffs.len(),
+        inverted,
+    }
+}
+
+/// 부호 있는 나노초의 백분위. 가장 가까운 순위를 쓴다.
+///
+/// `stats::percentile_of`는 `Duration`을 받으므로 음수를 담을 수 없다.
+/// 쌍마다의 차이는 음수가 될 수 있고 **그것을 지우지 않는다.**
+fn signed_percentile(values: &mut [i64], percent: f64) -> Option<i64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable();
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let rank = (percent * (values.len() - 1) as f64).round() as usize;
+    values.get(rank.min(values.len() - 1)).copied()
+}
+
+/// 짝지어 측정한 warm path. (PRD §50)
+pub struct PairedLoad {
+    pub direct: stats::Summary,
+    pub gateway: stats::Summary,
+    /// 요청 쌍마다의 차이에서 낸 백분위. **백분위를 뺀 값이 아니다.**
+    pub overhead_p50_ns: Option<i64>,
+    pub overhead_p95_ns: Option<i64>,
+    /// 둘 다 성공한 쌍의 수.
+    pub pairs: usize,
+    /// gateway가 더 빨랐던 쌍의 수. 잡음의 크기를 보여 준다.
+    pub inverted: usize,
 }
 
 pub struct WarmResult {
-    pub summary: stats::Summary,
+    pub paired: PairedLoad,
     pub rss: Option<u64>,
     pub fds: Option<usize>,
 }
