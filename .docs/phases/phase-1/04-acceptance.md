@@ -229,23 +229,43 @@ baseline       label=v0.1.0-rc1 + 지표 6개. 다음 release가 이것과 비�
 
 ```text
 기기        Samsung Galaxy A51 5G · Android 13 · Termux + proot Ubuntu 26.04
-Core        v0.1.0-rc1 이후 main (aarch64-unknown-linux-musl)
+Core        d7c5590 (`#28` 시점의 main, aarch64-unknown-linux-musl)
+            **rc3보다 오래된 build다.** 이후 main에 §76·§77·§78이 들어왔다
 workload    5분마다 요청 하나. 매번 잠든 앱을 깨운다
-구간        2026-10-09 13:44 ~ 10-11 16:08 (50.4시간, 표본 604개, 진행 중)
+구간        2026-10-09 13:44:06 ~ 10-12 13:42:23 (**72.0시간, 표본 862개, 완주**)
 ```
 
 | §51 관찰 항목 | 결과 |
 | --- | --- |
-| daemon survival | **pid 12821 하나.** 604 표본 전부 같은 pid — 재시작 0회 |
-| Android background killing | 관측되지 않았다. state가 604회 모두 `RUNNING` |
-| memory usage | RSS 2104 → 1296 KB. **줄었다.** 12시간 뒤 약 1240KB에서 평평하다 |
-| battery usage | 100% → 84%. 시간당 0.32% |
-| temperature | 27~29 °C. 추세 없음 |
-| wake reliability | 요청 실패 **0건 / 604건.** `apps_before`가 604회 모두 0이므로 매번 진짜 cold start다 |
+| daemon survival | **pid 12821 하나.** 862 표본 전부 같은 pid — 재시작 0회 |
+| Android background killing | 관측되지 않았다. **최대 표본 간격 302초**(주기 300초)이므로 샘플러도 Termux도 멈춘 적이 없다 |
+| memory usage | RSS 2104 → 1308 KB (max 2332). **줄었다.** 기울기 -9.07 KB/h |
+| battery usage | 100% → 79%. 시간당 0.29% |
+| temperature | 26.3~30.0 °C. 추세 없음 |
+| wake reliability | 요청 실패 **0건 / 862건.** `apps_before`가 862회 모두 0이므로 매번 진짜 cold start다 |
 | network recovery | 이 구간에서 끊김이 관측되지 않았다 (별도 시나리오는 A5) |
-| orphan process | app process 601개 / 표본 604개. 요청마다 새 process이고 쌓이지 않았다 |
-| storage growth | free 99608 → 98408 MB. 50시간에 1.2GB — 로그(`nimwaked.log` 950KB)보다 크므로 다른 요인이 섞여 있다 |
-| repeated lifecycle stability | cold start p50 47.6 · p95 56.1 · p99 108.7 · max 132.6 ms |
+| orphan process | 요청 직전 깨어 있는 app **0 표본.** 쌓이지 않았다 |
+| storage growth | free 99608 → 98404 MB. 72시간에 1.204GB. **nimwake 몫은 1.3MB뿐이다** — `.nimwake-host/logs`가 1356KB이고 `nimwaked.log`가 1.19MB다. 나머지는 OS와 다른 앱이다 |
+| repeated lifecycle stability | cold start p50 47 · p95 56 · max 133 ms |
+
+처음 24시간만 따로 보아도 같다 — 표본 288개, 실패 0, 재시작 0, RSS 2104 → 1240 KB.
+
+### 로그의 39.3%가 ANSI escape였다
+
+이 soak이 드러낸 결함이다. `nimwaked.log` 1.19MB 중 **492KB가 색상 코드**였다.
+`tracing_subscriber::fmt()`의 기본값이 색 켬이고, supervisor가 stdout을 파일로
+리다이렉트하는데 터미널 여부를 보지 않았다.
+
+같은 workload를 20사이클 돌려 쟀다.
+
+```text
+고치기 전       23,542 bytes
+NO_COLOR=1      14,295 bytes
+고친 뒤         14,299 bytes   ← is_terminal() 판정
+```
+
+`with_ansi(std::io::stdout().is_terminal())`로 고쳤고, e2e가 pipe로 나가는 로그에
+escape가 없음을 단언한다. **그 테스트가 있었다면 72시간을 기다리지 않고 잡혔다.**
 
 ### RSS가 줄었다
 
@@ -283,7 +303,7 @@ soak CSV에는 **구간 분해가 없다.** `seconds`는 HTTP 응답 시간이�
 | 실제 서비스의 cold start | Next.js **기동 206ms**, 첫 응답 396ms. 목표 5초에 여유가 크다. 다만 한 페이지짜리 앱이므로 하한이다 |
 | readiness의 의미 | TCP connect는 application readiness가 아니다. Next.js는 port를 열고도 190ms 더 걸린다 |
 | 동시 기동의 자원 한계 | Next.js 앱 8개를 동시에 깨우면 직렬화 없이 전부 0.87초에 뜬다. 앱당 96MB로 합계 768MB. **입장 제어가 생겼다**(PRD §78, `--min-free-memory-mb`) — 하나씩 쌓이는 경우는 막는다. **동시에 깨어나는 경우는 막지 못한다**: app의 메모리 비용을 기동 전에 알 수 없다. eviction(§54)은 여전히 Post-MVP |
-| 장시간 운용 | CI에서의 최장 측정은 105초(stress) / 120초(sustained)다. **실기기에서는 50.4시간을 측정했다** — daemon 재시작 0회, 요청 실패 0/604, RSS 2104→1296KB(감소). 판정은 `nimwake-android` 소관이고 아래에 수치를 적어 둔다 |
+| 장시간 운용 | CI에서의 최장 측정은 105초(stress) / 120초(sustained)다. **실기기에서 72.0시간을 완주했다** — daemon 재시작 0회, 요청 실패 0/862, RSS 2104→1308KB(감소), 최대 표본 간격 302초(주기 300초). **단 build가 d7c5590이고 rc3보다 오래됐다** — 이후 §76·§77·§78이 main에 들어왔고 그 코드는 기기에서 돌지 않았다. 판정은 `nimwake-android` 소관 |
 | crash-loop | backoff가 있다 (PRD §77). 같은 기계에서 before/after를 쟀다 — 20초 부하에 **기동 시도 3,653·4,728회 → 14·14회**(초당 183~236 → 0.7). 14는 설계가 예측한 값과 같다(앱당 즉시 3회 + 1·2·4·8·16초 지연 = 7회, 앱 2개). 누수는 전부터 없었다 — 동시 자식 ≤ app 수, 정착 후 zombie 0, FD 증가 없음 |
 | manifest 재적재 | `SIGHUP`으로 된다 (PRD §76). 바뀌지 않은 application은 건드리지 않는다. 검증 실패와 빈 집합은 거부하고 기존 상태를 유지한다 |
 | 운영 도구 | `nimwake status`도 admin IPC도 없다 (Post-MVP) |
