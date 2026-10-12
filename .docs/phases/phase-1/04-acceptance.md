@@ -280,13 +280,40 @@ rc4에서 1000 사이클 × 10 app을 218초에 돌렸다. spawn 1000 · 실패 
 좀비 0 · 열린 port 0 · FD 12 → 12. **깨우고 재우기를 1000번 반복해도 새는 것이
 없다.** rc5는 런타임이 같다.
 
-### 아직 분해에 없는 것
+### proxy connect는 중첩된 다른 표에 있다
 
-`proxy connect` 구간은 `nimwake::startup`이 아니라 `nimwake::request`의
-`proxy_connect_us`에 있다. `--trace-json`으로 꺼낼 수 있지만 bench가 요청 trace를
-모으지 않아 cold start 분해에 들어가지 않는다.
+§50이 cold start 분해를 "spawn / readiness / **proxy connect**"로 적었다.
+앞의 둘은 `nimwake::startup`에 있고 proxy connect는 `nimwake::request`에 있다.
 
-위 표의 "나머지"(CI 77.0% · 기기 23.8%)가 그 구간과 app 응답을 담고 있다.
+**한 표에 섞으면 거짓 분해가 된다.** 두 trace는 중첩 관계다.
+
+```text
+ttfb
+├── routing          gateway 자체 처리
+├── acquire          깨우기 — cold start면 기동 분해가 이 안에 있다
+├── proxy connect    backend와 TCP 연결 수립까지
+└── backend          app이 응답 header를 만든 시간
+```
+
+bench가 이제 요청 trace도 모아 **따로 표를 낸다.** 중첩을 수치로 확인했다 —
+로컬에서 `acquire` p50 1.09ms가 기동 `total` 1.02ms를 담고, 차이 0.07ms가 actor가
+기동을 결정하기 전의 mailbox 대기다.
+
+```text
+routing          0.00 ms
+acquire          1.09 ms   ⊇ 기동 total 1.02 ms
+proxy connect    0.03 ms
+backend          0.08 ms
+ttfb             1.24 ms
+```
+
+구간마다 따로 낸 백분위이므로 **더해서 ttfb가 되지 않는다.** 같은 요청의 값이 아니다.
+
+baseline에 `request_routing_ms` · `request_acquire_ms` ·
+`request_proxy_connect_ms` · `request_backend_ms` · `request_ttfb_ms`를 남긴다.
+
+CI ↔ 기기 비교는 **다음 릴리스에서** 채운다. 기기는 rc5로 72h soak 중이고 bench를
+다시 돌릴 수 없다.
 
 ---
 
