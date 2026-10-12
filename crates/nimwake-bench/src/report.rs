@@ -91,6 +91,7 @@ impl Report {
             baseline.set("warm_direct_p95_ms", millis(direct.p95));
             baseline.set("warm_direct_rps", direct.rps);
             baseline.set("warm_rps", nimwake.rps);
+            baseline.set("warm_connections", warm.connections as f64);
             if let Some(rss) = warm.rss {
                 baseline.set("daemon_rss_mb", rss as f64 / (1024.0 * 1024.0));
             }
@@ -413,6 +414,16 @@ impl Report {
         );
     }
 
+    /// 이번 실행이 측정한 무릎. sweep이 없으면 `None`.
+    fn knee(&self) -> Option<usize> {
+        let points: Vec<(usize, f64)> = self
+            .sweep
+            .iter()
+            .map(|row| (row.concurrency, row.summary.rps))
+            .collect();
+        stats::knee(&points)
+    }
+
     fn render_warm(&self, out: &mut String) {
         let Some(warm) = &self.warm else {
             return;
@@ -454,6 +465,22 @@ impl Report {
         let _ = writeln!(out, "| p95 | {} |", signed_ms(paired.overhead_p95_ns));
         let _ = writeln!(out, "| 쌍 | {} |", paired.pairs);
         let _ = writeln!(out, "| gateway가 더 빨랐던 쌍 | {} |\n", paired.inverted);
+
+        // **무릎보다 높은 농도로 재면 뜻이 없다.** (PRD §50)
+        //
+        // sweep이 뒤에 돌지만 이 시점에 이미 결과가 있다. 기기에서 무릎이 1인데
+        // 기본값 8로 재서 direct 쪽이 더 느려졌고 overhead가 음수로 나왔다 —
+        // `echo-server` fixture가 그 농도에서 nimwaked보다 느리기 때문이다.
+        if let Some(knee) = self.knee() {
+            if warm.connections > knee {
+                let _ = writeln!(
+                    out,
+                    "> **overhead를 읽지 않는다.** 동시 연결 {}로 쟀는데 이 기계의 무릎은 {knee}다. 무릎을 넘기면 direct backend 쪽이 먼저 막혀 비교 기준이 병목이 된다. `--warm-connections {knee}`로 다시 잰다.
+",
+                    warm.connections,
+                );
+            }
+        }
 
         if paired.pairs > 0 && paired.inverted * 2 > paired.pairs {
             let _ = writeln!(
@@ -652,7 +679,7 @@ fn render_trend(out: &mut String, samples: &[Resources]) -> std::fmt::Result {
     writeln!(out, "```text")?;
     writeln!(
         out,
-        "RSS {:.1} MB -> {:.1} MB   (표본 {}개, {}개마다 한 줄)",
+        "RSS {:.1} MB -> {:.1} MB (표본 {}개, {}개마다 한 줄)",
         mb(*min),
         mb(*max),
         values.len(),
