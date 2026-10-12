@@ -100,6 +100,65 @@ waiters = 10,000      ← mailbox 제한만으로는 막지 못한다
 | D26 | overload는 `503`, 기동 실패는 `502`                         | 둘을 같은 코드로 뭉개면 운영자가 "부하 때문인지 app이 깨진 것인지"를 로그 없이 구분할 수 없다.                | [§69](../../prd/02-architecture/06-gateway-and-requests.md)  |
 | D27 | `AppRegistry::shutdown()`이 **정지 완료까지 기다린다**      | 정지 요청만 보내고 반환하면 daemon이 먼저 종료해 `shutdown_timeout_seconds`가 무시된다. SIGTERM을 받고 정리하는 application이 유예를 전혀 받지 못한다. | [§30](../../prd/02-architecture/07-scale-to-zero.md), [§71](../../prd/02-architecture/08-failure-handling.md) |
 
+## 72h soak이 드러낸 것 — 로그의 39.3%가 ANSI escape였다
+
+72시간을 완주했다. 재시작 0회, 실패 0/862, RSS 감소. **그런데 로그를 들여다보니
+색상 코드가 파일에 쌓여 있었다.**
+
+```text
+[2m2026-10-12T04:42:22.517773Z[0m [32m INFO[0m [2mnimwake::startup[0m...
+```
+
+`nimwaked.log` 1.19MB 중 **492KB가 escape sequence**다.
+
+### 왜 이렇게 됐나
+
+`tracing_subscriber::fmt()`의 ANSI 기본값은 **켬**이고, 터미널 여부를 보지 않는다.
+supervisor는 stdout을 파일로 리다이렉트한다. 둘이 만나면 색이 파일에 들어간다.
+
+로그가 stdout으로 간다는 것부터 확인했다 — `fmt()`의 기본 writer다. 파일로
+리다이렉트하니 13줄 중 9줄에 escape가 있었다.
+
+### 얼마를 낭비했나
+
+같은 workload를 20사이클 돌려 쟀다.
+
+```text
+고치기 전       23,542 bytes
+NO_COLOR=1      14,295 bytes
+고친 뒤         14,299 bytes
+```
+
+**39.3%다.** 사이클당 462B. `NO_COLOR=1`과 같은 크기로 떨어졌다 — 4바이트
+차이는 timestamp 자리수다.
+
+### `NO_COLOR`가 아니라 `is_terminal`로 고쳤다
+
+`NO_COLOR=1`을 supervisor에 넣는 것으로도 해결된다. 그렇게 하지 않았다.
+
+**리다이렉트된 stdout에 색을 칠하지 않는 것이 기본이어야 한다.** 호스트마다
+환경 변수를 기억해야 한다면 그것을 잊은 호스트는 모두 같은 낭비를 한다.
+`NO_COLOR`는 그 위의 명시적 재정의로 남는다(tracing-subscriber 0.3.23이 본다).
+
+### 이 테스트가 있었다면 72시간을 기다리지 않았다
+
+e2e harness는 pipe로 읽는다. 터미널이 아니다. **로그에 escape가 없음을 단언하는
+한 줄이면 처음부터 잡혔다.**
+
+뮤테이션으로 확인했다. `is_terminal()`을 `true`로 되돌리면
+
+```text
+pipe로 나가는 로그에 escape sequence가 있다 (5줄)
+```
+
+### soak의 값은 "통과"가 아니라 이것이다
+
+표를 채우는 것이 목적이 아니다. 72시간을 돌려서 **로그 파일을 실제로 들여다본
+덕에** 찾았다. 짧은 테스트로는 1.19MB가 쌓이지 않고, 쌓이지 않으면 들여다볼
+이유가 없다.
+
+---
+
 ## 메모리 입장 제어 (PRD §78)
 
 Post-MVP의 자원 관리(§52~54)에서 **가장 작은 조각만** 당겨왔다. 메모리가 부족할

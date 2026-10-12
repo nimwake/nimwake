@@ -1275,3 +1275,43 @@ fn read_available_mb() -> Option<u64> {
     }
     None
 }
+
+/// 파일이나 pipe로 나갈 때는 **색을 칠하지 않는다.**
+///
+/// 기기 72h soak의 로그에서 이것을 발견했다. `nimwaked.log` 1.19MB 중 **39.3%가
+/// ANSI escape sequence**였다 — 492KB가 색상 코드다. supervisor가 stdout을
+/// 파일로 리다이렉트하는데 기본값이 색 켬이기 때문이다.
+///
+/// 이 테스트가 있었다면 72시간을 기다리지 않고 잡혔다. harness는 pipe로 읽으므로
+/// 터미널이 아니다.
+#[test]
+fn logs_carry_no_ansi_escapes_when_redirected() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "blog", port, Lifecycle::default());
+
+    let daemon = Daemon::start(&apps);
+    assert_eq!(daemon.get("blog.localhost").status, 200);
+
+    wait_for(
+        "the startup trace to be written",
+        Duration::from_secs(5),
+        || {
+            daemon
+                .output()
+                .iter()
+                .any(|line| line.contains("application started"))
+        },
+    );
+
+    let escape = char::from(0x1b_u8);
+    let output = daemon.output();
+    let colored: Vec<&String> = output.iter().filter(|line| line.contains(escape)).collect();
+
+    assert!(
+        colored.is_empty(),
+        "pipe로 나가는 로그에 escape sequence가 있다 ({}줄). 첫 줄: {:?}",
+        colored.len(),
+        colored.first(),
+    );
+}

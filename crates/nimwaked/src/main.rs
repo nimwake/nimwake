@@ -60,6 +60,8 @@ fn main() -> ExitCode {
 /// 요청 구간(`nimwake::request`)은 요청마다 나가므로 평소에는 꺼 둔다.
 /// benchmark mode일 때만 기본 필터를 넓힌다. `RUST_LOG`를 준 쪽이 언제나 우선이다.
 fn init_tracing(json: bool) {
+    use std::io::IsTerminal;
+
     let fallback = if json {
         "info,nimwake::request=debug"
     } else {
@@ -68,15 +70,29 @@ fn init_tracing(json: bool) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(fallback));
 
+    // 로그는 stdout으로 간다. **터미널이 아니면 색을 칠하지 않는다.**
+    //
+    // 기본값은 켬이다. supervisor가 파일로 리다이렉트하면 escape sequence가
+    // 그대로 파일에 쌓인다. 72h 기기 soak의 로그에서 **39.3%가 escape였다** —
+    // 1.19MB 중 492KB. grep과 사람이 읽는 것도 같이 나빠진다.
+    //
+    // `NO_COLOR`는 tracing-subscriber가 따로 본다. 이 판정은 그것과 별개로
+    // "리다이렉트되었는가"를 본다.
+    let ansi = std::io::stdout().is_terminal();
+
     if json {
         tracing_subscriber::fmt()
             .json()
             .with_env_filter(filter)
             .with_current_span(false)
             .with_span_list(false)
+            .with_ansi(ansi)
             .init();
     } else {
-        tracing_subscriber::fmt().with_env_filter(filter).init();
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(ansi)
+            .init();
     }
 }
 
