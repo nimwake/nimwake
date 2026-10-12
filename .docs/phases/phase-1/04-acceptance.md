@@ -222,85 +222,79 @@ baseline       label=v0.1.0-rc1 + 지표 6개. 다음 release가 이것과 비�
 
 ---
 
-## §50 CI Linux ↔ Android 실기기 비교 (1차, d7c5590)
+## §50 CI Linux ↔ Android 실기기 비교 (v0.1.0-rc4)
 
-**비교를 완성하지 못했다.** 두 가지 이유를 먼저 적는다.
+같은 `nimwake-bench`를 같은 workload로 CI runner와 실기기에서 돌려 비교한다.
+cold start 분해는 양쪽 모두 **표본 1,000개**다.
 
-```text
-baseline 형식    d7c5590의 baseline.txt에 §50이 요구하는 절반이 없다
-                 proxy p50 · spawn · readiness · CPU · knee — 전부 rc3에서 추가됐다
-overhead 지표    음수가 나왔다. 아래 참고
-```
-
-그래도 **답이 나온 것이 하나 있다.** §50이 묻는 "저사양 환경에서 어느 구간이
-먼저 무너지는가"다.
-
-### 먼저 무너지는 것은 warm 요청 경로다
-
-| concurrency | p50 | p95 | req/s | errors |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | 7.16 ms | 8.13 ms | 134 | 0 |
-| **10** | 29.81 ms | **1060.49 ms** | 23 | 0 |
-| 50 | 1056.34 ms | 4111.59 ms | 25 | **161** |
-| 100 | 1075.09 ms | 7163.95 ms | 25 | 498 |
-| 1000 | 1052.52 ms | 15418.32 ms | 19 | 17237 |
-
-concurrency 1에서 10으로 가며 **p95가 8ms에서 1,060ms로 130배 뛴다.** CI runner의
-무릎은 50이었고 그때 9,835 rps를 냈다. 기기는 concurrency 1에서 134 rps다.
-
-RSS는 2.0~2.4MB로 전 구간 평평하다. 무너지는 것은 메모리가 아니라 **처리량**이다.
-
-### overhead 지표가 음수로 나왔다
-
-| | direct backend | nimwake | overhead |
+| 지표 | CI Linux | Android 기기 | 배수 |
 | --- | ---: | ---: | ---: |
-| p50 | 27.73 ms | 24.43 ms | **-3.30 ms** |
-| p95 | 1054.92 ms | 1051.85 ms | **-3.07 ms** |
-| p99 | 1076.92 ms | 1064.54 ms | **-12.38 ms** |
-| requests/sec | 50 | 25 | |
+| cold start queue | 0.027 ms | 1.106 ms | **41.0×** |
+| cold start spawn | 0.170 ms | 5.762 ms | **33.9×** |
+| cold start readiness | 0.046 ms | 0.851 ms | 18.5× |
+| cold start total | 0.916 ms | 10.687 ms | 11.7× |
+| daemon RSS | 5.56 MB | **2.05 MB** | 0.4× |
+| CPU (wall 대비) | 103.2 % | **9.3 %** | 0.1× |
+| concurrency knee | 50 (11,036 rps) | **1 (122 rps)** | — |
+| knee p95 | 6.05 ms | 12.36 ms | 2.0× |
 
-proxy를 한 번 더 거치는데 더 빠를 수는 없다. 원인은 표 안에 있다 — **두 실행의
-부하가 다르다.** direct가 50 rps, nimwake가 25 rps다. direct 쪽이 폰을 더 세게
-밀어 더 느려지고, 백분위를 빼니 부호가 뒤집혔다.
+### 먼저 무너지는 것은 process spawn이다
 
-`p95(nimwake) - p95(direct)`는 서로 다른 두 실행의 순서통계량 차이다. CI에서는
-여유가 있어 왜곡이 작지만 **지표 자체가 그렇게 생겨 있다** — 로컬에서도 direct
-31,246 rps 대 nimwake 12,698 rps로 2.5배 차이가 난다.
-
-**고쳤다.** direct와 gateway 요청을 번갈아 보내 같은 worker와 같은 순간의 기계
-상태를 공유하게 했고, **요청 쌍마다 차이를 기록해 그 차이의 백분위**를 낸다.
-백분위를 빼는 것이 아니다.
+절대 배수로는 actor queue가 41배로 가장 크지만 값이 1.1ms다. **분해에서 차지하는
+비중을 보면 답이 분명하다.**
 
 ```text
-          이전 (백분위 차)        이후 (쌍마다의 차이)
-rps       direct 31246 / nw 12698  direct 11964 / nw 11964  ← 구조적으로 같다
-overhead  부호가 뒤집힐 수 있다     p50 +0.31ms · p95 +0.72ms
-역전 쌍    보이지 않았다            1000쌍 중 14 — 잡음의 크기가 보인다
+         queue    spawn     readiness   나머지
+CI        2.9%    18.6%      5.0%       73.5%
+기기     10.3%    53.9%      8.0%       27.8%
 ```
 
-역전 쌍(gateway가 더 빨랐던 쌍)을 0으로 내리지 않는다. 지우면 분포가 위로
-치우쳐 overhead를 크게 만든다. 부호 있는 나노초로 담는다.
+기기에서 cold start의 **절반 이상이 process spawn**이다. CI에서는 5분의 1이다.
+proot(ptrace)이 fork/exec를 감싸는 비용이 여기 드러난다.
 
-쌍의 절반 이상이 역전되면 리포트가 "읽지 않는다"고 적는다 — 그때는 기계가
-포화되어 측정이 잡음에 묻힌 것이다.
+"나머지"는 total에서 세 구간을 뺀 값이고 proxy connect와 app 응답이 들어 있다.
+CI에서 그쪽이 지배적인 것은 구간이 워낙 짧아 상대적으로 커 보이는 것이다.
 
-### cold start 분해는 비교할 수 없다
+### daemon은 기기에서 병목이 아니다
+
+RSS가 CI의 0.4배, CPU가 0.1배다. **적게 쓰는 것이 좋은 소식이 아니다** — 처리량이
+다른 곳에서 막혀 daemon이 할 일이 없다는 뜻이다. 무릎이 동시성 1이고 122 rps다.
+
+막는 것은 proot(ptrace) 비용과 커널 `somaxconn 128`이다. Nimwake 고유 구간이
+아니다. → `nimwake-android` `.docs/validation/08`
+
+### lifecycle stress는 기기에서 깨끗하다
+
+1000 사이클 × 10 app을 218초에 돌렸다.
 
 ```text
-CI (d7c5590)    51.85 ms
-기기            7.79 ms   (queue 1.31 · spawn 5.31 · readiness 1.17)
+spawned processes   1000
+failed requests     0
+orphan processes    0
+zombie processes    0
+ports left open     0
+FD                  12 → 12
+RSS                 2.2 → 2.5 MB
 ```
 
-기기가 6.7배 빠르다는 뜻이 아니다. **d7c5590은 cold start 분해를 표본 하나로
-계산한다** — `#42`에서 고쳐 rc3부터 표본 1,000개를 쓴다. 양쪽 모두 표본 하나이므로
-두 수치는 잡음이다.
+**깨우고 재우기를 1000번 반복해도 새는 것이 없다.** 이것이 기기에서 처음 측정됐다 —
+d7c5590 실행은 `--stress` 없이 돌아 이 절이 없었다.
 
-같은 기기의 72h soak은 요청 전체 지연으로 p50 47ms를 냈다. 7.79ms는 daemon 내부
-구간만이므로 둘이 다른 것을 재는 것도 맞다.
+### 채우지 못한 두 항목
 
-### 다시 할 때
+```text
+proxy overhead     기기 무릎이 1인데 warm 측정이 8 동시 연결이다
+proxy connect 구간  startup trace에 없다. request trace의 proxy_connect_us에 있다
+```
 
-rc3 이후 build를 양쪽에 두어야 한다. 그때 §50의 다섯 항목이 모두 채워진다.
+**proxy overhead** — 무릎을 넘긴 농도로 재면 `echo-server` fixture가 먼저 막혀
+비교 기준이 병목이 된다. 기기에서 direct p50 27.7ms, gateway p50 15.1ms로
+gateway가 더 빨라 `p50`이 **-13.4ms**로 나왔다. `--warm-connections`를 더해
+고쳤지만(#54) 그 코드가 rc4에 없다. 농도 1로 재야 한다.
+
+**proxy connect** — cold start 분해는 `nimwake::startup`의 세 구간(queue · spawn ·
+readiness)이다. proxy connect는 `nimwake::request`의 `proxy_connect_us`에 있고
+`--trace-json`으로 꺼낼 수 있다. bench가 요청 trace를 모으지 않아 분해에 없다.
 
 ---
 
@@ -364,14 +358,17 @@ escape가 없음을 단언한다. **그 테스트가 있었다면 72시간을 �
 Android의 page reclaim이 작용한 것으로 보이며, 어느 쪽이든 **증가가 없다**는 것이
 이 측정의 결론이다.
 
-### 이 수치로 §50 비교를 끝낼 수는 없다
+### soak 수치를 §50 비교에 쓰지 않는다
 
 soak CSV에는 **구간 분해가 없다.** `seconds`는 HTTP 응답 시간이고 CI의
 `cold_start_total_ms`는 기동 구간(queue+spawn+readiness)이다. **다른 것을 재는
 값이므로 나란히 놓으면 안 된다.**
 
-§50이 묻는 "어느 구간이 먼저 무너지는지"를 답하려면 기기에서 `nimwake-bench`를
-한 번 돌려야 한다. 그래서 그 바이너리를 aarch64 asset에 넣었다. (이슈 #25)
+실제로 soak의 cold start p50은 47ms이고 rc4 bench의 기동 구간 total은 10.7ms다.
+6.7배 차이가 "기기가 빠르다"는 뜻이 아니라 **재는 대상이 다르다**는 뜻이다.
+나머지 36ms는 curl 기동 · TCP connect · proxy connect · app 응답이다.
+
+§50 비교는 위의 rc4 절에 있다.
 
 ---
 
