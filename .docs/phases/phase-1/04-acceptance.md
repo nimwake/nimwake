@@ -108,6 +108,7 @@ PRD를 코드와 한 절씩 대조한 결과다. **같은 일을 다시 하지 �
 | §76 Manifest Reload | `test` + `gate` `SIGHUP` 후 app pid가 그대로다 |
 | §77 Crash-Loop Backoff | `test` + `gate` 요청 8회에 기동 시도 3회. 창·지수·상한을 뮤테이션으로 확인 |
 | §78 Memory Admission Control | `test` + `gate` 부족하면 `503`·spawn 0회. 꺼져 있으면 `/proc` 판독 0회 |
+| §79 Status Snapshot | `test` + `gate` `SIGUSR1` → 버전과 app별 상태. OS pid가 app이 알린 것과 일치 |
 
 ### §18은 테스트가 아니라 구조가 보장한다
 
@@ -404,7 +405,7 @@ soak CSV에는 **구간 분해가 없다.** `seconds`는 HTTP 응답 시간이�
 | 장시간 운용 | CI에서의 최장 측정은 105초(stress) / 120초(sustained)다. **실기기에서 72.0시간을 완주했다** — daemon 재시작 0회, 요청 실패 0/862, RSS 2104→1308KB(감소), 최대 표본 간격 302초(주기 300초). **단 build가 d7c5590이고 rc3보다 오래됐다** — 이후 §76·§77·§78이 main에 들어왔고 그 코드는 기기에서 돌지 않았다. 판정은 `nimwake-android` 소관 |
 | crash-loop | backoff가 있다 (PRD §77). 같은 기계에서 before/after를 쟀다 — 20초 부하에 **기동 시도 3,653·4,728회 → 14·14회**(초당 183~236 → 0.7). 14는 설계가 예측한 값과 같다(앱당 즉시 3회 + 1·2·4·8·16초 지연 = 7회, 앱 2개). 누수는 전부터 없었다 — 동시 자식 ≤ app 수, 정착 후 zombie 0, FD 증가 없음 |
 | manifest 재적재 | `SIGHUP`으로 된다 (PRD §76). 바뀌지 않은 application은 건드리지 않는다. 검증 실패와 빈 집합은 거부하고 기존 상태를 유지한다 |
-| 운영 도구 | `nimwake status`도 admin IPC도 없다 (Post-MVP) |
+| 운영 도구 | `SIGUSR1`로 상태를 로그에 찍을 수 있다 (PRD §79) — 버전·state·OS pid·active·pending. `nimwake status` CLI와 admin IPC는 §56 Post-MVP다 |
 
 실측 근거는 [05. 설계 결정 기록](05-design-decisions.md)의 "실측: 실제 애플리케이션"에 있다.
 

@@ -38,18 +38,34 @@ pub trait ProcessControl: Send + Sync + std::fmt::Debug {
 #[derive(Debug, Clone)]
 pub struct ProcessHandle {
     id: ProcessId,
+    /// OS의 pid. 없을 수 있다 — `FakeRuntime`에는 실제 process가 없다.
+    ///
+    /// [`ProcessId`]와 **다른 것이다.** 그쪽은 stale event 판정(Invariant 8)을 위한
+    /// 단조 식별자이고 OS와 무관하다. 이쪽은 운영자가 `ps`·`/proc`과 맞춰 보는 값이다.
+    /// 상태 보고(§79)가 이것을 쓴다.
+    os_pid: Option<u32>,
     control: Arc<dyn ProcessControl>,
 }
 
 impl ProcessHandle {
     #[must_use]
-    pub fn new(id: ProcessId, control: Arc<dyn ProcessControl>) -> Self {
-        Self { id, control }
+    pub fn new(id: ProcessId, os_pid: Option<u32>, control: Arc<dyn ProcessControl>) -> Self {
+        Self {
+            id,
+            os_pid,
+            control,
+        }
     }
 
     #[must_use]
     pub const fn id(&self) -> ProcessId {
         self.id
+    }
+
+    /// OS의 pid. 운영자가 `ps`·`/proc`과 맞춰 보는 값이다. (PRD §79)
+    #[must_use]
+    pub const fn os_pid(&self) -> Option<u32> {
+        self.os_pid
     }
 
     #[must_use]

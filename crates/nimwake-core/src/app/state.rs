@@ -109,6 +109,15 @@ impl AppState {
         }
     }
 
+    /// OS의 pid. `ProcessId`와 다르다 — 그쪽은 내부 식별자다. (PRD §79)
+    pub(crate) fn os_pid(&self) -> Option<u32> {
+        match self {
+            Self::Running(running) => running.process.os_pid(),
+            Self::Stopping { process, .. } => process.os_pid(),
+            _ => None,
+        }
+    }
+
     pub(crate) fn last_error(&self) -> Option<AppError> {
         match self {
             Self::Failed { error, .. } => Some(error.clone()),
@@ -157,6 +166,11 @@ pub struct AppStatus {
     pub active_requests: usize,
     pub pending_waiters: usize,
     pub process_id: Option<ProcessId>,
+    /// OS의 pid. 운영자가 `ps`·`/proc`과 맞춰 보는 값이다. (PRD §79)
+    ///
+    /// `process_id`와 **다른 것이다.** 그쪽은 stale event 판정(Invariant 8)을 위한
+    /// 내부 단조 식별자이고 OS와 무관하다. `FakeRuntime`에서는 `None`이다.
+    pub os_pid: Option<u32>,
     pub last_error: Option<AppError>,
     pub since: Option<std::time::Duration>,
 }

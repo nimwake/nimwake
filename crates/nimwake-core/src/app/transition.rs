@@ -656,6 +656,7 @@ pub(super) fn status_of(state: &AppState, spec: &AppSpec) -> AppStatus {
         active_requests: state.active_requests(),
         pending_waiters: state.pending_waiters(),
         process_id: state.process_id(),
+        os_pid: state.os_pid(),
         last_error: state.last_error(),
         since: state.uptime(),
     }

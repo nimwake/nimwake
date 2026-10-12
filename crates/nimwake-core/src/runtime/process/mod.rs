@@ -85,7 +85,7 @@ impl Runtime for ProcessRuntime {
         let control = controller::spawn(spec, process_id)?;
         let spawned_at = Instant::now();
 
-        let handle = ProcessHandle::new(process_id, control.clone());
+        let handle = ProcessHandle::new(process_id, Some(control.os_pid()), control.clone());
 
         debug!(app = %spec.name, process = %process_id, %addr, "waiting for readiness");
 

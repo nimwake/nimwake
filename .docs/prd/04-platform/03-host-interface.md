@@ -69,6 +69,14 @@ manifest 검증은 이 설정값을 그대로 쓴다. application이 gateway와 
 
 ### 종료
 
+운영자가 보내는 신호는 셋이다.
+
+```text
+SIGINT · SIGTERM   정상 종료
+SIGHUP             manifest 재적재 (§76)
+SIGUSR1            상태 보고 (§79)
+```
+
 `SIGINT` 또는 `SIGTERM`을 받으면
 
 ```text
@@ -133,6 +141,84 @@ Gateway는 `registry.resolve()`가 실패하면 `acquire()` 전에 응답한다.
 
 전용 health endpoint(`/__nimwake/health` 등)와 Admin IPC는 Post-MVP다.
 → [§60](../05-beyond-mvp/02-platform-features.md)
+
+## 79. Status Snapshot
+
+```text
+SIGUSR1  →  지금 상태를 로그에 한 번 쓴다
+```
+
+### 무엇이 문제였나
+
+**돌고 있는 daemon에게 "무슨 버전이고 지금 무엇을 하고 있나"를 물을 방법이 없다.**
+
+실제로 겪은 것:
+
+```text
+deploy 뒤에도 옛 바이너리가 메모리에 남아 있었다
+  → 기동 로그의 버전 줄을 grep해서 알아냈다
+  → 모르고 72시간 측정을 시작할 뻔했다
+app이 깨어 있는지 확인하려면
+  → /proc을 뒤지거나 요청을 보내 봤다
+```
+
+`deploy`는 떠 있는 process를 바꾸지 않는다. 그래서 "디스크의 바이너리"와 "돌고
+있는 것"이 다를 수 있고, **그 차이를 물어볼 창구가 없었다.**
+
+### 무엇을 쓰나
+
+```text
+nimwaked <version> — <N> application(s)
+  <name>  <host>  <STATE>  pid=<pid>  active=<n>  pending=<n>  since=<duration>
+```
+
+`AppStatus`(§11)를 그대로 쓴다. 새 지표를 만들지 않는다.
+
+### 왜 신호인가
+
+```text
+CLI · unix socket IPC   §56 Post-MVP다
+gateway 엔드포인트       안 된다 — 아래
+Public admin TCP API    §56이 "필수로 두지 않는다"고 적었다
+신호                    같은 uid를 요구한다. 새 공격면이 없다
+```
+
+**gateway에 붙이면 안 된다.** §74는 외부 노출을 opt-in으로 두고 Core는 TLS도
+인증도 제공하지 않는다. `--listen 0.0.0.0`으로 열면 application 이름과 pid가
+LAN의 누구에게나 보인다.
+
+### 어디로 쓰나
+
+로그(stdout)다. supervisor가 이미 그것을 파일로 모으고 있다. 새 경로를 만들지
+않는다.
+
+### 무엇을 하지 않나
+
+```text
+기계가 읽는 형식을 약속하지 않는다   사람이 읽는 것이다. 기계용은 §56의 IPC다
+상태를 바꾸지 않는다                읽기만 한다
+응답을 돌려주지 않는다              신호에는 반환값이 없다. 로그를 보면 된다
+```
+
+`SIGHUP`(§76)과 나란히 둔다 — 둘 다 운영자가 보내는 신호이고, 하나는 바꾸고
+하나는 보여 준다.
+
+### 등록은 알림보다 먼저다
+
+```text
+signal 등록  →  "listening on ..." 출력  →  serve
+```
+
+`SIGHUP`과 `SIGUSR1`의 **기본 동작은 프로세스 종료**다. `listening on` 줄을 보고
+바로 신호를 보내는 쪽이 있으므로(supervisor · 스크립트 · 테스트) 등록이 늦으면
+그 창에서 daemon이 죽는다.
+
+창이 좁아 15회 시도에서 재현되지 않았다. **그래도 기본 동작이 종료인 신호에
+경쟁을 남겨 두지 않는다.**
+
+→ [§11 상태 모델](../02-architecture/03-lifecycle-and-state.md) ·
+[§56 CLI](../05-beyond-mvp/02-platform-features.md) ·
+[§76 Manifest Reload](../02-architecture/05-manifest-and-readiness.md)
 
 ---
 
