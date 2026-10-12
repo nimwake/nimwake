@@ -125,6 +125,22 @@ impl Report {
             baseline.set("cold_start_samples", stress.spans.len() as f64);
         }
 
+        // 요청 구간. proxy connect가 §50의 비교 항목이고 기동 trace에 없다.
+        if let Some(stress) = &self.stress {
+            if !stress.request_spans.is_empty() {
+                let p50 = |pick: fn(&crate::daemon::RequestSpans) -> Duration| {
+                    let values: Vec<Duration> = stress.request_spans.iter().map(pick).collect();
+                    millis(stats::percentile_of(&values, 0.50).unwrap_or_default())
+                };
+                baseline.set("request_routing_ms", p50(|s| s.routing));
+                baseline.set("request_acquire_ms", p50(|s| s.acquire));
+                baseline.set("request_proxy_connect_ms", p50(|s| s.proxy_connect));
+                baseline.set("request_backend_ms", p50(|s| s.backend));
+                baseline.set("request_ttfb_ms", p50(|s| s.ttfb));
+                baseline.set("request_samples", stress.request_spans.len() as f64);
+            }
+        }
+
         // 처리량 곡선이 평평해지는 지점. 저사양 환경에서 얼마나 앞으로
         // 당겨지는지가 §50이 보려는 것이다.
         let points: Vec<(usize, f64)> = self
@@ -282,6 +298,48 @@ impl Report {
                 );
             }
             let _ = writeln!(out, "\n지배적인 구간: **{}**\n", dominant(&median));
+        }
+        // **요청 구간은 기동 분해와 중첩이다.** 섞어 한 표에 두면 거짓 분해가 된다.
+        //
+        // ```text
+        // ttfb
+        // ├── routing          gateway 자체
+        // ├── acquire          깨우기 — cold start면 위 기동 분해가 이 안에 있다
+        // ├── proxy connect    backend와 TCP 연결 수립까지
+        // └── backend          app이 응답 header를 만든 시간
+        // ```
+        //
+        // §50이 "spawn / readiness / proxy connect"를 비교 항목으로 적었고,
+        // proxy connect는 기동 trace가 아니라 여기 있다.
+        if !stress.request_spans.is_empty() {
+            let _ = writeln!(
+                out,
+                "요청 구간 — 표본 {}개. **위 기동 분해는 `acquire` 안에 있다.** (PRD §50)\n\n구간마다 따로 낸 백분위이므로 **더해서 ttfb가 되지 않는다.** 같은 요청의 값이 아니다.\n",
+                stress.request_spans.len(),
+            );
+            let _ = writeln!(out, "| 구간 | p50 | p95 |");
+            let _ = writeln!(out, "| --- | ---: | ---: |");
+            for (label, pick) in [
+                (
+                    "routing",
+                    (|s: &crate::daemon::RequestSpans| s.routing) as fn(&_) -> _,
+                ),
+                ("acquire", |s: &crate::daemon::RequestSpans| s.acquire),
+                ("proxy connect", |s: &crate::daemon::RequestSpans| {
+                    s.proxy_connect
+                }),
+                ("backend", |s: &crate::daemon::RequestSpans| s.backend),
+                ("**ttfb**", |s: &crate::daemon::RequestSpans| s.ttfb),
+            ] {
+                let values: Vec<Duration> = stress.request_spans.iter().map(pick).collect();
+                let _ = writeln!(
+                    out,
+                    "| {label} | {} | {} |",
+                    ms(stats::percentile_of(&values, 0.50).unwrap_or_default()),
+                    ms(stats::percentile_of(&values, 0.95).unwrap_or_default()),
+                );
+            }
+            let _ = writeln!(out);
         }
 
         let leaks = stress.leaks();

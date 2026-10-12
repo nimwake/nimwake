@@ -20,10 +20,35 @@ pub struct StartupSpans {
     pub total: Duration,
 }
 
+/// 요청 하나가 지나온 구간. daemon이 내보낸 `nimwake::request` event에서 읽는다.
+///
+/// [`StartupSpans`]와 **중첩 관계다.** cold start 요청에서는 `acquire` 안에
+/// 기동 분해(queue · spawn · readiness)가 들어 있다.
+///
+/// ```text
+/// ttfb
+/// ├── routing          gateway 자체 처리
+/// ├── acquire          깨우기 — cold start면 여기 안에 StartupSpans가 있다
+/// ├── proxy connect    backend와 TCP 연결 수립까지
+/// └── backend          app이 응답 header를 만든 시간
+/// ```
+///
+/// §50이 비교 항목으로 "spawn / readiness / **proxy connect**"를 적었고,
+/// 그 중 proxy connect는 기동 trace가 아니라 이쪽에 있다.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RequestSpans {
+    pub routing: Duration,
+    pub acquire: Duration,
+    pub proxy_connect: Duration,
+    pub backend: Duration,
+    pub ttfb: Duration,
+}
+
 pub struct Daemon {
     child: Child,
     port: u16,
     startups: Arc<Mutex<Vec<StartupSpans>>>,
+    requests: Arc<Mutex<Vec<RequestSpans>>>,
 }
 
 impl Daemon {
@@ -40,11 +65,22 @@ impl Daemon {
             .map_err(|error| format!("failed to start {}: {error}", binary.display()))?;
 
         let startups = Arc::new(Mutex::new(Vec::new()));
+        let requests = Arc::new(Mutex::new(Vec::new()));
         let (tx, rx) = mpsc::channel();
 
         // pipe를 방치하면 daemon이 멈춘다. 두 스트림 모두 계속 읽는다.
-        collect(child.stdout.take(), Arc::clone(&startups), Some(tx));
-        collect(child.stderr.take(), Arc::clone(&startups), None);
+        collect(
+            child.stdout.take(),
+            Arc::clone(&startups),
+            Arc::clone(&requests),
+            Some(tx),
+        );
+        collect(
+            child.stderr.take(),
+            Arc::clone(&startups),
+            Arc::clone(&requests),
+            None,
+        );
 
         let port = rx
             .recv_timeout(Duration::from_secs(30))
@@ -54,6 +90,7 @@ impl Daemon {
             child,
             port,
             startups,
+            requests,
         })
     }
 
@@ -68,6 +105,14 @@ impl Daemon {
     /// 지금까지 관측한 기동 구간들.
     pub fn startups(&self) -> Vec<StartupSpans> {
         self.startups
+            .lock()
+            .map(|spans| spans.clone())
+            .unwrap_or_default()
+    }
+
+    /// 지금까지 관측한 요청 구간들. (PRD §50)
+    pub fn requests(&self) -> Vec<RequestSpans> {
+        self.requests
             .lock()
             .map(|spans| spans.clone())
             .unwrap_or_default()
@@ -98,6 +143,7 @@ impl Drop for Daemon {
 fn collect<R>(
     reader: Option<R>,
     startups: Arc<Mutex<Vec<StartupSpans>>>,
+    requests: Arc<Mutex<Vec<RequestSpans>>>,
     listen: Option<mpsc::Sender<u16>>,
 ) where
     R: std::io::Read + Send + 'static,
@@ -119,6 +165,14 @@ fn collect<R>(
                     }
                 }
             }
+
+            if line.contains("nimwake::request") {
+                if let Some(spans) = parse_request(&line) {
+                    if let Ok(mut requests) = requests.lock() {
+                        requests.push(spans);
+                    }
+                }
+            }
         }
     });
 }
@@ -132,6 +186,20 @@ fn listen_port(line: &str) -> Option<u16> {
 /// JSON 한 줄에서 `..._us` 값을 뽑는다.
 ///
 /// serde를 들이지 않는다. 우리가 직접 내보낸 형식이고, 필요한 것은 정수 네 개뿐이다.
+/// `nimwake::request` 한 줄에서 구간을 뽑는다.
+///
+/// 모든 필드가 있어야 한다. 하나라도 없으면 그 요청은 끝까지 가지 않았다는 뜻이고
+/// (예: 404, acquire 실패) 구간 비교에 쓸 수 없다.
+fn parse_request(line: &str) -> Option<RequestSpans> {
+    Some(RequestSpans {
+        routing: micros(line, "routing_us")?,
+        acquire: micros(line, "acquire_us")?,
+        proxy_connect: micros(line, "proxy_connect_us")?,
+        backend: micros(line, "backend_us")?,
+        ttfb: micros(line, "ttfb_us")?,
+    })
+}
+
 fn parse_startup(line: &str) -> Option<StartupSpans> {
     Some(StartupSpans {
         queue: micros(line, "queue_us")?,

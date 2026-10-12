@@ -66,6 +66,8 @@ pub struct StressResult {
     /// 만든다. 표본이 하나이므로 readiness가 probe 간격(50ms)에 양자화되어
     /// 0ms 또는 50ms로 튄다. 실제로 같은 코드가 상반된 결론을 냈다.
     pub spans: Vec<crate::daemon::StartupSpans>,
+    /// 요청 구간들. `acquire` 안에 [`spans`](Self::spans)가 들어 있다. (PRD §50)
+    pub request_spans: Vec<crate::daemon::RequestSpans>,
 }
 
 impl StressResult {
@@ -158,6 +160,7 @@ pub fn run(
 
     // cycle마다 하나씩 쌓였다. daemon을 내리기 전에 거둬야 한다.
     let spans = daemon.startups();
+    let request_spans = daemon.requests();
 
     // daemon을 정상 종료시킨 뒤에 본다. child의 수명은 daemon의 수명을 넘지 않는다. (PRD §71)
     drop(daemon);
@@ -181,6 +184,7 @@ pub fn run(
         after,
         wall,
         spans,
+        request_spans,
     })
 }
 
