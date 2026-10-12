@@ -15,6 +15,12 @@
 mod exit;
 mod options;
 
+/// eviction이 가용 메모리를 보는 간격. (PRD §80)
+///
+/// `/proc/meminfo` 판독은 5.7µs이므로 간격 자체의 비용은 없다. 정지가 메모리를
+/// 즉시 돌려주지 않으므로 **다음 판단까지 빠져나갈 시간을 주는 쪽**으로 정한다.
+const EVICTION_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -158,13 +164,9 @@ fn serve(specs: Vec<AppSpec>, options: &Options) -> Result<(), Failure> {
     let limits = options.limits;
 
     runtime.block_on(async move {
-        let registry = AppRegistry::build(
-            specs,
-            requested.port(),
-            Arc::new(ProcessRuntime::new()),
-            limits,
-        )
-        .map_err(|error| Failure::config(format!("registry validation failed: {error}")))?;
+        let runtime: Arc<dyn nimwake_core::Runtime> = Arc::new(ProcessRuntime::new());
+        let registry = AppRegistry::build(specs, requested.port(), Arc::clone(&runtime), limits)
+            .map_err(|error| Failure::config(format!("registry validation failed: {error}")))?;
         let registry = Arc::new(registry);
 
         // bind 실패는 시간이 해결할 수 있다. 이전 인스턴스가 아직 port를 쥐고 있을 수 있다.
@@ -212,9 +214,17 @@ fn serve(specs: Vec<AppSpec>, options: &Options) -> Result<(), Failure> {
         // `SIGUSR1`마다 상태를 로그에 쓴다. (PRD §79)
         let reporter = tokio::spawn(report_on_usr1(user1, Arc::clone(&registry)));
 
+        // 메모리가 부족하면 가장 오래 유휴인 app을 내린다. (PRD §80)
+        let evictor = tokio::spawn(evict_under_pressure(
+            Arc::clone(&registry),
+            Arc::clone(&runtime),
+            limits,
+        ));
+
         gateway.serve(shutdown_signal()).await;
         reloader.abort();
         reporter.abort();
+        evictor.abort();
 
         // child process의 수명은 daemon의 수명을 넘지 않는다. (Invariant 10 / PRD §71)
         info!("stopping every application");
@@ -222,6 +232,46 @@ fn serve(specs: Vec<AppSpec>, options: &Options) -> Result<(), Failure> {
 
         Ok(())
     })
+}
+
+/// 메모리가 부족하면 가장 오래 유휴인 application을 하나 내린다. (PRD §80)
+///
+/// §78은 **새로 깨우지 않는 것**까지였다. 그것만으로는 아무도 쓰지 않는 메모리를
+/// 쥔 채 요청을 거절한다 — app 셋이 118MB씩 쥐고 200초째 유휴인데 네 번째
+/// 요청이 `503`을 받는다.
+///
+/// **거절 지점이 아니라 주기적으로 하는 이유**: §78의 검사는 각 application의
+/// actor 안에 있고 다른 application을 모른다. 거절 지점에서 하려면 요청 경로가
+/// application들을 가로질러 정책을 결정해야 한다. 이쪽은 요청 경로를 건드리지
+/// 않고, 기존 handle로 `Stop`을 보낼 뿐이다 — §76의 재적재가 이미 하는 일이다.
+#[cfg(unix)]
+async fn evict_under_pressure(
+    registry: std::sync::Arc<nimwake_core::AppRegistry>,
+    runtime: std::sync::Arc<dyn nimwake_core::Runtime>,
+    limits: nimwake_core::Limits,
+) {
+    use tracing::warn;
+
+    // 꺼져 있으면 돌지 않는다. `/proc/meminfo`를 읽지도 않는다. (PRD §78, §80)
+    if !limits.checks_memory() {
+        return;
+    }
+
+    let mut ticker = tokio::time::interval(EVICTION_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        ticker.tick().await;
+
+        // **판단과 정지는 `nimwake_core::eviction::sweep`에 있다.**
+        //
+        // 여기 두었더니 테스트가 실제 메모리 압박을 만들어야 했고, 개발 기계에서는
+        // `echo-server`가 2MB라 임계값을 넘길 수 없었다. core의 한 걸음으로 옮기니
+        // `FakeRuntime`으로 결정적으로 검증할 수 있다.
+        if let Err(error) = nimwake_core::eviction::sweep(&registry, &runtime, limits).await {
+            warn!(%error, "eviction failed");
+        }
+    }
 }
 
 /// 신호 스트림을 등록한다. 실패하면 그 신호 기능만 꺼진다.

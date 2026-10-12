@@ -2,7 +2,7 @@
 
 > **Nimwake PRD** › 아키텍처
 >
-> 원문 구간: `PRD.md` §23–§26, §69, §75, §78
+> 원문 구간: `PRD.md` §23–§26, §69, §75, §78, §80
 
 ---
 
@@ -411,6 +411,95 @@ application의 메모리 비용을 기동 전에 알 수 없다. 앱 8개가 같
 → [§53 Memory Pressure](../05-beyond-mvp/01-resource-management.md) ·
 [§54 Eviction Policy](../05-beyond-mvp/01-resource-management.md) ·
 [§74 Host Interface](../04-platform/03-host-interface.md)
+
+## 80. Idle Eviction
+
+§78은 메모리가 부족할 때 **새로 깨우지 않는 것**까지였다. 이 절은 그 앞에
+**쓰지 않는 것을 먼저 내리는 것**을 더한다.
+
+§54 Eviction Policy의 우선순위 다섯 단계 중 **두 개만** 쓴다.
+`priority`와 `always_on`은 여전히 Post-MVP다.
+
+### 무엇이 문제였나
+
+§78만 있으면 **아무도 쓰지 않는 메모리를 쥔 채 요청을 거절한다.**
+
+```text
+app A·B·C가 깨어 118MB씩 쥐고 200초째 유휴    idle timeout은 300초
+app E로 요청 → 503
+```
+
+A·B·C는 활성 요청이 없고 100초 뒤에는 어차피 스스로 잠든다. **그것을 기다리는
+대신 지금 내리면 E가 서빙된다.** idle timeout은 시간 기반 eviction이고, 이 절은
+거기에 메모리 기반을 더한다.
+
+### 누구를 내리나
+
+```text
+1. state == RUNNING
+2. active_requests == 0
+3. 그중 가장 오래 유휴인 것        last_request_at이 가장 오래된 것
+```
+
+**활성 요청이 있는 application은 절대 내리지 않는다.** 그것을 내리면 lease를
+쥔 요청이 깨지고, §78이 지키려던 것을 스스로 깨뜨린다.
+
+후보가 없으면 아무것도 하지 않는다. 전부 바쁘면 내릴 것이 없고, 그때는 §78의
+거절이 맞는 답이다.
+
+### 한 번에 하나만
+
+정지는 메모리를 **즉시** 돌려주지 않는다. process가 빠져나갈 시간이 필요하다.
+한 tick에 여럿을 내리면 첫 정지의 효과를 보기 전에 과하게 내린다.
+
+```text
+10초마다  가용 메모리 확인 → 부족하면 하나 정지 → 다음 tick에서 다시 본다
+```
+
+### 언제 도나
+
+`--min-free-memory-mb`가 `0`(기본)이면 **돌지 않는다.** §78과 같은 임계값을 쓰고,
+꺼져 있으면 `/proc/meminfo`를 읽지도 않는다.
+
+### 왜 주기적인가 — 거절 지점이 아니라
+
+§78의 검사는 각 application의 actor 안에 있고 **다른 application을 모른다.**
+거절 지점에서 eviction을 하려면 요청 경로가 application들을 가로질러 정책을
+결정해야 한다.
+
+주기적 reaper는 요청 경로를 건드리지 않는다. 새 권한도 만들지 않는다 — 기존
+handle로 `Stop`을 보내고, 그것은 §76의 재적재가 이미 하는 일이다.
+
+### 정지 중에 요청이 오면
+
+§30의 graceful shutdown을 그대로 쓴다. 정지 중에 온 요청은 §31대로 큐에 들어가
+정지가 끝난 뒤 다시 기동한다. **요청은 잃지 않는다.**
+
+그 경우 내린 효과가 없어지고 지연만 늘지만, idle timeout이 요청과 경쟁할 때와
+같은 상황이고 §29의 generation 비교가 다루는 것과 같은 종류다. 드물고 스스로
+교정된다.
+
+### 판단은 한 걸음이다
+
+`sweep` 하나가 "메모리를 보고, 부족하면 하나 내린다"를 한다. daemon은 ticker로
+그것을 부를 뿐이다.
+
+처음에는 loop 전체를 daemon에 두었다. **그러면 규칙을 검증할 길이 없다** —
+테스트가 실제 메모리 압박을 만들어야 하는데 `echo-server`는 2MB라 개발 기계에서
+임계값을 넘길 수 없고, 임계값을 도달 불가능하게 높이면 §78이 모든 기동을 막아
+깨어 있는 app이 없다.
+
+한 걸음을 core로 옮기니 `FakeRuntime`으로 가용 메모리를 정해 결정적으로
+확인할 수 있다.
+
+### 로그에 이유를 남긴다
+
+`StopReason::MemoryPressure`로 내린다. `Idle`과 구분해야 운영자가 "스스로 잠든
+것"과 "메모리 때문에 내린 것"을 가를 수 있다.
+
+→ [§78 Memory Admission Control](#78-memory-admission-control) ·
+[§54 Eviction Policy](../05-beyond-mvp/01-resource-management.md) ·
+[§29 Idle 판정](07-scale-to-zero.md) · [§30 Graceful Shutdown](07-scale-to-zero.md)
 
 ---
 

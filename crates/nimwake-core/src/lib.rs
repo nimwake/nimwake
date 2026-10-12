@@ -12,6 +12,7 @@
 
 pub mod app;
 pub mod error;
+pub mod eviction;
 pub mod gateway;
 pub mod id;
 pub mod limits;

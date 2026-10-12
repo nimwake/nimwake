@@ -109,6 +109,18 @@ impl AppState {
         }
     }
 
+    /// 마지막 요청으로부터 지난 시간. `RUNNING`일 때만 있다. (PRD §80)
+    ///
+    /// `uptime`과 다르다 — 그쪽은 기동부터다. eviction이 "가장 오래 유휴인 것"을
+    /// 고를 때 보는 값이고, 오래 돌았지만 바쁜 application을 내리지 않기 위해
+    /// 기동 시각이 아니라 마지막 요청 시각을 본다.
+    pub(crate) fn idle_for(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::Running(running) => Some(running.last_request_at.elapsed()),
+            _ => None,
+        }
+    }
+
     /// OS의 pid. `ProcessId`와 다르다 — 그쪽은 내부 식별자다. (PRD §79)
     pub(crate) fn os_pid(&self) -> Option<u32> {
         match self {
@@ -166,6 +178,8 @@ pub struct AppStatus {
     pub active_requests: usize,
     pub pending_waiters: usize,
     pub process_id: Option<ProcessId>,
+    /// 마지막 요청으로부터 지난 시간. `RUNNING`일 때만 있다. (PRD §80)
+    pub idle_for: Option<std::time::Duration>,
     /// OS의 pid. 운영자가 `ps`·`/proc`과 맞춰 보는 값이다. (PRD §79)
     ///
     /// `process_id`와 **다른 것이다.** 그쪽은 stale event 판정(Invariant 8)을 위한

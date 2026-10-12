@@ -61,7 +61,9 @@ portfolio    250MB     43m        20   ← candidate
 agent        150MB      8m        50
 ```
 
-이 기능은 Core MVP 이후에 추가한다.
+**우선순위 1번(활성 요청 없음)과 4번(오래된 last request)은 구현되어 있다.**
+계약은 [§80 Idle Eviction](../02-architecture/06-gateway-and-requests.md)에 있다.
+`priority`와 `always_on`은 여전히 이 절의 범위다.
 
 ---
 
