@@ -41,6 +41,13 @@ OPTIONS:
                         요청 구간은 평소 꺼져 있고 이때만 켜진다
     -h, --help          이 도움말
 
+SIGNALS:
+    SIGINT, SIGTERM     정상 종료. 모든 application을 정지시킨 뒤 끝낸다
+    SIGHUP              manifest 디렉터리를 다시 읽어 차이만 적용한다 (PRD §76)
+                        검증 실패와 빈 집합은 거부하고 기존 상태를 유지한다
+    SIGUSR1             지금 상태를 로그에 쓴다 (PRD §79)
+                        버전 · app별 state · OS pid · 활성 요청 · 유휴 시간
+
 ENVIRONMENT:
     NIMWAKE_LISTEN      기본 listen 주소. --listen / --port가 우선한다
 

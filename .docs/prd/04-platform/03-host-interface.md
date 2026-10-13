@@ -169,10 +169,17 @@ app이 깨어 있는지 확인하려면
 
 ```text
 nimwaked <version> — <N> application(s)
-  <name>  <host>  <STATE>  pid=<pid>  active=<n>  pending=<n>  since=<duration>
+  <name>  <host>  <STATE>  pid=<OS pid>  process=<내부 식별자>
+          active=<n>  pending=<n>  since=<기동부터>  idle=<마지막 요청부터>
 ```
 
 `AppStatus`(§11)를 그대로 쓴다. 새 지표를 만들지 않는다.
+
+`pid`는 **OS의 pid**다. `process`는 stale event 판정(Invariant 8)을 위한 내부
+식별자이고 `ps`와 맞춰 볼 수 없다. 둘을 함께 적는다.
+
+`idle`을 적는 이유: eviction(§80)이 **가장 오래 유휴인 것**을 고르므로, 운영자가
+다음에 무엇이 내려갈지 이 값으로 알 수 있다.
 
 ### 왜 신호인가
 
