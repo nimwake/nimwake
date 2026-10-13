@@ -29,7 +29,7 @@ use crate::app::{AppStateName, AppStatus};
 /// 동점이면 먼저 나온 것을 고른다. 목록의 순서는 호출자가 정하고, 동점은 같은
 /// 시각에 유휴가 된 경우뿐이라 어느 쪽을 골라도 같다.
 #[must_use]
-pub fn victim(statuses: &[AppStatus]) -> Option<usize> {
+pub fn victim(statuses: &[&AppStatus]) -> Option<usize> {
     statuses
         .iter()
         .enumerate()
@@ -74,15 +74,19 @@ pub async fn sweep(
         return Ok(None);
     }
 
+    // **handle과 status를 한 Vec에 둔다.**
+    //
+    // 전에는 둘을 나란한 Vec 둘에 담고 한쪽의 번째로 다른 쪽을 꺼냈다. 길이가
+    // 같다는 보장이 코드 모양에 없어서, 나중에 한쪽만 걸러도 조용히 어긋난다.
     let handles = registry.apps();
-    let mut statuses = Vec::with_capacity(handles.len());
-    let mut alive = Vec::with_capacity(handles.len());
+    let mut apps = Vec::with_capacity(handles.len());
     for handle in handles {
         if let Ok(status) = handle.status().await {
-            statuses.push(status);
-            alive.push(handle);
+            apps.push((handle, status));
         }
     }
+
+    let statuses: Vec<&AppStatus> = apps.iter().map(|(_, status)| status).collect();
 
     let Some(index) = victim(&statuses) else {
         // 전부 바쁘면 내릴 것이 없다. 그때는 §78의 거절이 맞는 답이다.
@@ -94,16 +98,17 @@ pub async fn sweep(
         return Ok(None);
     };
 
-    let name = statuses[index].name.clone();
+    let (victim, status) = &apps[index];
+    let name = status.name.clone();
     tracing::info!(
         app = name,
-        idle_ms = statuses[index].idle_for.unwrap_or_default().as_millis(),
+        idle_ms = status.idle_for.unwrap_or_default().as_millis(),
         available_mb,
         required_mb = limits.min_free_memory_mb,
         "evicting the longest-idle application to free memory",
     );
 
-    alive[index].stop(StopReason::MemoryPressure).await?;
+    victim.stop(StopReason::MemoryPressure).await?;
     Ok(Some(name))
 }
 
@@ -135,7 +140,7 @@ mod tests {
             status("oldest", AppStateName::Running, 0, Some(300)),
             status("middle", AppStateName::Running, 0, Some(120)),
         ];
-        assert_eq!(victim(&statuses), Some(1));
+        assert_eq!(victim(&statuses.iter().collect::<Vec<_>>()), Some(1));
     }
 
     /// **활성 요청이 있으면 절대 고르지 않는다.** (PRD §80)
@@ -149,7 +154,11 @@ mod tests {
             status("busy", AppStateName::Running, 3, Some(9999)),
             status("idle", AppStateName::Running, 0, Some(5)),
         ];
-        assert_eq!(victim(&statuses), Some(1), "바쁜 쪽을 고르면 안 된다");
+        assert_eq!(
+            victim(&statuses.iter().collect::<Vec<_>>()),
+            Some(1),
+            "바쁜 쪽을 고르면 안 된다"
+        );
     }
 
     /// 전부 바쁘면 고를 것이 없다. 그때는 §78의 거절이 맞는 답이다.
@@ -159,7 +168,7 @@ mod tests {
             status("a", AppStateName::Running, 1, Some(100)),
             status("b", AppStateName::Running, 2, Some(200)),
         ];
-        assert_eq!(victim(&statuses), None);
+        assert_eq!(victim(&statuses.iter().collect::<Vec<_>>()), None);
     }
 
     /// `RUNNING`이 아닌 것은 고르지 않는다. 이미 메모리를 쓰지 않거나 정리 중이다.
@@ -172,7 +181,11 @@ mod tests {
             AppStateName::Failed,
         ] {
             let statuses = [status("x", state, 0, Some(999))];
-            assert_eq!(victim(&statuses), None, "{state}은 후보가 아니다");
+            assert_eq!(
+                victim(&statuses.iter().collect::<Vec<_>>()),
+                None,
+                "{state}은 후보가 아니다"
+            );
         }
     }
 
@@ -191,7 +204,7 @@ mod tests {
             status("no-idle", AppStateName::Running, 0, None),
             status("has-idle", AppStateName::Running, 0, Some(1)),
         ];
-        assert_eq!(victim(&statuses), Some(1));
+        assert_eq!(victim(&statuses.iter().collect::<Vec<_>>()), Some(1));
     }
 
     /// 후보가 하나뿐이면 그것을 고른다.
@@ -202,6 +215,6 @@ mod tests {
             status("only", AppStateName::Running, 0, Some(1)),
             status("busy", AppStateName::Running, 1, Some(500)),
         ];
-        assert_eq!(victim(&statuses), Some(1));
+        assert_eq!(victim(&statuses.iter().collect::<Vec<_>>()), Some(1));
     }
 }

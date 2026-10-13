@@ -337,6 +337,9 @@ async fn report_on_usr1(
                     active = status.active_requests,
                     pending = status.pending_waiters,
                     since_ms = status.since.map_or(0, |since| since.as_millis()),
+                    // 유휴 시간을 함께 적는다. eviction(§80)이 다음에 무엇을 고를지
+                    // 운영자가 알 수 있어야 한다 — 가장 큰 값이 다음 대상이다.
+                    idle_ms = status.idle_for.map_or(0, |idle| idle.as_millis()),
                     error = status.last_error.map(|error| error.to_string()).unwrap_or_default(),
                     "  app",
                 ),
