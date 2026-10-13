@@ -81,6 +81,7 @@ pub(super) fn status_for(error: &ProxyError) -> http::StatusCode {
 pub(super) async fn forward(
     lease: RequestLease,
     request: Request<Incoming>,
+    peer: std::net::SocketAddr,
     header_timeout: Duration,
     trace: &mut crate::trace::RequestTrace,
 ) -> Result<Response<GatewayBody>, ProxyError> {
@@ -114,7 +115,7 @@ pub(super) async fn forward(
         });
 
         let response = sender
-            .send_request(to_backend_request(request))
+            .send_request(to_backend_request(request, peer))
             .await
             .map_err(ProxyError::Request)?;
 
@@ -137,7 +138,7 @@ pub(super) async fn forward(
 /// 들어온 요청을 backend로 보낼 형태로 바꾼다.
 ///
 /// `Host` header는 그대로 넘긴다. application이 자기 host를 볼 수 있어야 한다.
-fn to_backend_request(request: Request<Incoming>) -> Request<Incoming> {
+fn to_backend_request(request: Request<Incoming>, peer: std::net::SocketAddr) -> Request<Incoming> {
     let (mut parts, body) = request.into_parts();
 
     // client conn은 origin-form을 기대한다. absolute-form으로 들어온 요청을 정규화한다.
@@ -150,7 +151,50 @@ fn to_backend_request(request: Request<Incoming>) -> Request<Incoming> {
     }
 
     strip_hop_by_hop(&mut parts.headers);
+    append_forwarded_for(&mut parts.headers, peer);
     Request::from_parts(parts, body)
+}
+
+/// 관측한 peer 주소를 `X-Forwarded-For`에 덧붙인다. (PRD §81)
+///
+/// 기존 값이 있으면 그 뒤에, 없으면 하나로 만든다. 표준 reverse proxy의 동작이다.
+///
+/// **왼쪽의 값들을 검증하지 않는다.** 직접 노출된 상태에서 클라이언트가 이 header를
+/// 보내면 그것이 그대로 남고 그 뒤에 진짜 peer가 붙는다. **맨 오른쪽만 gateway가
+/// 직접 관측한 값이다.**
+///
+/// port는 넣지 않는다. 이 header는 주소 목록이고 port는 그 문법에 없다.
+fn append_forwarded_for(headers: &mut http::HeaderMap, peer: std::net::SocketAddr) {
+    let name = http::header::HeaderName::from_static("x-forwarded-for");
+    let observed = peer.ip().to_string();
+
+    // header가 여러 줄로 올 수 있다. 전부 모아 한 줄로 합친 뒤 우리 것을 붙인다.
+    let existing: Vec<String> = headers
+        .get_all(&name)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+
+    let chain = if existing.is_empty() {
+        observed
+    } else {
+        format!("{}, {observed}", existing.join(", "))
+    };
+
+    // 값에 쓸 수 없는 문자가 섞여 들어오면 우리 것만 남긴다. 조용히 지우지 않는다.
+    match http::HeaderValue::from_str(&chain) {
+        Ok(value) => {
+            headers.insert(&name, value);
+        }
+        Err(_) => {
+            if let Ok(value) = http::HeaderValue::from_str(&peer.ip().to_string()) {
+                headers.insert(&name, value);
+            }
+        }
+    }
 }
 
 fn strip_hop_by_hop(headers: &mut http::HeaderMap) {
@@ -199,5 +243,115 @@ impl<B> std::fmt::Debug for LeasedBody<B> {
         f.debug_struct("LeasedBody")
             .field("lease", &self.lease.id())
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+
+    use super::*;
+
+    fn headers_with(values: &[&str]) -> http::HeaderMap {
+        let mut headers = http::HeaderMap::new();
+        for value in values {
+            headers.append(
+                http::header::HeaderName::from_static("x-forwarded-for"),
+                http::HeaderValue::from_str(value).expect("test value is valid"),
+            );
+        }
+        headers
+    }
+
+    fn forwarded(headers: &http::HeaderMap) -> String {
+        headers
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    fn peer(addr: &str) -> SocketAddr {
+        addr.parse().expect("test address parses")
+    }
+
+    /// 없으면 관측한 peer 하나로 만든다. (PRD §81)
+    ///
+    /// 직접 노출된 gateway에서 이것이 application이 접속자를 아는 유일한 길이다.
+    #[test]
+    fn it_sets_the_peer_when_there_is_none() {
+        let mut headers = http::HeaderMap::new();
+        append_forwarded_for(&mut headers, peer("203.0.113.7:51234"));
+        assert_eq!(forwarded(&headers), "203.0.113.7");
+    }
+
+    /// port는 넣지 않는다. 이 header는 주소 목록이다. (PRD §81)
+    #[test]
+    fn it_does_not_include_the_port() {
+        let mut headers = http::HeaderMap::new();
+        append_forwarded_for(&mut headers, peer("203.0.113.7:51234"));
+        assert!(
+            !forwarded(&headers).contains("51234"),
+            "port가 들어갔다: {}",
+            forwarded(&headers),
+        );
+    }
+
+    /// 기존 값 **뒤에** 붙인다. 맨 오른쪽이 우리가 관측한 것이다. (PRD §81)
+    #[test]
+    fn it_appends_to_the_right() {
+        let mut headers = headers_with(&["1.2.3.4"]);
+        append_forwarded_for(&mut headers, peer("10.0.0.5:4000"));
+        assert_eq!(forwarded(&headers), "1.2.3.4, 10.0.0.5");
+    }
+
+    /// 여러 줄로 온 header를 한 줄로 합친다. (PRD §81)
+    ///
+    /// HTTP는 같은 header를 여러 번 보낼 수 있다. 하나만 보고 덮어쓰면 앞의 hop이
+    /// 사라진다.
+    #[test]
+    fn it_merges_repeated_headers() {
+        let mut headers = headers_with(&["1.2.3.4", "5.6.7.8"]);
+        append_forwarded_for(&mut headers, peer("10.0.0.5:4000"));
+        assert_eq!(forwarded(&headers), "1.2.3.4, 5.6.7.8, 10.0.0.5");
+        assert_eq!(
+            headers.get_all("x-forwarded-for").iter().count(),
+            1,
+            "한 줄로 합쳐야 한다",
+        );
+    }
+
+    /// IPv6도 그대로 적는다.
+    #[test]
+    fn it_handles_ipv6() {
+        let mut headers = http::HeaderMap::new();
+        append_forwarded_for(&mut headers, peer("[2001:db8::1]:8080"));
+        assert_eq!(forwarded(&headers), "2001:db8::1");
+    }
+
+    /// 빈 값은 무시한다. 쉼표만 남은 목록을 만들지 않는다.
+    #[test]
+    fn it_ignores_empty_values() {
+        let mut headers = headers_with(&["", "  "]);
+        append_forwarded_for(&mut headers, peer("10.0.0.5:4000"));
+        assert_eq!(forwarded(&headers), "10.0.0.5");
+    }
+
+    /// `X-Forwarded-Proto`는 건드리지 않는다. Core는 TLS를 제공하지 않는다. (PRD §81)
+    #[test]
+    fn it_leaves_forwarded_proto_alone() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::HeaderName::from_static("x-forwarded-proto"),
+            http::HeaderValue::from_static("https"),
+        );
+        append_forwarded_for(&mut headers, peer("10.0.0.5:4000"));
+        assert_eq!(
+            headers
+                .get("x-forwarded-proto")
+                .and_then(|value| value.to_str().ok()),
+            Some("https"),
+            "상위 프록시가 적은 것을 지우면 안 된다",
+        );
     }
 }

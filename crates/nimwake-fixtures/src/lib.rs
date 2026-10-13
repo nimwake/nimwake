@@ -57,6 +57,11 @@ pub fn serve_forever(listener: &TcpListener) -> ! {
 /// 읽어 들인 요청.
 pub struct Request {
     pub line: String,
+    /// 받은 header를 온 순서대로. `header-echo-server`가 이것을 돌려준다.
+    ///
+    /// gateway가 넣은 것(`X-Forwarded-For` 등)을 application이 **실제로 받는지**
+    /// 확인하려면 받은 쪽에서 되돌려 줘야 한다. (PRD §81)
+    pub headers: Vec<String>,
     pub body: Vec<u8>,
 }
 
@@ -75,6 +80,7 @@ pub fn read_request<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Reques
     }
 
     let mut content_length = 0usize;
+    let mut headers = Vec::new();
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header)? == 0 {
@@ -87,6 +93,7 @@ pub fn read_request<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Reques
         if let Some(value) = header_value(header, "content-length") {
             content_length = value.trim().parse().unwrap_or(0);
         }
+        headers.push(header.to_owned());
     }
 
     let mut body = vec![0u8; content_length];
@@ -94,7 +101,11 @@ pub fn read_request<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Reques
         std::io::Read::read_exact(reader, &mut body)?;
     }
 
-    Ok(Some(Request { line, body }))
+    Ok(Some(Request {
+        line,
+        headers,
+        body,
+    }))
 }
 
 fn respond(stream: TcpStream) -> std::io::Result<()> {

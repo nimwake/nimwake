@@ -2,7 +2,7 @@
 
 > **Nimwake PRD** › 아키텍처
 >
-> 원문 구간: `PRD.md` §23–§26, §69, §75, §78, §80
+> 원문 구간: `PRD.md` §23–§26, §69, §75, §78, §80, §81
 
 ---
 
@@ -500,6 +500,61 @@ handle로 `Stop`을 보내고, 그것은 §76의 재적재가 이미 하는 일�
 → [§78 Memory Admission Control](#78-memory-admission-control) ·
 [§54 Eviction Policy](../05-beyond-mvp/01-resource-management.md) ·
 [§29 Idle 판정](07-scale-to-zero.md) · [§30 Graceful Shutdown](07-scale-to-zero.md)
+
+## 81. Forwarded Client Address
+
+Gateway는 backend로 보내는 요청에 **자기가 관측한 peer 주소**를 `X-Forwarded-For`에
+덧붙인다.
+
+### 무엇이 문제였나
+
+지금까지 gateway는 `X-Forwarded-For`를 건드리지 않았다. hop-by-hop header만 지우고
+나머지는 그대로 넘겼다. 결과가 둘로 갈린다.
+
+```text
+터널·프록시 뒤   프록시가 XFF를 넣고 gateway가 통과시킨다 → application이 본다
+직접 노출        XFF가 없다. application은 127.0.0.1만 본다
+```
+
+**직접 노출이 "폰을 서버로 쓴다"의 기본 형태다.** `--listen 0.0.0.0`으로 LAN에
+열면 application이 접속자를 알 수 없고, 접근 로그·속도 제한·차단이 불가능하다.
+
+### 무엇을 하나
+
+```text
+기존 X-Forwarded-For 있음   그 뒤에 관측한 peer를 덧붙인다
+없음                        peer 하나로 만든다
+```
+
+표준 reverse proxy의 동작이다. 새 header를 만들지 않는다 — application과 framework가
+이미 `X-Forwarded-For`를 읽는다.
+
+port는 넣지 않는다. `X-Forwarded-For`는 주소 목록이고 port는 그 문법에 없다.
+
+### 믿을 수 있는 것은 **맨 오른쪽**뿐이다
+
+```text
+X-Forwarded-For: 1.2.3.4, 10.0.0.5, 192.168.0.9
+                 └ 클라이언트가 보냈을 수 있다    └ gateway가 관측했다
+```
+
+gateway는 왼쪽의 값들을 **검증하지 않는다.** 직접 노출된 상태에서 클라이언트가
+`X-Forwarded-For: 1.2.3.4`를 보내면 그것이 그대로 남고 그 뒤에 진짜 peer가 붙는다.
+
+**맨 오른쪽 값만 gateway가 직접 관측한 것이다.** 그 왼쪽은 클라이언트나 상위
+프록시가 주장한 값이다. application은 신뢰 경계를 알고 읽어야 한다.
+
+trusted proxy 목록을 두지 않는다. 그것은 설정 항목이 늘고 "누가 신뢰받는가"를
+Core가 알아야 하는데, ingress는 §61이 Core 범위 밖으로 분리한 것이다.
+
+### `X-Forwarded-Proto`는 건드리지 않는다
+
+Core는 TLS를 제공하지 않는다. TLS를 끝내는 쪽이 그 header의 주인이고, gateway가
+덮어쓰면 상위 프록시가 적은 사실을 지운다.
+
+→ [§24 HTTP Contract](#24-http-contract) ·
+[§61 Security](../05-beyond-mvp/02-platform-features.md) ·
+[§74 Host Interface](../04-platform/03-host-interface.md)
 
 ---
 

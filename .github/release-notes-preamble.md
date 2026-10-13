@@ -37,6 +37,7 @@ Scale-to-Zero application lifecycle. 요청이 오면 깨우고, 쓰지 않으�
 | manifest 재적재 | `SIGHUP`으로 된다. 돌고 있는 application은 건드리지 않는다 (PRD §76) |
 | crash-loop backoff | 60초 안에 실패 3회면 재시도를 미룬다. 1초부터 2배씩, 상한 30초 (PRD §77) |
 | 운영 도구 | `SIGUSR1`로 상태를 로그에 찍는다 (PRD §79). `nimwake status` CLI와 admin IPC는 없다 |
+| 클라이언트 주소 | gateway가 관측한 peer를 `X-Forwarded-For`에 덧붙인다 (PRD §81). **맨 오른쪽만 gateway가 본 값이고 왼쪽은 검증하지 않는다** |
 
 [완료 체크리스트](.docs/phases/phase-1/04-acceptance.md)에 항목별 근거가 있다.
 

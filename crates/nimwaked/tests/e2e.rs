@@ -1402,3 +1402,88 @@ fn a_status_snapshot_reports_the_version_and_each_app() {
         "스냅샷은 어떤 app도 깨우지 않는다",
     );
 }
+
+/// gateway가 넣은 `X-Forwarded-For`를 **application이 실제로 받는다.** (PRD §81)
+///
+/// 단위 테스트는 `append_forwarded_for`를 직접 부르므로 `to_backend_request`가
+/// 그것을 호출하는지 모른다. 실제로 호출을 지워도 일곱 개가 모두 통과했다.
+/// **받는 쪽에서 되돌려 받아야 그 빈틈이 닫힌다.**
+#[test]
+fn the_app_receives_the_forwarded_client_address() {
+    let apps = Apps::new();
+    let port = free_port();
+    apps.app(
+        "echo",
+        port,
+        &[
+            fixture("header-echo-server").display().to_string(),
+            port.to_string(),
+        ],
+        Lifecycle::default(),
+    );
+
+    let daemon = Daemon::start(&apps);
+    let response = daemon.get("echo.localhost");
+    assert_eq!(response.status, 200);
+
+    // loopback으로 접속했으므로 관측된 peer는 127.0.0.1이다.
+    let lower = response.body.to_lowercase();
+    assert!(
+        lower.contains("x-forwarded-for: 127.0.0.1"),
+        "application이 X-Forwarded-For를 받지 못했다. 받은 header:\n{}",
+        response.body,
+    );
+
+    // port는 들어가지 않는다 — 이 header는 주소 목록이다.
+    let line = response
+        .body
+        .lines()
+        .find(|line| line.to_lowercase().starts_with("x-forwarded-for:"))
+        .expect("the header is present");
+    assert!(
+        !line.contains(':') || line.matches(':').count() == 1,
+        "port가 들어갔다: {line}",
+    );
+}
+
+/// 클라이언트가 보낸 값 **뒤에** 붙는다. 맨 오른쪽이 gateway가 관측한 것이다. (PRD §81)
+///
+/// gateway는 왼쪽의 값을 검증하지 않는다. 그것이 신뢰 경계이고, application이
+/// 알고 읽어야 한다.
+#[test]
+fn a_client_supplied_chain_is_preserved_on_the_left() {
+    let apps = Apps::new();
+    let port = free_port();
+    apps.app(
+        "echo",
+        port,
+        &[
+            fixture("header-echo-server").display().to_string(),
+            port.to_string(),
+        ],
+        Lifecycle::default(),
+    );
+
+    let daemon = Daemon::start(&apps);
+
+    // 클라이언트가 직접 X-Forwarded-For를 보낸다 — 스푸핑 시나리오다.
+    let response = daemon
+        .get_with_headers("echo.localhost", &[("x-forwarded-for", "198.51.100.23")])
+        .expect("gateway responds");
+    assert_eq!(response.status, 200);
+
+    let line = response
+        .body
+        .lines()
+        .find(|line| line.to_lowercase().starts_with("x-forwarded-for:"))
+        .unwrap_or_else(|| panic!("헤더가 없다:\n{}", response.body));
+
+    assert!(
+        line.contains("198.51.100.23"),
+        "클라이언트가 보낸 값이 남아야 한다: {line}",
+    );
+    assert!(
+        line.trim_end().ends_with("127.0.0.1"),
+        "맨 오른쪽이 gateway가 관측한 것이어야 한다: {line}",
+    );
+}
