@@ -83,8 +83,10 @@ impl Gateway {
                     };
 
                     let registry = Arc::clone(&self.registry);
+                    // peer를 handler까지 흘린다. backend에게 누가 접속했는지
+                    // 알려 주는 유일한 출처다. (PRD §81)
                     let service = service_fn(move |request| {
-                        handle(Arc::clone(&registry), request)
+                        handle(Arc::clone(&registry), peer, request)
                     });
 
                     let connection = http1::Builder::new()
@@ -122,6 +124,7 @@ impl Gateway {
 /// 어떤 경로로도 실패를 밖으로 내보내지 않는다. gateway는 항상 응답을 만든다.
 async fn handle(
     registry: Arc<AppRegistry>,
+    peer: SocketAddr,
     request: Request<Incoming>,
 ) -> Result<Response<GatewayBody>, Infallible> {
     let mut trace = RequestTrace::received();
@@ -160,7 +163,7 @@ async fn handle(
 
     trace.proxy_started();
     let header_timeout = app.spec().lifecycle.response_header_timeout();
-    let response = match proxy::forward(lease, request, header_timeout, &mut trace).await {
+    let response = match proxy::forward(lease, request, peer, header_timeout, &mut trace).await {
         Ok(response) => response,
         Err(error) => {
             let status = proxy::status_for(&error);

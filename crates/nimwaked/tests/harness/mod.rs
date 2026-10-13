@@ -251,6 +251,15 @@ impl Daemon {
         get(self.port, host).unwrap_or_else(|error| panic!("gateway responds: {error}"))
     }
 
+    /// header를 더 붙여 보낸다. (PRD §81)
+    pub fn get_with_headers(
+        &self,
+        host: &str,
+        extra: &[(&str, &str)],
+    ) -> std::io::Result<HttpResponse> {
+        nimwake_fixtures::testing::get_with_headers(self.port, host, extra)
+    }
+
     pub fn try_get(&self, host: &str) -> std::io::Result<HttpResponse> {
         get(self.port, host)
     }

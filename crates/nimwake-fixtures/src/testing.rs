@@ -282,6 +282,7 @@ pub fn request(
         host,
         body,
         Duration::from_secs(30),
+        &[],
     )
 }
 
@@ -303,15 +304,20 @@ pub fn request_within(
     host: &str,
     body: Option<&str>,
     read_timeout: Duration,
+    extra: &[(&str, &str)],
 ) -> std::io::Result<HttpResponse> {
     let mut stream = TcpStream::connect_timeout(&addr(gateway_port), Duration::from_secs(2))?;
     stream.set_read_timeout(Some(read_timeout))?;
 
     let body = body.unwrap_or_default();
-    let head = format!(
-        "{method} {path} HTTP/1.1\r\nhost: {host}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+    let mut head = format!(
+        "{method} {path} HTTP/1.1\r\nhost: {host}\r\ncontent-length: {}\r\nconnection: close\r\n",
         body.len()
     );
+    for (name, value) in extra {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
     stream.write_all(head.as_bytes())?;
     stream.write_all(body.as_bytes())?;
     stream.flush()?;
@@ -352,4 +358,28 @@ pub fn request_within(
 /// [`request`]와 같다.
 pub fn get(gateway_port: u16, host: &str) -> std::io::Result<HttpResponse> {
     request(gateway_port, "GET", "/", host, None)
+}
+
+/// [`get`]과 같되 header를 더 붙인다.
+///
+/// gateway가 클라이언트가 보낸 header를 어떻게 다루는지 보려면 그것을 보낼 수
+/// 있어야 한다. (PRD §81)
+///
+/// # Errors
+///
+/// [`request`]와 같다.
+pub fn get_with_headers(
+    gateway_port: u16,
+    host: &str,
+    extra: &[(&str, &str)],
+) -> std::io::Result<HttpResponse> {
+    request_within(
+        gateway_port,
+        "GET",
+        "/",
+        host,
+        None,
+        Duration::from_secs(30),
+        extra,
+    )
 }

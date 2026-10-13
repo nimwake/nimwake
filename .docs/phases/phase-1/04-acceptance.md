@@ -110,6 +110,7 @@ PRD를 코드와 한 절씩 대조한 결과다. **같은 일을 다시 하지 �
 | §78 Memory Admission Control | `test` + `gate` 부족하면 `503`·spawn 0회. 꺼져 있으면 `/proc` 판독 0회 |
 | §79 Status Snapshot | `test` + `gate` `SIGUSR1` → 버전과 app별 상태. OS pid가 app이 알린 것과 일치 |
 | §80 Idle Eviction | `test` + `gate` 압박 시 가장 오래 유휴인 것만 내린다. 바쁜 app은 절대 내리지 않는다 |
+| §81 Forwarded Client Address | `test` + `gate` app이 `X-Forwarded-For`를 실제로 받는다. 클라이언트가 보낸 값 뒤에 붙는다 |
 
 ### §18은 테스트가 아니라 구조가 보장한다
 

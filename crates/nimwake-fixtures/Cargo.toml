@@ -34,6 +34,10 @@ name = "echo-server"
 path = "src/bin/echo_server.rs"
 
 [[bin]]
+name = "header-echo-server"
+path = "src/bin/header_echo_server.rs"
+
+[[bin]]
 name = "slow-start-server"
 path = "src/bin/slow_start_server.rs"
 
