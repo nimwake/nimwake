@@ -1487,3 +1487,40 @@ fn a_client_supplied_chain_is_preserved_on_the_left() {
         "맨 오른쪽이 gateway가 관측한 것이어야 한다: {line}",
     );
 }
+
+/// `--version`은 버전 한 줄만 내고 `0`으로 끝낸다. (PRD §74)
+///
+/// 호스트가 **daemon을 띄우지 않고** 이 binary가 무엇인지 물을 수 있어야 한다.
+/// 모르는 인자는 설정 오류(`78`)이므로, 새 flag를 붙일지 결정하려면 먼저 버전을
+/// 알아야 한다 — `nimwake-android`가 `--min-free-memory-mb`에서 그 문제를
+/// 만났다 (nimwake-android#43).
+#[test]
+fn the_version_flag_prints_one_line_and_exits_zero() {
+    for flag in ["--version", "-V"] {
+        let (code, output) = Daemon::run(&[flag]);
+        assert_eq!(code, 0, "`{flag}`는 0으로 끝난다: {output}");
+
+        let lines: Vec<&str> = output.lines().filter(|line| !line.is_empty()).collect();
+        assert_eq!(lines.len(), 1, "`{flag}`는 한 줄만 낸다: {output:?}");
+        assert!(
+            lines[0].starts_with("nimwaked "),
+            "`{flag}`의 출력 형식이 다르다: {}",
+            lines[0],
+        );
+        assert!(
+            lines[0].contains(env!("CARGO_PKG_VERSION")),
+            "`{flag}`가 crate 버전을 내지 않았다: {}",
+            lines[0],
+        );
+    }
+}
+
+/// `--version`은 manifest를 읽지 않는다. (PRD §74)
+///
+/// 디렉터리가 없어도 버전은 답해야 한다 — 호스트가 배포 **전에** 물을 수 있다.
+#[test]
+fn the_version_flag_does_not_need_manifests() {
+    let (code, output) = Daemon::run(&["--apps", "/nonexistent", "--version"]);
+    assert_eq!(code, 0, "manifest 없이도 버전은 답한다: {output}");
+    assert!(output.contains("nimwaked "), "{output}");
+}

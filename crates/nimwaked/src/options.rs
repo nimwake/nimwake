@@ -39,6 +39,7 @@ OPTIONS:
                         돌고 있는 application은 내리지 않는다
     --trace-json        구간 계측을 JSON 한 줄씩 출력한다 (benchmark mode, PRD §72)
                         요청 구간은 평소 꺼져 있고 이때만 켜진다
+    -V, --version       버전만 출력하고 끝낸다 (daemon을 띄우지 않는다)
     -h, --help          이 도움말
 
 SIGNALS:
@@ -82,6 +83,12 @@ impl Default for Options {
 pub enum Parsed {
     Options(Box<Options>),
     Help,
+    /// 버전만 알려 주고 끝낸다.
+    ///
+    /// 호스트가 **daemon을 띄우지 않고** 이 binary가 무엇인지 물을 수 있어야 한다.
+    /// 모르는 인자는 설정 오류(`78`)이므로, 새 flag를 붙일지 결정하려면 먼저
+    /// 버전을 알아야 한다. (PRD §74)
+    Version,
 }
 
 /// 환경 변수를 기본값으로 삼고 명령줄 인자를 덮어쓴다.
@@ -105,6 +112,8 @@ where
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(Parsed::Help),
+
+            "-V" | "--version" => return Ok(Parsed::Version),
 
             "--trace-json" => options.trace_json = true,
 
@@ -185,7 +194,35 @@ mod tests {
         match parse(args.iter().map(|arg| (*arg).to_owned()), env)? {
             Parsed::Options(options) => Ok(*options),
             Parsed::Help => Err(Failure::config("help")),
+            Parsed::Version => Err(Failure::config("version")),
         }
+    }
+
+    /// `--version`은 옵션을 돌려주지 않는다. (PRD §74)
+    #[test]
+    fn the_version_flag_short_circuits() {
+        for flag in ["--version", "-V"] {
+            let parsed = parse([flag.to_owned()], None).expect("the flag parses");
+            assert!(
+                matches!(parsed, Parsed::Version),
+                "`{flag}`는 Version이어야 한다",
+            );
+        }
+    }
+
+    /// 다른 인자와 섞여도 버전이 먼저다. manifest를 읽지 않는다.
+    #[test]
+    fn the_version_flag_wins_over_other_arguments() {
+        let parsed = parse(
+            [
+                "--apps".to_owned(),
+                "/nonexistent".to_owned(),
+                "--version".to_owned(),
+            ],
+            None,
+        )
+        .expect("the flag parses");
+        assert!(matches!(parsed, Parsed::Version));
     }
 
     #[test]

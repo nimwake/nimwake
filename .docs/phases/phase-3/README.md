@@ -53,6 +53,23 @@ active request가 있는 애플리케이션은 eviction 대상이 될 수 없다
 
 ---
 
+## 기기에서 확인된 제약
+
+`nimwake-android`가 §52의 수집 설계에 걸리는 것을 먼저 확인했다
+([nimwake-android#43](https://github.com/nimwake/nimwake-android/pull/43)).
+
+```text
+/proc/meminfo            Termux · proot 모두 읽힌다 (MemTotal 5452048 kB)
+/proc/pressure/memory    막혀 있다 — PSI를 쓸 수 없다
+```
+
+**PSI(Pressure Stall Information)를 전제로 설계하면 안 된다.** Linux 4.20+의
+표준이지만 Android가 앱에게 열어 주지 않는다. `MemAvailable` 폴링이 기기에서
+쓸 수 있는 유일한 길이다.
+
+§78·§80이 `MemAvailable`을 쓰는 것은 그래서 맞는 선택이었다. §52의 수집도
+같은 제약 아래 설계해야 한다.
+
 ## 남은 범위의 착수 조건
 
 - [ ] 실기기에서 `--min-free-memory-mb`를 켜고 돌린 데이터 — 지금은 꺼져 있다

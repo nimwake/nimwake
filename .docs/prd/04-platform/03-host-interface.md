@@ -32,6 +32,7 @@ nimwaked [APPS_DIR] [OPTIONS]
 | `--port <PORT>` | listen 주소의 port만 바꾼다. `0`이면 비어 있는 port를 고른다 |
 | `--min-free-memory-mb <MB>` | 잠든 app을 깨우기 전 필요한 가용 메모리. 기본 `0`은 검사하지 않는다 → [§78](../02-architecture/06-gateway-and-requests.md) |
 | `--trace-json`  | 구간 계측을 JSON 한 줄씩 출력한다 → [§72](../03-delivery/05-instrumentation.md) |
+| `-V`, `--version` | 버전 한 줄만 출력하고 `0`으로 끝낸다. daemon을 띄우지 않고 manifest도 읽지 않는다 |
 
 환경 변수 `NIMWAKE_LISTEN`이 기본 listen 주소를 정한다. 명령줄 인자가 우선한다.
 
@@ -117,6 +118,23 @@ host/port가 충돌하거나, 명령줄 인자가 잘못된 경우가 여기 해
 `69`는 시간이 해결할 수 있는 실패다. 이전 인스턴스가 아직 port를 쥐고 있는 경우가 대표적이다.
 
 ---
+
+### 버전을 묻는 방법
+
+```text
+nimwaked --version
+nimwaked 0.1.0-rc5
+```
+
+**daemon을 띄우지 않고** 묻는다. manifest도 읽지 않으므로 배포 전에도 답한다.
+
+호스트가 이것을 필요로 하는 이유: **모르는 인자는 설정 오류(`78`)다.** 새 flag를
+붙일지 결정하려면 먼저 그 binary가 무엇인지 알아야 한다. `nimwake-android`가
+`--min-free-memory-mb`를 호스트 설정으로 넘기면서 그 문제를 만났다.
+
+돌고 있는 daemon의 버전은 다른 질문이다 — `deploy`가 떠 있는 process를 바꾸지
+않으므로 디스크와 메모리가 다를 수 있다. 그쪽은 [§79](#79-status-snapshot)의
+`SIGUSR1`이 답한다.
 
 ### Health probe
 

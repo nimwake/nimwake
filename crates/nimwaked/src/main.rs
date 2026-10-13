@@ -40,6 +40,11 @@ fn main() -> ExitCode {
             print!("{}", options::USAGE);
             return ExitCode::SUCCESS;
         }
+        Ok(Parsed::Version) => {
+            // 한 줄만 낸다. 호스트가 파싱한다. (PRD §74)
+            println!("nimwaked {}", env!("CARGO_PKG_VERSION"));
+            return ExitCode::SUCCESS;
+        }
         Err(failure) => {
             // tracing이 아직 없다. 인자 오류는 사람이 보는 것이므로 stderr로 직접 적는다.
             eprintln!("{failure}\n\n{}", options::USAGE);
