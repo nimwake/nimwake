@@ -27,34 +27,52 @@ request
 
 ## Status
 
-> **Version: v0.0.1 — Lifecycle Foundation**
+> **Version: `v0.1.0-rc6` — Core Lifecycle**
 
-Nimwake is currently in an early experimental stage.
+Nimwake runs. It serves a real application on a real phone — a Galaxy A51 5G on
+Android 13, through Termux and proot — and has done so across 72-hour and 24-hour
+soak runs with zero non-200 responses, zero daemon restarts and zero orphaned
+processes.
 
-`v0.0.1` focuses on establishing the lifecycle and concurrency architecture that will eventually power scale-to-zero application execution.
+What works today:
 
-Current scope:
+- HTTP gateway with host-based routing and reverse proxy
+- real process execution, readiness probing and graceful shutdown
+- scale-to-zero: idle applications are stopped and woken by the next request
+- concurrent cold-start deduplication — N simultaneous requests spawn one process
+- crash-loop backoff, memory admission control and idle eviction under pressure
+- manifest reload on `SIGHUP`, status snapshot on `SIGUSR1`
+- `X-Forwarded-For`, request-span instrumentation, a benchmark harness
 
-- Rust workspace
-- application specification model
-- lifecycle state machine
-- per-application lifecycle manager
-- runtime abstraction
-- fake runtime for testing
-- concurrent cold-start deduplication
-- lifecycle and concurrency tests
+Not yet:
 
-Not yet implemented:
+- authentication, TLS or rate limiting — **by design**, see [Security](#security)
+- per-application access control
+- CLI and deployment tooling (Phase 2)
+- persistent state across daemon restarts
+- WebSocket and Server-Sent Events
 
-- real application process execution
-- HTTP gateway
-- reverse proxy
-- idle shutdown of real processes
-- deployment system
-- persistent storage
-- Android integration
+Nimwake is **pre-1.0 and not ready for production use**. The HTTP contract and
+the manifest format may still change.
 
-Nimwake is **not ready for production use**.
+## Security
+
+**Do not expose `nimwaked` directly to the internet.** It provides no
+authentication, no TLS and no rate limiting. That is a scope decision, not an
+oversight — exposure belongs to the thing that does exposure (a tunnel, a reverse
+proxy), and Nimwake handles lifecycle.
+
+The gateway listens on `127.0.0.1:8080` by default. Binding elsewhere is opt-in
+through `--listen`.
+
+Read [SECURITY.md](SECURITY.md) before exposing anything, and report
+vulnerabilities privately through
+[Security Advisories](https://github.com/nimwake/nimwake/security/advisories/new)
+rather than public issues.
+
+## License
+
+[MIT](LICENSE).
 
 ---
 
@@ -335,7 +353,7 @@ trait Runtime {
 }
 ```
 
-`v0.0.1` primarily uses:
+The test suite primarily uses:
 
 ```text
 FakeRuntime
@@ -479,7 +497,7 @@ Nimwake manages process lifecycle under concurrent traffic.
 
 Race conditions are therefore treated as correctness bugs rather than edge cases.
 
-The most important `v0.0.1` test is conceptually:
+The most important test is conceptually:
 
 ```text
 1,000 concurrent EnsureRunning calls
@@ -515,7 +533,12 @@ Every lifecycle race discovered in development should receive a regression test.
 
 # Roadmap
 
-### v0.0.1 — Lifecycle Foundation
+The milestones below are the development history. `.docs/prd/` is authoritative
+for what is planned — see [§62](.docs/prd/05-beyond-mvp/03-long-term-roadmap.md).
+
+**`v0.0.1` through `v0.0.5` have shipped.** They were the steps to `v0.1.0`.
+
+### v0.0.1 — Lifecycle Foundation *(shipped)*
 
 - state machine
 - AppManager actor
@@ -524,7 +547,7 @@ Every lifecycle race discovered in development should receive a regression test.
 - cold-start deduplication
 - concurrency tests
 
-### v0.0.2 — Process Runtime
+### v0.0.2 — Process Runtime *(shipped)*
 
 - real process spawning
 - process monitoring
@@ -533,7 +556,7 @@ Every lifecycle race discovered in development should receive a regression test.
 - graceful shutdown
 - forced termination
 
-### v0.0.3 — HTTP + Scale-to-Zero
+### v0.0.3 — HTTP + Scale-to-Zero *(shipped)*
 
 - HTTP gateway
 - Host routing
@@ -542,14 +565,14 @@ Every lifecycle race discovered in development should receive a regression test.
 - idle shutdown
 - stale timer protection
 
-### v0.0.4 — E2E & Load Testing
+### v0.0.4 — E2E & Load Testing *(shipped)*
 
 - automated E2E environment
 - cold-start storm
 - crash recovery
 - HTTP load tests
 
-### v0.0.5 — Release Qualification
+### v0.0.5 — Release Qualification *(shipped)*
 
 - lifecycle stress testing
 - resource leak detection
