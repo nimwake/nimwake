@@ -51,9 +51,13 @@ impl Harness {
         .expect("specs validate");
         let registry = Arc::new(registry);
 
-        let gateway = Gateway::bind(SocketAddr::from(([127, 0, 0, 1], 0)), Arc::clone(&registry))
-            .await
-            .expect("gateway binds");
+        let gateway = Gateway::bind(
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            Arc::clone(&registry),
+            nimwake_core::RequestLimits::default(),
+        )
+        .await
+        .expect("gateway binds");
         let port = gateway.local_addr().expect("gateway has an address").port();
 
         let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();

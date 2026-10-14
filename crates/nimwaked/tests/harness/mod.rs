@@ -269,6 +269,45 @@ impl Daemon {
             .unwrap_or_else(|error| panic!("gateway responds: {error}"))
     }
 
+    /// 큰 `Content-Length`를 **선언만** 하고 본문은 보내지 않는다. (PRD §83)
+    ///
+    /// gateway가 선언된 크기만으로 거절하는지 보려면 실제로 보내면 안 된다 —
+    /// 보내면 무엇 때문에 끊겼는지 구분할 수 없다.
+    pub fn post_declaring(
+        &self,
+        host: &str,
+        path: &str,
+        declared: usize,
+    ) -> std::io::Result<HttpResponse> {
+        use std::io::{Read, Write};
+
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", self.port))?;
+        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        let head = format!(
+            "POST {path} HTTP/1.1@Host: {host}@Content-Length: {declared}@Connection: close@@"
+        )
+        .replace('@', "\r\n");
+        stream.write_all(head.as_bytes())?;
+        stream.flush()?;
+
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw)?;
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let status = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .unwrap_or(0);
+        let body = text
+            .split_once("\r\n\r\n")
+            .map_or(String::new(), |(_, rest)| rest.to_owned());
+        Ok(HttpResponse {
+            status,
+            body,
+            headers: Vec::new(),
+        })
+    }
+
     /// daemon이 지금까지 출력한 줄들.
     /// 지금 상태를 로그에 쓰게 한다. (PRD §79)
     #[cfg(unix)]

@@ -1665,3 +1665,121 @@ fn a_malformed_range_refuses_to_start() {
         assert_eq!(code, 78, "`allow = [{bad}]`는 기동을 막는다: {output}");
     }
 }
+
+/// 느린 header는 상한에 걸려 끊긴다. (PRD §83)
+///
+/// **이 테스트가 `timer` 누락을 잡는다.** hyper의 `header_read_timeout`은
+/// `Builder::timer`가 없으면 조용히 동작하지 않는다 — 문서의 기본값 30초도
+/// 적용되지 않는다. 그래서 §83 전까지 header 읽기에 아무 상한이 없었다.
+#[test]
+fn a_slow_header_is_cut_off() {
+    use std::io::{Read, Write};
+
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "slow", port, Lifecycle::default());
+    let daemon = Daemon::start_with(&apps, &["--header-read-timeout-seconds", "1"]);
+
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", daemon.port()))
+        .expect("gateway accepts the connection");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .expect("read timeout is set");
+
+    // request line만 보내고 header를 끝내지 않는다 — slowloris의 모양이다.
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: slow.localhost\r\n")
+        .expect("the opening bytes are written");
+    stream.flush().expect("flushed");
+
+    // 상한이 없으면 여기서 영원히 막힌다. 있으면 gateway가 끊는다.
+    let mut sink = Vec::new();
+    let read = stream.read_to_end(&mut sink);
+
+    assert!(
+        read.is_ok(),
+        "gateway가 연결을 끊어야 한다. 읽기가 시간 초과로 실패했다면 상한이 없는 것이다: {read:?}",
+    );
+    assert!(
+        !is_listening(port),
+        "header도 다 받지 못한 요청이 application을 깨우면 안 된다",
+    );
+}
+
+/// 상한을 끄면(`0`) 느린 header를 기다린다. (PRD §83)
+///
+/// 켜져 있다는 것을 보이려면 꺼진 쪽도 달라야 한다.
+#[test]
+fn the_header_timeout_can_be_turned_off() {
+    use std::io::Write;
+
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "patient", port, Lifecycle::default());
+    let daemon = Daemon::start_with(&apps, &["--header-read-timeout-seconds", "0"]);
+
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", daemon.port()))
+        .expect("gateway accepts the connection");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout is set");
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: patient.localhost\r\n")
+        .expect("the opening bytes are written");
+    stream.flush().expect("flushed");
+
+    // 2초 안에 끊기지 않아야 한다 — 우리 쪽 읽기가 먼저 시간 초과한다.
+    let mut buffer = [0_u8; 64];
+    let outcome = std::io::Read::read(&mut stream, &mut buffer);
+    assert!(
+        outcome.is_err(),
+        "상한을 껐으면 gateway가 기다려야 한다. 끊겼다: {outcome:?}",
+    );
+}
+
+/// `Content-Length`가 상한을 넘으면 `413`이고 **app을 깨우지 않는다.** (PRD §83)
+#[test]
+fn a_declared_body_over_the_limit_is_refused_without_waking_the_app() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "small", port, Lifecycle::default());
+    let daemon = Daemon::start_with(&apps, &["--max-request-body-mb", "1"]);
+
+    assert!(!is_listening(port), "application starts asleep");
+
+    // 2MiB를 선언한다. 실제로 보내지 않아도 header만으로 거절된다.
+    let response = daemon
+        .post_declaring("small.localhost", "/", 2 * 1024 * 1024)
+        .expect("gateway responds");
+    assert_eq!(response.status, 413, "선언된 본문이 상한을 넘으면 413이다");
+
+    assert!(
+        !is_listening(port),
+        "거절할 요청이 application을 깨우면 안 된다",
+    );
+}
+
+/// 상한 안의 본문은 통과한다. (PRD §83)
+#[test]
+fn a_body_within_the_limit_is_served() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "ok-size", port, Lifecycle::default());
+    let daemon = Daemon::start_with(&apps, &["--max-request-body-mb", "1"]);
+
+    let response = daemon.post("ok-size.localhost", "/", "hello");
+    assert_eq!(response.status, 200);
+}
+
+/// 상한을 켜지 않으면 큰 본문도 통과한다. 기본은 꺼짐이다. (PRD §83)
+#[test]
+fn the_body_limit_is_off_by_default() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "unlimited", port, Lifecycle::default());
+    let daemon = Daemon::start(&apps);
+
+    let body = "x".repeat(256 * 1024);
+    let response = daemon.post("unlimited.localhost", "/", &body);
+    assert_eq!(response.status, 200, "기본값은 본문을 제한하지 않는다");
+}
