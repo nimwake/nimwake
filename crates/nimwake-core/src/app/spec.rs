@@ -6,6 +6,7 @@
 //! 계약은 한 문장이다: "이 command를 실행하면 이 port에서 HTTP application이 listen한다."
 
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -45,6 +46,25 @@ pub struct ServerSpec {
     pub host: String,
     /// application이 listen하는 loopback port.
     pub port: u16,
+    /// 이 application에 닿아도 되는 peer 대역. (PRD §82)
+    ///
+    /// **비어 있으면 모두 허용한다.** 기존 manifest는 그대로 동작한다.
+    ///
+    /// 문법이 틀리면 §21의 전체 검증에서 걸려 daemon이 뜨지 않는다. 접근 제어
+    /// 규칙을 조용히 건너뛰는 것은 열린 채로 도는 것과 같다.
+    #[serde(default)]
+    pub allow: Vec<super::cidr::Cidr>,
+}
+
+impl ServerSpec {
+    /// 이 peer가 application에 닿아도 되는가. (PRD §82)
+    ///
+    /// 판단에 쓰는 값은 **gateway가 직접 관측한 TCP peer**다. `X-Forwarded-For`는
+    /// 보지 않는다 — 클라이언트가 보낼 수 있어서 한 줄로 우회된다 (§81).
+    #[must_use]
+    pub fn allows(&self, peer: IpAddr) -> bool {
+        self.allow.is_empty() || self.allow.iter().any(|range| range.contains(peer))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

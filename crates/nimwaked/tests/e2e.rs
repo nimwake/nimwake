@@ -1524,3 +1524,144 @@ fn the_version_flag_does_not_need_manifests() {
     assert_eq!(code, 0, "manifest 없이도 버전은 답한다: {output}");
     assert!(output.contains("nimwaked "), "{output}");
 }
+
+/// peer 제한이 있는 manifest를 쓴다. (PRD §82)
+fn echo_allowing(apps: &Apps, name: &str, port: u16, allow: &str) {
+    let command = fixture("echo-server").display().to_string();
+    apps.manifest(
+        name,
+        &format!(
+            "name = \"{name}\"\n\
+             \n\
+             [server]\n\
+             host = \"{name}.localhost\"\n\
+             port = {port}\n\
+             allow = [{allow}]\n\
+             \n\
+             [runtime]\n\
+             command = [{command:?}, \"{port}\"]\n\
+             working_dir = \".\"\n\
+             \n\
+             [lifecycle]\n\
+             idle_timeout_seconds = 60\n\
+             startup_timeout_seconds = 10\n\
+             shutdown_timeout_seconds = 5\n\
+             max_pending_requests = 100\n",
+        ),
+    );
+}
+
+/// 대역 밖의 peer는 `403`을 받고 **app은 깨어나지 않는다.** (PRD §82)
+///
+/// 깨우지 않는 것이 핵심이다 — 거절할 요청이 process를 띄우면 그것만으로
+/// 자원 고갈 수단이 된다.
+#[test]
+fn a_peer_outside_the_allowlist_is_refused_without_waking_the_app() {
+    let apps = Apps::new();
+    let port = free_port();
+    // 테스트는 127.0.0.1에서 접속한다. LAN 대역만 허용하면 막혀야 한다.
+    echo_allowing(&apps, "lan-only", port, "\"192.168.0.0/16\"");
+    let daemon = Daemon::start(&apps);
+
+    assert!(!is_listening(port), "application starts asleep");
+
+    let response = daemon.get("lan-only.localhost");
+    assert_eq!(response.status, 403, "대역 밖의 peer는 거절한다");
+
+    // **깨우지 않았는지가 이 테스트의 핵심이다.**
+    assert!(
+        !is_listening(port),
+        "거절한 요청이 application을 깨우면 안 된다",
+    );
+
+    assert!(
+        daemon
+            .output()
+            .iter()
+            .any(|line| line.contains("peer is not allowed")),
+        "막은 사실을 로그에 남긴다",
+    );
+}
+
+/// 대역 안의 peer는 통과한다. (PRD §82)
+#[test]
+fn a_peer_inside_the_allowlist_is_served() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo_allowing(&apps, "loopback", port, "\"127.0.0.0/8\"");
+    let daemon = Daemon::start(&apps);
+
+    let response = daemon.get("loopback.localhost");
+    assert_eq!(response.status, 200, "대역 안의 peer는 서빙한다");
+    assert!(is_listening(port), "통과한 요청은 application을 깨운다");
+}
+
+/// `allow`를 적지 않으면 모두 허용한다. 기존 manifest는 그대로다. (PRD §82)
+#[test]
+fn an_absent_allowlist_permits_everyone() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "open", port, Lifecycle::default());
+    let daemon = Daemon::start(&apps);
+
+    assert_eq!(daemon.get("open.localhost").status, 200);
+}
+
+/// **`X-Forwarded-For`로 우회할 수 없다.** (PRD §82)
+///
+/// 이 테스트가 §82에서 가장 중요하다. 접근 제어가 XFF를 믿으면 header 한 줄로
+/// 뚫린다. 판단은 gateway가 직접 관측한 TCP peer로만 한다.
+#[test]
+fn a_forged_forwarded_header_cannot_bypass_the_allowlist() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo_allowing(&apps, "lan-only", port, "\"192.168.0.0/16\"");
+    let daemon = Daemon::start(&apps);
+
+    for forged in ["192.168.0.1", "192.168.0.1, 10.0.0.1", "127.0.0.1"] {
+        let response = daemon
+            .get_with_headers("lan-only.localhost", &[("X-Forwarded-For", forged)])
+            .expect("gateway responds");
+        assert_eq!(
+            response.status, 403,
+            "`X-Forwarded-For: {forged}`로 우회되면 안 된다",
+        );
+    }
+
+    assert!(!is_listening(port), "거절한 요청은 깨우지 않는다");
+}
+
+/// 여러 대역 중 하나만 맞아도 통과한다. (PRD §82)
+#[test]
+fn any_matching_range_admits_the_peer() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo_allowing(
+        &apps,
+        "multi",
+        port,
+        "\"192.168.0.0/16\", \"127.0.0.1\", \"10.0.0.0/8\"",
+    );
+    let daemon = Daemon::start(&apps);
+
+    assert_eq!(daemon.get("multi.localhost").status, 200);
+}
+
+/// 틀린 CIDR은 **daemon을 띄우지 않는다.** (PRD §82, §21)
+///
+/// 접근 제어 규칙을 조용히 건너뛰면 열린 채로 도는 것과 같다.
+#[test]
+fn a_malformed_range_refuses_to_start() {
+    for bad in [
+        "\"not-a-range\"",
+        "\"192.168.0.0/33\"",
+        "\"192.168.0.9/16\"",
+    ] {
+        let apps = Apps::new();
+        let port = free_port();
+        echo_allowing(&apps, "broken", port, bad);
+
+        let (code, output) = Daemon::run_expecting_failure(&apps);
+        assert_eq!(code, 78, "`allow = [{bad}]`는 기동을 막는다: {output}");
+    }
+}
