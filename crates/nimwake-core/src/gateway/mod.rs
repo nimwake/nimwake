@@ -149,6 +149,26 @@ async fn handle(
         ));
     };
 
+    // **깨우기 전에 판단한다.** (PRD §82)
+    //
+    // 거절할 요청이 process를 띄우면 그것만으로 자원 고갈 수단이 된다. §78의
+    // 메모리 입장 제어와 같은 자리다.
+    //
+    // gateway가 직접 관측한 TCP peer만 본다. `X-Forwarded-For`는 보지 않는다 —
+    // 클라이언트가 보낼 수 있어서 한 줄로 우회된다 (§81).
+    if !app.spec().server.allows(peer.ip()) {
+        warn!(
+            app = app.name(),
+            peer = %peer.ip(),
+            "peer is not allowed to reach this application",
+        );
+        return Ok(finish(
+            &mut trace,
+            app.name(),
+            router::text(StatusCode::FORBIDDEN, "forbidden"),
+        ));
+    }
+
     // 상태를 보지 않고 acquire만 한다. SLEEPING이면 여기서 깨어난다. (Invariant 3)
     trace.acquire_started();
     let lease = match app.acquire().await {

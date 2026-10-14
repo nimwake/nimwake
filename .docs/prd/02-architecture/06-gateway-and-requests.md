@@ -558,4 +558,121 @@ Core는 TLS를 제공하지 않는다. TLS를 끝내는 쪽이 그 header의 주
 
 ---
 
+## 82. Per-Application Peer Allowlist
+
+application은 **자기에게 닿아도 되는 peer 대역**을 선언할 수 있다. gateway가
+직접 관측한 TCP peer 주소로 판단하고, 맞지 않으면 `403`으로 거절한다.
+
+```toml
+[server]
+host  = "notes.home.arpa"
+port  = 3103
+allow = ["192.168.0.0/16", "10.0.0.0/8"]
+```
+
+없으면 모두 허용한다. 기존 manifest는 그대로 동작한다.
+
+### 무엇이 문제였나
+
+한 daemon에 **공개 app과 LAN 전용 app이 함께** 있을 때, 지금은 둘을 가를 방법이
+없다. 모든 app이 같은 listener를 공유하고 gateway는 `Host` header만 본다.
+
+```text
+인터넷 → 터널 → cloudflared → gateway :8080    peer = 127.0.0.1
+같은 Wi-Fi ───────────────────→ gateway :8080    peer = 192.168.x.x
+```
+
+LAN 전용 app을 막는 것이 **"터널 설정에 그 이름이 없다"뿐이다.** 와일드카드
+`*.example.com`, `Host` 재작성, catch-all 규칙 중 하나만 잘못 써도 LAN 전용 app이
+인터넷에 열린다. 설정 파일 한 줄이 유일한 방어선이다.
+
+§61은 ingress security를 ingress 구현으로 분리했다. **그 분리는 유지한다** — 이
+절은 ingress를 대신하지 않는다. 다만 *"누가 이 app에 닿아도 되는가"는 app의
+성질*이고, 그것을 manifest에 적을 수 있어야 한다. 방어를 두 겹으로 둔다.
+
+### TCP peer만 본다 — `X-Forwarded-For`는 보지 않는다
+
+**이것이 이 절에서 가장 중요한 결정이다.**
+
+```text
+TCP peer            gateway가 kernel에서 직접 얻는다. 위조할 수 없다
+X-Forwarded-For     클라이언트가 보낼 수 있다. 위조할 수 있다
+```
+
+§81이 적은 그대로다 — XFF의 맨 왼쪽은 아무나 주장할 수 있는 값이다. 접근 제어가
+그것을 믿으면 `X-Forwarded-For: 192.168.0.1` 한 줄로 우회된다.
+
+판단에 쓰는 값은 §81이 XFF **맨 오른쪽에 덧붙이는 값과 같다.** 하나의 사실을 두
+곳에서 쓴다.
+
+### IPv4로 맞춘 IPv6를 IPv4로 본다
+
+gateway가 `::`에 bind하면 LAN의 `192.168.0.9`가 **`::ffff:192.168.0.9`로**
+도착한다. 이것을 IPv4로 되돌리지 않으면 `allow = ["192.168.0.0/16"]`이 조용히
+어긋난다.
+
+```text
+::ffff:192.168.0.9  →  192.168.0.9     이 변환을 먼저 한다
+```
+
+**어긋나는 방향이 둘 다 나쁘다.** LAN 규칙이 LAN 요청을 막으면(fail-closed) 사람이
+알아채고 규칙을 넓히는데, 그러다 터널까지 들어온다. loopback 규칙이 `::1`을 막으면
+터널이 죽는다. 둘 다 "규칙을 썼는데 생각과 다르게 동작하는" 상태다.
+
+### 규칙이 조용히 넓어지는 쪽으로 틀리지 않는다
+
+문법은 맞지만 **쓴 사람의 뜻과 다르게 동작하는** 두 가지를 거부한다.
+
+```text
+192.168.0.9/16        prefix 밖에 bit가 켜져 있다        거부
+::ffff:192.168.0.0/x  IPv4로 맞춘 IPv6를 그대로 썼다      거부
+```
+
+**host bit**: `192.168.0.9/16`을 받아들이려면 host bit를 지워야 하는데, 그것은
+"이 주소 하나"를 의도한 사람에게 **대역 전체를 여는 것**이다. 거부하고 고쳐 쓸
+것(`192.168.0.0/16`)을 오류에 적는다.
+
+**IPv4로 맞춘 IPv6 literal**: 정규화하면 `/112`가 IPv4의 prefix로 재해석되어
+뜻이 바뀌고, 정규화하지 않으면 peer만 IPv4로 되돌아가 영영 맞지 않는다. 어느
+쪽도 뜻과 다르므로 IPv4로 쓰라고 말한다. **peer 주소의 변환은 그대로 한다** —
+위의 "IPv4로 맞춘 IPv6를 IPv4로 본다"는 접속한 peer에 대한 것이고, 이것은
+manifest에 적는 값에 대한 것이다.
+
+### 거절할 때
+
+```text
+403 Forbidden
+app을 깨우지 않는다          §78과 같은 자리 — 깨우기 전에 판단한다
+로그 한 줄 (app · peer)      막힌 것을 운영자가 알아야 한다
+```
+
+**깨우지 않는 것이 핵심이다.** 거절할 요청이 process를 띄우면 그것만으로
+자원 고갈 수단이 된다.
+
+`404`가 아니라 `403`인 이유: app은 존재하고 요청자가 자격이 없다. `404`로
+숨기는 편이 정보를 덜 주지만, `Host`를 아는 사람은 이미 그 이름을 안다.
+
+### 틀린 CIDR은 기동을 막는다
+
+§21의 전체 검증에 들어간다. 하나라도 문법이 틀리면 **daemon이 뜨지 않고**, §76
+재적재는 거부되며 기존 상태가 남는다.
+
+접근 제어 규칙을 조용히 건너뛰면 **열린 채로 도는 것**과 같다. 규칙을 쓴 사람은
+그것이 적용된다고 믿는다.
+
+### 하지 않는 것
+
+| | |
+| --- | --- |
+| listener 분리 | `--listen`을 여럿 두고 app이 고르는 방식. 더 강하지만 계약이 크다. peer 제한으로 충분한지 먼저 본다 |
+| deny 목록 | allow만 둔다. 둘을 함께 두면 우선순위를 정해야 하고, 그 규칙을 잘못 읽는 것이 바로 구멍이다 |
+| host 이름 | 역방향 조회는 느리고 믿을 수 없다 |
+
+→ [§81 Forwarded Client Address](#81-forwarded-client-address) ·
+[§21 Manifest Validation](../02-architecture/05-manifest-and-readiness.md) ·
+[§61 Security](../05-beyond-mvp/02-platform-features.md) ·
+[§78 Memory Admission Control](../04-platform/03-host-interface.md)
+
+---
+
 ← [Application Manifest와 Readiness](../02-architecture/05-manifest-and-readiness.md) · [문서 인덱스](../README.md) · [Scale-to-Zero와 Graceful Shutdown](../02-architecture/07-scale-to-zero.md) →
