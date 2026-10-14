@@ -675,4 +675,77 @@ app을 깨우지 않는다          §78과 같은 자리 — 깨우기 전에 �
 
 ---
 
+## 83. Request Intake Limits
+
+gateway가 **요청을 받는 쪽**에 두 가지 상한을 둔다. §75는 backend의 *응답*을
+기다리는 시간이고, 이 절은 클라이언트가 보내는 *요청*이다.
+
+```text
+--header-read-timeout-seconds  요청 header를 다 받기까지 (기본 15초, 켜져 있음)
+--max-request-body-mb          요청 본문 크기 (기본 0 = 꺼짐)
+```
+
+**기본값이 다른 이유가 이 절의 핵심이다.**
+
+### 둘은 위험의 성질이 다르다
+
+```text
+느린 header   연결 하나가 Core의 task와 socket을 붙잡는다   Core 자신의 문제
+큰 본문       Core를 거쳐 backend로 흐를 뿐                 backend를 위한 방어
+```
+
+gateway는 요청 본문을 **버퍼링하지 않는다.** `Incoming`을 그대로 backend로
+흘린다. 그래서 큰 본문은 Core의 메모리를 먹지 않는다. 막아 주는 대상은 Core가
+아니라 application이다.
+
+느린 header는 다르다. header를 다 받기 전에는 어느 app으로 갈지도 모르므로,
+Core가 연결과 task를 쥔 채 기다린다. **1,000개를 천천히 열면 Core가 멈춘다.**
+이것이 slowloris다.
+
+### header 읽기 상한은 켜 둔다
+
+정상 클라이언트가 요청 header를 보내는 데 15초가 걸릴 이유가 없다. 끊어서
+곤란해지는 쪽이 없으므로 기본값을 둔다.
+
+`0`으로 끄는 길은 남긴다. 아주 느린 링크에서 운영자가 판단할 수 있다.
+
+### 본문 상한은 꺼 둔다
+
+**어떤 기본값이든 누군가의 정상 업로드를 깨뜨린다.** §75가 응답 body에 상한을
+두지 않은 것과 같은 이유다 — 막으려는 것은 큰 요청이 아니라 *악의적인* 요청인데,
+Core는 둘을 구분할 수 없다.
+
+application 프레임워크는 대개 자기 상한을 가지고 있다. Core의 상한은 그것이
+없거나 더 앞에서 끊고 싶을 때 쓰는 것이다.
+
+### 상한을 넘으면
+
+```text
+Content-Length가 상한을 넘는다   413, app을 깨우지 않는다
+흐르다가 상한을 넘는다 (chunked)  전송을 끊는다
+```
+
+**`Content-Length`를 먼저 본다.** 그러면 backend에 접속하기도 전에, app을
+깨우기도 전에 끝난다 — §82·§78과 같은 자리다.
+
+`Content-Length`가 없는 chunked 요청은 흘려 보면서 센다. 넘는 순간 끊지만, 그때는
+이미 backend가 일부를 받았다. **깨끗한 `413`을 줄 수 없다** — 응답이 이미 오고
+있을 수 있다. 그래도 끊는 이유는 `Content-Length`만 보면 chunked로 우회되기
+때문이다. 상한을 켠 사람은 그것이 적용된다고 믿는다.
+
+### 하지 않는 것
+
+| | |
+| --- | --- |
+| 연결 수 제한 | OS의 `somaxconn`과 fd 한계가 이미 건다. Core가 또 세면 두 곳이 된다 |
+| 속도 제한 | 요청자를 구분해야 하는데 Core는 인증이 없다. §61이 분리한 것 |
+| 응답 body 상한 | §75가 두지 않기로 한 것. backend는 Core가 띄운 것이라 신뢰 경계가 다르다 |
+
+→ [§75 Response Header Timeout](#75-response-header-timeout) ·
+[§82 Per-Application Peer Allowlist](#82-per-application-peer-allowlist) ·
+[§24 HTTP Contract](#24-http-contract) ·
+[§61 Security](../05-beyond-mvp/02-platform-features.md)
+
+---
+
 ← [Application Manifest와 Readiness](../02-architecture/05-manifest-and-readiness.md) · [문서 인덱스](../README.md) · [Scale-to-Zero와 Graceful Shutdown](../02-architecture/07-scale-to-zero.md) →

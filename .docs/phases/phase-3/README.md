@@ -70,6 +70,28 @@ active request가 있는 애플리케이션은 eviction 대상이 될 수 없다
 §78·§80이 `MemAvailable`을 쓰는 것은 그래서 맞는 선택이었다. §52의 수집도
 같은 제약 아래 설계해야 한다.
 
+### RSS는 메모리 여유의 대리값이 아니다
+
+`nimwake-android`가 §78·§80을 기기에서 돌리며 확인했다
+([리포트 14](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/14-memory-admission-eviction.md)).
+
+```text
+Next.js 블로그가 깨어 있을 때
+  RSS               93–97 MB
+  MemAvailable 감소  45–50 MB      약 절반
+```
+
+공유 페이지(Node 바이너리 · 라이브러리)와 파일 캐시가 RSS에는 들어가고
+MemAvailable 감소에는 덜 들어간다. 기기에서 임계값을 가용 −60MB로 두었을 때
+eviction이 일어나지 않은 이유가 이것이다.
+
+**§52가 app별 RSS를 모아 "N개를 동시에 깨워도 되는가"를 판단하면 과하게
+비관적인 답을 얻는다.** 봐야 하는 것은 RSS의 합이 아니라 **MemAvailable 감소의
+합**이다. 둘은 2배 가까이 다르다.
+
+§78·§80이 `MemAvailable`을 직접 보는 설계였던 것이 결과적으로 맞았다 — 그 값은
+이 차이를 이미 반영하고 있다.
+
 ## 남은 범위의 착수 조건
 
 - [ ] 실기기에서 `--min-free-memory-mb`를 켜고 돌린 데이터 — 지금은 꺼져 있다

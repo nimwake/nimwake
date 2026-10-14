@@ -175,7 +175,7 @@ fn serve(specs: Vec<AppSpec>, options: &Options) -> Result<(), Failure> {
         let registry = Arc::new(registry);
 
         // bind 실패는 시간이 해결할 수 있다. 이전 인스턴스가 아직 port를 쥐고 있을 수 있다.
-        let gateway = Gateway::bind(requested, Arc::clone(&registry))
+        let gateway = Gateway::bind(requested, Arc::clone(&registry), options.request_limits)
             .await
             .map_err(|error| {
                 Failure::unavailable(format!("failed to bind {requested}: {error}"))

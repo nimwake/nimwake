@@ -8,8 +8,8 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use nimwake_core::Limits;
 use nimwake_core::DEFAULT_GATEWAY_PORT;
+use nimwake_core::{Limits, RequestLimits};
 
 use crate::exit::Failure;
 
@@ -37,6 +37,13 @@ OPTIONS:
                         잠든 application을 깨우기 전에 있어야 하는 가용 메모리
                         기본 0은 검사하지 않는다. 부족하면 503으로 거절한다 (PRD §78)
                         돌고 있는 application은 내리지 않는다
+    --header-read-timeout-seconds <SECONDS>
+                        요청 header를 다 받기까지의 상한 (기본 15초)
+                        0은 끈다. 느린 header는 Core의 연결을 붙잡는다 (PRD §83)
+    --max-request-body-mb <MB>
+                        요청 본문의 최대 크기. 기본 0은 검사하지 않는다
+                        넘으면 413. gateway는 본문을 버퍼링하지 않으므로
+                        이것은 application을 위한 방어다 (PRD §83)
     --trace-json        구간 계측을 JSON 한 줄씩 출력한다 (benchmark mode, PRD §72)
                         요청 구간은 평소 꺼져 있고 이때만 켜진다
     -V, --version       버전만 출력하고 끝낸다 (daemon을 띄우지 않는다)
@@ -65,6 +72,8 @@ pub struct Options {
     pub trace_json: bool,
     /// daemon 수준 자원 한계. (PRD §78)
     pub limits: Limits,
+    /// 요청을 받는 쪽의 상한. (PRD §83)
+    pub request_limits: RequestLimits,
 }
 
 impl Default for Options {
@@ -74,6 +83,7 @@ impl Default for Options {
             listen: SocketAddr::from(([127, 0, 0, 1], DEFAULT_GATEWAY_PORT)),
             trace_json: false,
             limits: Limits::default(),
+            request_limits: RequestLimits::default(),
         }
     }
 }
@@ -134,6 +144,35 @@ where
                         "`--min-free-memory-mb` expects a number, got `{raw}`"
                     ))
                 })?;
+            }
+
+            // **기본값이 있는 유일한 상한이다.** (PRD §83)
+            //
+            // 정상 클라이언트가 header를 보내는 데 15초가 걸릴 이유가 없고,
+            // 느린 header는 어느 app으로 갈지 모르는 채로 Core를 붙잡는다.
+            // 0은 끈다 — 아주 느린 링크에서 운영자가 판단할 수 있다.
+            "--header-read-timeout-seconds" => {
+                let raw = value(&mut args, "--header-read-timeout-seconds")?;
+                let seconds: u64 = raw.parse().map_err(|_| {
+                    Failure::config(format!(
+                        "`--header-read-timeout-seconds` expects a number, got `{raw}`"
+                    ))
+                })?;
+                options.request_limits.header_read_timeout =
+                    (seconds > 0).then(|| std::time::Duration::from_secs(seconds));
+            }
+
+            // 0은 "검사하지 않음"이다. 어떤 기본값이든 누군가의 업로드를
+            // 깨뜨리므로 켜지 않는다. (PRD §83)
+            "--max-request-body-mb" => {
+                let raw = value(&mut args, "--max-request-body-mb")?;
+                let megabytes: u64 = raw.parse().map_err(|_| {
+                    Failure::config(format!(
+                        "`--max-request-body-mb` expects a number, got `{raw}`"
+                    ))
+                })?;
+                options.request_limits.max_request_body_bytes =
+                    (megabytes > 0).then(|| megabytes * 1024 * 1024);
             }
 
             // port만 바꾼다. `--listen 0.0.0.0:8080 --port 0`처럼 조합할 수 있다.
@@ -223,6 +262,51 @@ mod tests {
         )
         .expect("the flag parses");
         assert!(matches!(parsed, Parsed::Version));
+    }
+
+    /// 인자가 없으면 §83의 기본값이 그대로 온다. (PRD §83)
+    #[test]
+    fn request_limits_keep_their_defaults() {
+        let options = parse_args(&[]).expect("no arguments is valid");
+        assert_eq!(options.request_limits, RequestLimits::default());
+        assert!(
+            options.request_limits.header_read_timeout.is_some(),
+            "header 상한은 기본으로 켜져 있다",
+        );
+        assert!(options.request_limits.max_request_body_bytes.is_none());
+    }
+
+    /// `0`은 header 상한을 끈다. (PRD §83)
+    #[test]
+    fn a_zero_header_timeout_turns_it_off() {
+        let options = parse_args(&["--header-read-timeout-seconds", "0"]).expect("valid");
+        assert_eq!(options.request_limits.header_read_timeout, None);
+
+        let options = parse_args(&["--header-read-timeout-seconds", "30"]).expect("valid");
+        assert_eq!(
+            options.request_limits.header_read_timeout,
+            Some(std::time::Duration::from_secs(30)),
+        );
+    }
+
+    /// MB를 바이트로 바꾼다. `0`은 끈다. (PRD §83)
+    #[test]
+    fn the_body_limit_is_read_in_megabytes() {
+        let options = parse_args(&["--max-request-body-mb", "2"]).expect("valid");
+        assert_eq!(
+            options.request_limits.max_request_body_bytes,
+            Some(2 * 1024 * 1024),
+        );
+
+        let options = parse_args(&["--max-request-body-mb", "0"]).expect("valid");
+        assert_eq!(options.request_limits.max_request_body_bytes, None);
+    }
+
+    /// 숫자가 아니면 설정 오류다.
+    #[test]
+    fn non_numeric_limits_are_rejected() {
+        assert!(parse_args(&["--header-read-timeout-seconds", "soon"]).is_err());
+        assert!(parse_args(&["--max-request-body-mb", "big"]).is_err());
     }
 
     #[test]

@@ -39,11 +39,41 @@ pub use proxy::GatewayBody;
 /// 무한정 늦어져서는 안 된다.
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// 요청을 **받는 쪽**의 상한. (PRD §83)
+///
+/// `crate::Limits`와 다른 것이다 — 저쪽은 "app을 깨워도 되는가"이고 이쪽은
+/// "이 요청을 끝까지 받을 것인가"다. 그래서 기본값의 방침도 다르다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestLimits {
+    /// 요청 header를 다 받기까지의 상한. `None`이면 끈다.
+    ///
+    /// **기본값이 있다.** 정상 클라이언트가 header를 보내는 데 15초가 걸릴
+    /// 이유가 없고, 끊어서 곤란해지는 쪽이 없다. 느린 header는 어느 app으로
+    /// 갈지 모르는 상태에서 Core의 task와 socket을 붙잡는다 — slowloris다.
+    pub header_read_timeout: Option<Duration>,
+    /// 요청 본문의 최대 바이트. `None`이면 끈다.
+    ///
+    /// **기본이 끔이다.** 어떤 기본값이든 누군가의 정상 업로드를 깨뜨린다.
+    /// gateway는 본문을 버퍼링하지 않고 흘리므로 Core 자신은 위험하지 않다 —
+    /// 막아 주는 대상은 application이다. (PRD §83)
+    pub max_request_body_bytes: Option<u64>,
+}
+
+impl Default for RequestLimits {
+    fn default() -> Self {
+        Self {
+            header_read_timeout: Some(Duration::from_secs(15)),
+            max_request_body_bytes: None,
+        }
+    }
+}
+
 /// listen 중인 gateway.
 #[derive(Debug)]
 pub struct Gateway {
     listener: TcpListener,
     registry: Arc<AppRegistry>,
+    limits: RequestLimits,
 }
 
 impl Gateway {
@@ -51,9 +81,17 @@ impl Gateway {
     ///
     /// bind와 serve를 나눈 이유는 테스트가 `port 0`으로 bind한 뒤
     /// 실제 배정된 주소를 읽어야 하기 때문이다.
-    pub async fn bind(addr: SocketAddr, registry: Arc<AppRegistry>) -> std::io::Result<Self> {
+    pub async fn bind(
+        addr: SocketAddr,
+        registry: Arc<AppRegistry>,
+        limits: RequestLimits,
+    ) -> std::io::Result<Self> {
         let listener = TcpListener::bind(addr).await?;
-        Ok(Self { listener, registry })
+        Ok(Self {
+            listener,
+            registry,
+            limits,
+        })
     }
 
     /// 실제로 bind된 주소.
@@ -85,12 +123,21 @@ impl Gateway {
                     let registry = Arc::clone(&self.registry);
                     // peer를 handler까지 흘린다. backend에게 누가 접속했는지
                     // 알려 주는 유일한 출처다. (PRD §81)
+                    let limits = self.limits;
                     let service = service_fn(move |request| {
-                        handle(Arc::clone(&registry), peer, request)
+                        handle(Arc::clone(&registry), peer, request, limits)
                     });
 
-                    let connection = http1::Builder::new()
-                        .serve_connection(TokioIo::new(stream), service);
+                    // **`timer`를 함께 설정해야 한다.** (PRD §83)
+                    //
+                    // hyper의 `header_read_timeout`은 `Timer` 없이는 동작하지
+                    // 않는다. 기본값 30초가 문서에 적혀 있지만 timer를 주지
+                    // 않으면 적용되지 않는다 — 여기에 timer가 없어서 지금까지
+                    // header 읽기에 **아무 상한이 없었다.**
+                    let mut builder = http1::Builder::new();
+                    builder.timer(hyper_util::rt::TokioTimer::new());
+                    builder.header_read_timeout(limits.header_read_timeout);
+                    let connection = builder.serve_connection(TokioIo::new(stream), service);
                     let connection = graceful.watch(connection);
 
                     tokio::spawn(async move {
@@ -119,6 +166,21 @@ impl Gateway {
     }
 }
 
+/// `Content-Length`가 선언한 본문 크기. 없거나 읽을 수 없으면 `None`.
+///
+/// 값이 여럿이거나 숫자가 아니면 `None`을 돌려준다 — 그런 요청은 hyper가
+/// 먼저 거부하거나 chunked로 다루므로, 여기서 판단하지 않고 흐름 검사에 맡긴다.
+fn declared_body_length(request: &Request<Incoming>) -> Option<u64> {
+    request
+        .headers()
+        .get(http::header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 /// 요청 하나를 처리한다.
 ///
 /// 어떤 경로로도 실패를 밖으로 내보내지 않는다. gateway는 항상 응답을 만든다.
@@ -126,6 +188,7 @@ async fn handle(
     registry: Arc<AppRegistry>,
     peer: SocketAddr,
     request: Request<Incoming>,
+    limits: RequestLimits,
 ) -> Result<Response<GatewayBody>, Infallible> {
     let mut trace = RequestTrace::received();
 
@@ -169,6 +232,26 @@ async fn handle(
         ));
     }
 
+    // **선언된 본문이 상한을 넘으면 여기서 끝낸다.** (PRD §83)
+    //
+    // backend에 접속하기도, app을 깨우기도 전이다 — §82·§78과 같은 자리다.
+    // `Content-Length`가 없는 chunked 요청은 흘려 보면서 센다 (proxy).
+    if let Some(limit) = limits.max_request_body_bytes {
+        if let Some(declared) = declared_body_length(&request) {
+            if declared > limit {
+                warn!(
+                    app = app.name(),
+                    declared, limit, "request body exceeds the configured limit",
+                );
+                return Ok(finish(
+                    &mut trace,
+                    app.name(),
+                    router::text(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large"),
+                ));
+            }
+        }
+    }
+
     // 상태를 보지 않고 acquire만 한다. SLEEPING이면 여기서 깨어난다. (Invariant 3)
     trace.acquire_started();
     let lease = match app.acquire().await {
@@ -183,7 +266,16 @@ async fn handle(
 
     trace.proxy_started();
     let header_timeout = app.spec().lifecycle.response_header_timeout();
-    let response = match proxy::forward(lease, request, peer, header_timeout, &mut trace).await {
+    let response = match proxy::forward(
+        lease,
+        request,
+        peer,
+        header_timeout,
+        limits.max_request_body_bytes,
+        &mut trace,
+    )
+    .await
+    {
         Ok(response) => response,
         Err(error) => {
             let status = proxy::status_for(&error);
@@ -204,4 +296,31 @@ fn finish(
     trace.response_started();
     trace.emit(app, response.status().as_u16());
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **header 읽기 상한은 기본으로 켜져 있다.** (PRD §83)
+    ///
+    /// §83에서 유일하게 기본값을 가진 상한이다. 끄면 slowloris가 그대로 통한다.
+    /// e2e는 `--header-read-timeout-seconds`를 명시해서 돌기 때문에 기본값이
+    /// 바뀐 것을 잡지 못한다 — 그래서 여기서 못 박는다.
+    #[test]
+    fn the_header_read_timeout_is_on_by_default() {
+        assert_eq!(
+            RequestLimits::default().header_read_timeout,
+            Some(Duration::from_secs(15)),
+            "기본으로 켜져 있어야 한다",
+        );
+    }
+
+    /// **본문 상한은 기본으로 꺼져 있다.** (PRD §83)
+    ///
+    /// 어떤 기본값이든 누군가의 정상 업로드를 깨뜨린다.
+    #[test]
+    fn the_body_limit_is_off_by_default() {
+        assert_eq!(RequestLimits::default().max_request_body_bytes, None);
+    }
 }

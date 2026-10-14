@@ -17,6 +17,7 @@ use http::{Request, Response};
 use http_body::{Body, Frame, SizeHint};
 use http_body_util::combinators::BoxBody;
 use http_body_util::BodyExt;
+use http_body_util::Limited;
 use hyper::body::Incoming;
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
@@ -83,6 +84,7 @@ pub(super) async fn forward(
     request: Request<Incoming>,
     peer: std::net::SocketAddr,
     header_timeout: Duration,
+    max_body_bytes: Option<u64>,
     trace: &mut crate::trace::RequestTrace,
 ) -> Result<Response<GatewayBody>, ProxyError> {
     let addr = lease.backend().addr();
@@ -115,7 +117,7 @@ pub(super) async fn forward(
         });
 
         let response = sender
-            .send_request(to_backend_request(request, peer))
+            .send_request(to_backend_request(request, peer, max_body_bytes))
             .await
             .map_err(ProxyError::Request)?;
 
@@ -138,7 +140,15 @@ pub(super) async fn forward(
 /// 들어온 요청을 backend로 보낼 형태로 바꾼다.
 ///
 /// `Host` header는 그대로 넘긴다. application이 자기 host를 볼 수 있어야 한다.
-fn to_backend_request(request: Request<Incoming>, peer: std::net::SocketAddr) -> Request<Incoming> {
+/// backend로 보낼 요청. 본문은 상한을 세면서 흘린다. (PRD §83)
+///
+/// **상한이 꺼져 있어도 `Limited`로 감싼다.** `usize::MAX`를 주면 사실상 무제한
+/// 이고, 경로를 하나로 유지하는 편이 두 갈래를 두는 것보다 틀릴 여지가 적다.
+fn to_backend_request(
+    request: Request<Incoming>,
+    peer: std::net::SocketAddr,
+    max_body_bytes: Option<u64>,
+) -> Request<Limited<Incoming>> {
     let (mut parts, body) = request.into_parts();
 
     // client conn은 origin-form을 기대한다. absolute-form으로 들어온 요청을 정규화한다.
@@ -152,7 +162,14 @@ fn to_backend_request(request: Request<Incoming>, peer: std::net::SocketAddr) ->
 
     strip_hop_by_hop(&mut parts.headers);
     append_forwarded_for(&mut parts.headers, peer);
-    Request::from_parts(parts, body)
+
+    // `Content-Length`가 선언한 크기는 gateway가 이미 봤다. 여기는 **흐르면서
+    // 넘는 경우**(chunked)를 위한 것이다. 넘으면 body가 오류를 내고 전송이
+    // 끊긴다 — 그때는 backend가 일부를 받은 뒤라 깨끗한 `413`을 줄 수 없다.
+    let limit = max_body_bytes.map_or(usize::MAX, |bytes| {
+        usize::try_from(bytes).unwrap_or(usize::MAX)
+    });
+    Request::from_parts(parts, Limited::new(body, limit))
 }
 
 /// 관측한 peer 주소를 `X-Forwarded-For`에 덧붙인다. (PRD §81)

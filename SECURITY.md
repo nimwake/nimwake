@@ -41,6 +41,9 @@
 | application 격리 | 각 application은 자기 process. gateway는 `127.0.0.1:<port>`로만 접속한다 |
 | manifest 검증 | 기동 시 전부 검증한다. 하나라도 틀리면 **뜨지 않는다** ([§21](.docs/prd/02-architecture/05-manifest-and-readiness.md)) |
 | `X-Forwarded-For` | gateway가 관측한 peer를 덧붙인다. **맨 오른쪽만 믿을 수 있다** ([§81](.docs/prd/02-architecture/06-gateway-and-requests.md)) |
+| application별 접근 제어 | `allow = ["192.168.0.0/16"]`으로 닿아도 되는 대역을 선언한다. 판단은 **TCP peer로만** 한다 — `X-Forwarded-For`는 위조 가능하다. 넘어온 요청은 app을 깨우지 않고 `403` ([§82](.docs/prd/02-architecture/06-gateway-and-requests.md)) |
+| 느린 header 차단 | 요청 header를 15초 안에 다 받지 못하면 끊는다 (slowloris). 기본으로 켜져 있다 ([§83](.docs/prd/02-architecture/06-gateway-and-requests.md)) |
+| 요청 본문 상한 | `--max-request-body-mb`. 기본은 꺼짐 — 어떤 기본값이든 누군가의 업로드를 깨뜨린다. gateway는 본문을 버퍼링하지 않으므로 이것은 application을 위한 방어다 ([§83](.docs/prd/02-architecture/06-gateway-and-requests.md)) |
 
 ## 아직 없는 것 — 노출 전에 아셔야 합니다
 
@@ -48,12 +51,12 @@
 
 | | |
 | --- | --- |
-| application별 접근 제어 | 한 daemon의 모든 app이 같은 listener를 공유한다. "이 app은 LAN만"을 Core가 강제하지 못한다 |
-| 요청 본문 크기 상한 | 없다. 큰 본문이 그대로 backend까지 간다 |
-| 요청 header 읽기 제한 시간 | 없다 (slowloris). 응답 header 대기는 [§75](.docs/prd/02-architecture/06-gateway-and-requests.md)로 있다 |
+| 인증 | 없다. 요청자를 구분하지 않는다. 노출하려면 앞에 두어야 한다 |
+| TLS | 없다. 평문 HTTP만 말한다 |
+| 속도 제한 | 없다. 요청자를 구분해야 하는데 그럴 수단이 없다 |
 
-앞의 둘 때문에 **터널이나 reverse proxy 뒤에 두는 것이 선택이 아니라 요구사항**
-입니다. Cloudflare Tunnel 같은 provider가 본문 크기와 느린 요청을 먼저 걸러 줍니다.
+이 셋 때문에 **터널이나 reverse proxy 뒤에 두는 것이 선택이 아니라 요구사항**
+입니다.
 
 ## 범위
 

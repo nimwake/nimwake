@@ -23,7 +23,7 @@ pub mod trace;
 
 pub use app::{AppHandle, AppSpec, AppStateName, AppStatus, RequestLease, StopReason};
 pub use error::{AcquireError, AppError, ManifestError, RuntimeError, ValidationError};
-pub use gateway::Gateway;
+pub use gateway::{Gateway, RequestLimits};
 pub use limits::Limits;
 pub use registry::{AppRegistry, DEFAULT_GATEWAY_PORT};
 #[cfg(unix)]
