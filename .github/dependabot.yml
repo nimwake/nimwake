@@ -1,0 +1,30 @@
+# 공개 레포가 되면서 켠다. 의존성 갱신 PR을 자동으로 연다.
+#
+# 이 workspace의 의존성은 전부 기반 설비(hyper · tokio · serde · toml · tracing)라
+# 수가 적다. 주마다 묶어서 열면 소음이 되지 않는다.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    # 한 PR에 묶는다. 하나씩 열면 CI를 그만큼 돌린다.
+    groups:
+      cargo:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(deps)"
+
+  # actions/checkout 같은 것도 고정된 major를 따라간다.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "chore(ci)"
