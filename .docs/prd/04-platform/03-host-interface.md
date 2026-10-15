@@ -136,6 +136,21 @@ nimwaked 0.1.0-rc5
 않으므로 디스크와 메모리가 다를 수 있다. 그쪽은 [§79](#79-status-snapshot)의
 `SIGUSR1`이 답한다.
 
+### 정지는 시작과 완료를 모두 남긴다
+
+```text
+INFO stopping application  app=blog operation_id=op#2 process=proc#1 reason=idle
+INFO stopped application   app=blog operation_id=op#2 process=proc#1 took_ms=41 waiting=0
+```
+
+`operation_id`가 두 줄을 짝지운다. `took_ms`는 **정지가 시작된 때부터**이고,
+정지 중에 요청이 합류해도 그 시각으로 다시 잡지 않는다 — 합류부터 재면 걸린
+시간이 실제보다 짧게 나오고, 그 수치를 보고 정지가 빠르다고 판단하게 된다.
+
+완료 줄이 없으면 정지가 끝났는지도, 얼마나 걸렸는지도 알 수 없다.
+`nimwake-android`가 블로그의 SIGTERM 정지(35~46ms)를 재면서 **프로세스를 직접
+봐야 했다** — Core가 시작만 남기고 있었다.
+
 ### Health probe
 
 supervisor는 gateway가 살아 있는지 주기적으로 확인해야 한다.

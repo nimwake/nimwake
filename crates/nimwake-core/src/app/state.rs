@@ -40,6 +40,11 @@ pub(crate) enum AppState {
         operation_id: OperationId,
         process: ProcessHandle,
         waiters: Vec<Waiter>,
+        /// 정지를 시작한 시각. 완료 로그가 걸린 시간을 적는다. (PRD §79)
+        ///
+        /// `nimwake-android`가 블로그의 SIGTERM 정지를 재면서 **프로세스를 직접
+        /// 봐야 했다** — Core가 시작만 남기고 완료를 남기지 않았다.
+        since: Instant,
     },
 
     Failed {

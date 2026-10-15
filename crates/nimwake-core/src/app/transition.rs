@@ -190,6 +190,7 @@ pub(super) fn on_acquire(state: AppState, waiter: Waiter, ctx: &Ctx<'_>) -> Step
             operation_id,
             process,
             waiters,
+            since,
         } => {
             let (waiters, effects) = enqueue(waiters, waiter, ctx);
             Step::with(
@@ -197,6 +198,9 @@ pub(super) fn on_acquire(state: AppState, waiter: Waiter, ctx: &Ctx<'_>) -> Step
                     operation_id,
                     process,
                     waiters,
+                    // 합류가 정지 시작 시각을 밀지 않는다. 걸린 시간은 정지가
+                    // 시작된 때부터다.
+                    since,
                 },
                 effects,
             )
@@ -462,6 +466,7 @@ fn begin_stop(
             operation_id,
             process: process.clone(),
             waiters,
+            since: ctx.now,
         },
         vec![Effect::Stop {
             process,
@@ -485,8 +490,26 @@ pub(super) fn on_stop_completed(
         AppState::Stopping {
             operation_id: current,
             waiters,
-            ..
-        } if current == operation_id => finish_stop(waiters, ctx),
+            since,
+            process,
+        } if current == operation_id => {
+            // **정지 완료를 남긴다.** (PRD §79)
+            //
+            // 전에는 `stopping application`만 있어서 정지가 끝났는지, 얼마나
+            // 걸렸는지 로그로 알 수 없었다. `nimwake-android`가 블로그의
+            // SIGTERM 정지를 재면서 프로세스를 직접 봐야 했다.
+            //
+            // `operation_id`가 시작 줄과 짝이 된다.
+            info!(
+                app = %ctx.spec.name,
+                %operation_id,
+                process = %process.id(),
+                took_ms = ctx.now.saturating_duration_since(since).as_millis(),
+                waiting = waiters.len(),
+                "stopped application",
+            );
+            finish_stop(waiters, ctx)
+        }
         other => Step::new(other),
     }
 }
