@@ -28,13 +28,13 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # toolchain과 component는 rust-toolchain.toml이 결정한다.
       # 첫 cargo 호출에서 rustup이 자동으로 설치한다.
       # 예제(`examples/hello-node`)를 실제로 띄우는 E2E가 있다.
       # node가 없으면 그 테스트는 조용히 건너뛰므로, 여기서 반드시 깔아 둔다.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -44,7 +44,7 @@ jobs:
           cargo --version
 
       - name: Cache cargo registry and build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
