@@ -37,7 +37,7 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Show toolchain
         run: |
@@ -104,7 +104,7 @@ jobs:
           echo "tag ${GITHUB_REF_NAME} matches the crate version"
 
       - name: Cache cargo registry and build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -155,7 +155,7 @@ jobs:
 
       - name: Upload the report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: performance-report
           path: |
@@ -183,7 +183,7 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install cross
         timeout-minutes: 15
@@ -291,7 +291,7 @@ jobs:
           echo "every binary in the tarball executes on aarch64"
 
       - name: Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.OUT_DIR }}
           path: ${{ env.OUT_DIR }}/
@@ -306,10 +306,10 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
