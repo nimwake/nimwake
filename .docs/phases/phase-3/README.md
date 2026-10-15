@@ -94,8 +94,34 @@ eviction이 일어나지 않은 이유가 이것이다.
 
 ## 남은 범위의 착수 조건
 
-- [ ] 실기기에서 `--min-free-memory-mb`를 켜고 돌린 데이터 — 지금은 꺼져 있다
-- [ ] 그 데이터에서 §78·§80으로 부족한 것이 확인됨 ([PRD §64 Rule 8](../../prd/06-conventions/01-development-rules.md))
+- [x] 실기기에서 `--min-free-memory-mb`를 켜고 돌린 데이터 — **충족.** 기기가
+      `--min-free-memory-mb 512`로 떠 있고
+      [리포트 14](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/14-memory-admission-eviction.md)가
+      §78·§80을 실증했다
+- [ ] 그 데이터에서 §78·§80으로 **부족한 것**이 확인됨 ([PRD §64 Rule 8](../../prd/06-conventions/01-development-rules.md))
+      — **미충족.** 둘은 동작한다
+
+### 둘째 조건이 왜 미충족인가
+
+리포트 14는 §78과 §80이 **동작한다**는 것을 보였다. 설계 제약 하나를 주었지만
+(위의 RSS ↔ MemAvailable) 부족함을 보이지는 않았다.
+
+실사용 수치가 그것을 뒷받침한다. 블로그 + echo를 돌리는 기기에서:
+
+```text
+MemAvailable 최소   2472 MB        임계값 512 MB의 4.8배
+evicting …          0건
+refusing to wake    0건
+```
+
+**메모리 압박이 실제로 오지 않는다.** 2 GB 급 여유가 남는 기기에서 §52의 수집을
+만들면 쓰이지 않는 계약이 하나 늘어난다.
+
+§54의 `priority`와 `always_on`도 같다 — 지금 §80이 "가장 오래 유휴인 것"을 고르는데,
+그 선택이 틀렸던 사례가 아직 없다(고른 적이 없으므로).
+
+**이 절을 열려면 기기에서 무엇이 모자랐는지가 먼저 나와야 한다.** 앱이 늘거나
+더 무거워져서 압박이 실제로 오는 때다.
 
 **`priority`와 `always_on`을 먼저 만들지 않는다.** manifest 항목은 한 번
 내보내면 계약이 되고, 지금은 "어느 app을 지켜야 하는가"의 실제 사례가 없다.
