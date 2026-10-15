@@ -241,6 +241,48 @@ working_dir = "."
         assert_eq!(spec.lifecycle.idle_timeout(), Duration::from_secs(60));
     }
 
+    /// **문서화된 기본값은 계약이다.** (PRD §21)
+    ///
+    /// 이 다섯 값은 PRD §21의 manifest 예시에 그대로 적혀 있고, 운영자가 그것을
+    /// 베껴 쓴다. 코드에서 하나를 바꾸면 문서가 거짓이 되고, manifest에 적지
+    /// 않은 app의 동작이 말없이 달라진다.
+    ///
+    /// `parses_manifest_with_default_lifecycle`은 "빠뜨린 값이 기본값으로
+    /// 채워진다"를 보지만 **그 기본값이 얼마인지는 보지 않는다.** `idle_timeout`
+    /// 하나만 예외였다. 나머지 넷은 아무도 지키지 않아서, 바꿔도 테스트가
+    /// 전부 통과했다.
+    ///
+    /// 바꿔야 한다면 PRD §21을 먼저 고치고 여기를 맞춘다.
+    #[test]
+    fn the_documented_lifecycle_defaults_are_a_contract() {
+        let lifecycle = LifecycleSpec::default();
+
+        assert_eq!(
+            lifecycle.idle_timeout(),
+            Duration::from_secs(60),
+            "idle_timeout_seconds = 60",
+        );
+        assert_eq!(
+            lifecycle.startup_timeout(),
+            Duration::from_secs(5),
+            "startup_timeout_seconds = 5",
+        );
+        assert_eq!(
+            lifecycle.shutdown_timeout(),
+            Duration::from_secs(5),
+            "shutdown_timeout_seconds = 5",
+        );
+        assert_eq!(
+            lifecycle.response_header_timeout(),
+            Duration::from_secs(60),
+            "response_header_timeout_seconds = 60 (§75)",
+        );
+        assert_eq!(
+            lifecycle.max_pending_requests, 256,
+            "max_pending_requests = 256",
+        );
+    }
+
     #[test]
     fn rejects_unknown_fields() {
         let source = format!("{MANIFEST}\n[lifecycle]\nidle_timeout_secondz = 1\n");
