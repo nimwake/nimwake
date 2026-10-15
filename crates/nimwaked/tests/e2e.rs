@@ -1783,3 +1783,111 @@ fn the_body_limit_is_off_by_default() {
     let response = daemon.post("unlimited.localhost", "/", &body);
     assert_eq!(response.status, 200, "기본값은 본문을 제한하지 않는다");
 }
+
+/// 정지가 **끝난** 것과 걸린 시간을 로그에 남긴다. (PRD §79)
+///
+/// 전에는 `stopping application`만 있어서 정지가 끝났는지, 얼마나 걸렸는지
+/// 로그로 알 수 없었다. `nimwake-android`가 블로그의 SIGTERM 정지를 재면서
+/// **프로세스를 직접 봐야 했다** (그쪽 리포트 13).
+#[test]
+fn stopping_an_application_logs_its_completion_and_duration() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "brief", port, Lifecycle::default().idle(1));
+    let daemon = Daemon::start(&apps);
+
+    assert_eq!(daemon.get("brief.localhost").status, 200);
+    assert!(is_listening(port), "application is awake");
+
+    // idle timeout이 정지시킬 때까지 기다린다.
+    wait_for(
+        "the idle timeout to stop the app",
+        Duration::from_secs(10),
+        || !is_listening(port),
+    );
+
+    let lines = daemon.output();
+    let started = lines
+        .iter()
+        .find(|line| line.contains("stopping application") && line.contains("app=brief"));
+    let finished = lines
+        .iter()
+        .find(|line| line.contains("stopped application") && line.contains("app=brief"));
+
+    assert!(started.is_some(), "정지 시작은 전부터 남았다: {lines:?}");
+    let finished = finished.unwrap_or_else(|| panic!("정지 완료가 로그에 없다: {lines:?}"));
+
+    assert!(
+        finished.contains("took_ms="),
+        "걸린 시간이 없으면 재려고 프로세스를 봐야 한다: {finished}",
+    );
+
+    // 시작 줄과 완료 줄이 같은 operation으로 짝이 되어야 한다.
+    let operation_of = |line: &str| {
+        line.split_whitespace()
+            .find(|field| field.starts_with("operation_id="))
+            .map(ToOwned::to_owned)
+    };
+    assert_eq!(
+        operation_of(started.expect("start line")),
+        operation_of(finished),
+        "시작과 완료가 같은 operation_id여야 짝을 지을 수 있다",
+    );
+}
+
+/// 정지 중 요청이 합류해도 `took_ms`는 **정지가 시작된 때부터**다. (PRD §79)
+///
+/// 합류 지점에서 시각을 다시 잡으면 걸린 시간이 실제보다 짧게 나온다. 측정값이
+/// 조용히 거짓이 되는 쪽이 아예 없는 것보다 나쁘다 — 그 수치를 보고 정지가
+/// 빠르다고 판단하게 된다.
+#[test]
+fn a_request_joining_a_stop_does_not_shorten_the_reported_duration() {
+    let apps = Apps::new();
+    let port = free_port();
+    let command = [
+        fixture("stubborn-server").display().to_string(),
+        port.to_string(),
+    ];
+    // stubborn-server는 SIGTERM을 무시하므로 shutdown timeout 내내 STOPPING이다.
+    apps.app(
+        "joiner",
+        port,
+        &command,
+        Lifecycle::default().idle(1).shutdown(5),
+    );
+    let daemon = Daemon::start(&apps);
+
+    assert_eq!(daemon.get("joiner.localhost").status, 200);
+
+    // idle timeout(1초)이 지나 STOPPING에 들어간다. SIGTERM을 무시하므로 정지는
+    // shutdown timeout(5초)만큼, 약 1초~6초 구간이다.
+    //
+    // **합류를 한참 뒤에 만든다.** 1.5초에 합류시키면 "합류부터"와 "정지 시작부터"가
+    // 둘 다 2.5초가 되어 뮤테이션이 통과한다 — 실제로 겪었다. 3초면 3초 대 5초다.
+    std::thread::sleep(Duration::from_millis(3000));
+    assert_eq!(
+        daemon.get("joiner.localhost").status,
+        200,
+        "정지 중 요청은 재기동으로 처리된다 (PRD §31)",
+    );
+
+    let completion = daemon
+        .output()
+        .into_iter()
+        .find(|line| line.contains("stopped application") && line.contains("app=joiner"))
+        .unwrap_or_else(|| panic!("정지 완료 로그가 없다"));
+
+    let took_ms: u128 = completion
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("took_ms="))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("took_ms를 읽을 수 없다: {completion}"));
+
+    // SIGTERM을 무시하는 app이라 shutdown timeout(5초)만큼 걸린다. 합류 시각부터
+    // 재면 3초 남짓으로 보인다.
+    assert!(
+        took_ms >= 4_000,
+        "정지는 shutdown timeout(5초)만큼 걸렸는데 {took_ms}ms로 보고됐다 — \
+         합류 지점부터 재고 있다: {completion}",
+    );
+}
