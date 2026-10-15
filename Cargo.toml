@@ -12,7 +12,7 @@ members = [
 #
 # `v0.1.0-rc1`의 nimwaked가 자기 버전을 `0.0.1`로 알리는 문제가 있었다.
 # 운영 로그만으로 어떤 release가 도는지 알 수 없었다. (이슈 #24)
-version = "0.1.0-rc7"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"

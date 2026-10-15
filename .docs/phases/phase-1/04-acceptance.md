@@ -186,61 +186,70 @@ DoD 목록(아래)은 §12의 불변식과 1:1이 아니다. 어느 불변식이
 
 **Core가 검증을 수행하지는 않는다.** 입력이 다른 저장소의 리포트다. Core가 할
 일은 aarch64 바이너리를 공급하는 것까지이고 그것은 `release.yml`에 있다.
+판정 결과는 아래에 적는다.
 
-다만 **판정 결과는 여기에 적는다.** 다른 절이 전부 근거를 적는데 이 절만
-비워 두면 "v0.1.0이 무엇을 기다리고 있는가"를 이 문서에서 알 수 없다.
+`V` 열은 그 근거를 얻은 바이너리다. **여섯 항목은 `v0.1.0-rc7`** — `v0.1.0`과
+런타임이 같은 코드다(테스트와 `dependabot.yml`만 뒤에 더해졌다).
 
-- [x] Install — 수동 설치로 전 시나리오 통과 · `make install` 멱등 ([01](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/01-a1-manual-baseline.md)). **초기화 기기 검증은 남았다 — 아래**
-- [x] Boot recovery — 재부팅 6회 연속 무인 READY, 부팅 직후 전부 SLEEPING ([02](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/02-a3-boot.md)) · rc4로 재확인, `make test-boot` lifecycle PASS
-- [x] Cold start — loopback · LAN · 1시간 방치 뒤 103ms ([02](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/02-a3-boot.md) · [05](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/05-a5-network.md)) · **rc6에서 실제 Next.js 앱 1.6–1.7초** ([13](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/13-blog-on-device.md))
-- [x] Scale-to-zero — idle → sleep → 새 PID · 동시 20 → process 1 · storm 1000 → spawn 1 ([08](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/08-core-d7c5590-bench.md)) · soak 표본마다 잔존 app 0
-- [x] Daemon recovery — `kill -9` → 1–2초 재기동 · exit 78 → UNHEALTHY · stop 잔존 0 ([04](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/04-a2-recovery.md))
-- [x] Network recovery — Wi-Fi 끊김 → **rc5에서 47초 뒤 복구**, nimwaked 같은 pid로 생존 ([05](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/05-a5-network.md))
-- [x] 24h soak — rc5 표본 288, non-200 0 · 잔존 app 0 · daemon 재기동 0
-- [x] 72h soak — `d7c5590` 표본 862, non-200 0 · 잔존 app 0 · 같은 pid 72시간 ([11](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/11-soak-d7c5590-72h.md))
+| ✓ | 항목 | 근거 | V |
+| - | ---- | ---- | - |
+| ✓ | Install | **초기화한 기기에서 `make install` 한 번(455초)으로 rc7 · 격리 daemon · 블로그까지** ([17](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/17-install-wiped-device.md)) | rc7 |
+| ✓ | Boot recovery | 잠금 해제 1분 뒤 READY · 부팅 직후 전부 SLEEPING · `make test-boot` PASS ([16](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/16-core-rc7.md) §6) | rc7 |
+| ✓ | Cold start | echo 0.107s · **블로그(Next.js) 1.649 · 1.686s**, readiness 약 1s로 Nimwake 몫은 30ms 남짓 ([16](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/16-core-rc7.md) §2) | rc7 |
+| ✓ | Scale-to-zero | idle 정지 → 새 PID로 cold · **동시 cold 20 → 프로세스 하나** ([16](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/16-core-rc7.md) §2) | rc7 |
+| ✓ | Daemon recovery | `kill -9` 뒤 재기동 · exit 78 → UNHEALTHY(재기동 없음) · stop 뒤 잔존 0 ([16](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/16-core-rc7.md) §2) | rc7 |
+| ✓ | Network recovery | Wi-Fi 끊김 → 61초 뒤 복구, **nimwaked 같은 pid 10689로 생존**(§13) ([16](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/16-core-rc7.md) §6) | rc7 |
+| ✓ | 24h soak | 표본 288 · non-200 0 · 잔존 app 0 · daemon 재기동 0 · RSS 2028 → 1132 KB | rc5 |
+| ✓ | 72h soak | 표본 862 · non-200 0 · 잔존 app 0 · **같은 pid 72시간** ([11](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/11-soak-d7c5590-72h.md)) | `d7c5590` |
 
-### 체크는 됐지만 태그 전에 다시 돌릴 것
+### soak 둘은 `v0.1.0`을 돌린 것이 아니다 — 알고 태깅했다
 
-위 근거는 `d7c5590` · rc4 · rc5 · rc6에 흩어져 있다. `nimwake-android`의 규칙은
-명확하다 — **`v0.1.0` 태그가 가리키는 commit이 검증한 것과 다르면 그 태그
-binary로 lifecycle · recovery를 다시 돌린다.**
+여섯 항목은 rc7에서 다시 얻었지만 **soak 둘은 그보다 앞선 바이너리의 근거다.**
+`nimwake-android`가 세운 기준을 그대로 적용하면 걸리는 것이 있다.
+
+> §77 · §78이 매 `acquire` 경로를 지나므로 `d7c5590`의 증거를 돌려 쓸 수 없다
+> — [09](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/09-android-acceptance.md)
+
+rc5 → `v0.1.0` 사이에 **정상 상태에 새로 생긴 연속 동작이 둘** 있다.
 
 ```text
-Install (초기화 기기)   Termux 데이터 삭제 → make install    A4의 완료 조건, 아직 안 함
-lifecycle · recovery    태그 binary로                        태그가 정해진 뒤
-§82 peer 제한           allow를 켜고 LAN·터널 양쪽에서        rc6 이후에 들어왔다
-§83 요청 상한           느린 header가 끊기는지                rc6 이후에 들어왔다
+§80 eviction ticker   10초마다. 기기가 --min-free-memory-mb 512로 떠 있어 활성이고
+                      72h면 약 25,900회, 매번 모든 app의 status()를 읽는다.
+                      rc5 soak은 임계값 0이라 이 루프가 아예 돌지 않았다
+§83 header timer      연결마다 타이머 하나
 ```
 
-마지막 둘은 rc6에 없다. 기기가 아직 한 번도 돌려 보지 않은 코드다.
+**긴 실행이 한 번도 덮지 않았다.** 느린 누수는 24h 미만에서 보이지 않는다.
+
+그래서 `v0.1.0`을 끊으면서 기기에서 **rc7 블로그 72h soak을 돌리고 있다**
+(2026-10-15 19:32 → 10-18 19:32). 결함이 나오면 `v0.1.1`로 고친다.
+
+이것을 기다리지 않고 태깅한 것은 **의식적인 선택**이다 — #59의 넷이 모두 끝나
+바로 쓸 수 있는 릴리스가 필요했고, §82 · §83이 정식 번호를 가져야 했다.
+나중에 이 표를 보는 사람이 "8/8이었다"로 읽지 않도록 여기 적어 둔다.
 
 ---
 
 ## 남은 것
 
 ```text
-Install        초기화 기기    Termux 데이터 삭제 → make install
-태그 binary    재검증         태그가 d7c5590과 다른 commit을 가리키므로
-§82 · §83      기기 검증      rc6 이후에 들어왔다 — 기기가 돌려 본 적이 없다
+rc7 72h soak    2026-10-15 19:32 → 10-18 19:32    진행 중
+                §80 ticker · §83 timer를 긴 실행에서 처음 본다
 ```
 
-**Core 쪽 구현은 끝났다.** PRD §1~§83, release gate도 실제 태그로 검증됐다.
+**그 밖에는 없다.** PRD §1~§83 구현, release gate, Android 8항목이 모두 끝났다.
+soak 결과는 `v0.1.0`의 판정을 바꾸지 않고, 결함이 나오면 `v0.1.1`로 고친다.
 
-남은 것은 전부 **기기에서 하는 확인**이고 `nimwake-android`의 일이다. Core가
-할 일은 그 확인의 대상이 될 태그를 끊는 것까지다.
-
-`v0.1.0-rc1`에서 확인한 것:
+### 출시 뒤 고칠 것 (기기 쪽에서 적어 온 것)
 
 ```text
-release        prerelease로 표시됨. /releases/latest가 404 →
-               다음 정식 release의 baseline 비교가 rc를 집어 가지 않는다
-assets         nimwake-aarch64-linux-musl.tar.gz (2.67 MB)
-               performance-report.md · baseline.txt
-release notes  제약이 먼저(1~56줄), 성능 리포트가 뒤(57줄부터)
-baseline       label=v0.1.0-rc1 + 지표 6개. 다음 release가 이것과 비교한다
+host.conf가 초기화에서 살아남지 않는다        개발 머신에 사본을 두는 쪽으로
+Android가 메모리 압박에 Termux를 통째로 내린다  재부팅이 아니어서 Termux:Boot가
+                                              돌지 않는다 — nimwake-android#60이
+                                              heartbeat로 알아채게 했다
 ```
 
-`v0.1.0` 태깅은 위 넷의 리포트를 기다린다.
+둘 다 Host Layer의 일이다. Core가 고칠 것은 없다.
 
 ---
 
