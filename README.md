@@ -27,12 +27,13 @@ request
 
 ## Status
 
-> **Version: `v0.1.0-rc6` — Core Lifecycle**
+> **Version: `v0.1.0` — Core Lifecycle**
 
-Nimwake runs. It serves a real application on a real phone — a Galaxy A51 5G on
-Android 13, through Termux and proot — and has done so across 72-hour and 24-hour
-soak runs with zero non-200 responses, zero daemon restarts and zero orphaned
-processes.
+Nimwake runs. It serves a real Next.js blog on a real phone — a Galaxy A51 5G on
+Android 13, through Termux and proot — reachable from the internet through a
+tunnel. Cold start is 1.6 seconds, of which Nimwake's own share is about 30 ms;
+warm requests take 27–52 ms. Across 72-hour and 24-hour soak runs it logged zero
+non-200 responses, zero daemon restarts and zero orphaned processes.
 
 What works today:
 
