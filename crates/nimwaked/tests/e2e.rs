@@ -1806,6 +1806,20 @@ fn stopping_an_application_logs_its_completion_and_duration() {
         || !is_listening(port),
     );
 
+    // **포트가 닫힌 것과 로그가 수집된 것은 다르다.** 완료 로그는 daemon이
+    // `StopCompleted`를 처리할 때 쓰므로 프로세스가 사라진 뒤다. 포트만 보고
+    // 바로 읽으면 CI에서 흔들린다 — 실제로 겪었다.
+    wait_for(
+        "the stop completion to reach the log",
+        Duration::from_secs(10),
+        || {
+            daemon
+                .output()
+                .iter()
+                .any(|line| line.contains("stopped application") && line.contains("app=brief"))
+        },
+    );
+
     let lines = daemon.output();
     let started = lines
         .iter()
@@ -1869,6 +1883,18 @@ fn a_request_joining_a_stop_does_not_shorten_the_reported_duration() {
         daemon.get("joiner.localhost").status,
         200,
         "정지 중 요청은 재기동으로 처리된다 (PRD §31)",
+    );
+
+    // 완료 로그가 수집되기를 기다린다 — 위 테스트와 같은 이유다.
+    wait_for(
+        "the stop completion to reach the log",
+        Duration::from_secs(15),
+        || {
+            daemon
+                .output()
+                .iter()
+                .any(|line| line.contains("stopped application") && line.contains("app=joiner"))
+        },
     );
 
     let completion = daemon
