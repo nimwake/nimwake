@@ -448,8 +448,16 @@ impl Report {
             return;
         }
 
-        let _ = writeln!(out, "| 지표 | {} | current | Δ |", previous.label());
-        let _ = writeln!(out, "| --- | ---: | ---: | ---: |");
+        // **잡음 폭을 함께 낸다.** (PRD §73)
+        //
+        // Δ만 보면 거의 모든 행이 ±50%다 — 12개 지표 중 11개가 그만큼 흔들린다.
+        // 옆에 그 지표의 관측 편차를 적어야 읽는 사람이 신호와 잡음을 가른다.
+        let _ = writeln!(
+            out,
+            "| 지표 | {} | current | Δ | runner 편차 |",
+            previous.label(),
+        );
+        let _ = writeln!(out, "| --- | ---: | ---: | ---: | ---: |");
 
         for change in &changes {
             let delta = change.percent().map_or_else(
@@ -461,14 +469,20 @@ impl Report {
             );
             let _ = writeln!(
                 out,
-                "| {} | {:.2} {} | {:.2} {} | {delta} |",
-                change.metric, change.previous, change.unit, change.current, change.unit,
+                "| {} | {:.2} {} | {:.2} {} | {delta} | ±{:.0}% |",
+                change.metric,
+                change.previous,
+                change.unit,
+                change.current,
+                change.unit,
+                change.noise_pct,
             );
         }
 
+        // `(!)`의 뜻이 바뀌었다 — 공통 30%가 아니라 **그 지표의 관측 편차**다.
         let _ = writeln!(
             out,
-            "\n(!)는 경고일 뿐이다. runner 편차가 커서 절대 수치를 gate로 쓰지 않는다. (PRD §73)\n"
+            "\n`(!)`는 그 지표의 관측 편차를 넘은 것이고 경고일 뿐이다 — release를 막지 않는다. `runner 편차`는 v0.1.0~v0.1.3의 baseline 네 개에서 관측한 폭이다(런타임 변경이 거의 없는 구간이라 거의 전부 runner 탓이다). 표본 네 개로 잰 하한이고 분포가 아니다. `daemon RSS`(±2%)만 작은 변화를 읽을 만하다. **다른 기계에서 돌린 baseline과 비교하면 이 폭이 뜻을 갖지 않는다** — 같은 종류의 runner끼리만 비교한다. (PRD §73)\n"
         );
     }
 
