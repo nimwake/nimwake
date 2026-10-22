@@ -83,7 +83,7 @@ pub(super) fn status_for(error: &ProxyError) -> http::StatusCode {
 /// **값을 재 두었다.** 지연은 무시할 만하고, 포트는 생각했던 문제가 아니었다.
 ///
 /// ```text
-/// 연결 비용    0.033ms — ttfb 1.296ms의 2.5% (v0.1.1 baseline)
+/// 연결 비용    0.021~0.033ms — ttfb의 2~3% (v0.1.0~v0.1.3 baseline 네 개)
 /// TIME_WAIT    요청 2,000개 → backend의 listen 소켓 쪽 1,999개
 ///                            gateway의 ephemeral 쪽      4개
 /// ```
