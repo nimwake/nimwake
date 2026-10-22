@@ -79,6 +79,18 @@ pub(super) fn status_for(error: &ProxyError) -> http::StatusCode {
 /// scale-to-zero는 backend를 주기적으로 죽이므로, pool에 남은 keep-alive 연결은
 /// 다음 요청에서 그대로 실패한다. pool을 쓰려면 lifecycle 이벤트로 무효화해야 하고
 /// 그것은 Core MVP의 범위가 아니다.
+///
+/// **값을 재 두었다.** 지연은 무시할 만하지만 포트에는 천장이 있다.
+///
+/// ```text
+/// 연결 비용        0.033ms — ttfb 1.296ms의 2.5% (v0.1.1 baseline)
+/// TIME_WAIT        요청 3,000개 → backend 쪽 소켓 2,908개
+/// 천장             ephemeral 28,232개 ÷ TIME_WAIT 60초 ≈ 470 req/s
+/// ```
+///
+/// `tcp_tw_reuse`가 켜져 있으면 가려지지만 **Linux 기본값은 꺼짐**이고, Android는
+/// 그 값을 읽지도 바꾸지도 못한다. 실사용 트래픽(초당 몇 건)과는 두 자리 차이라
+/// 지금 고치지 않는다 — 고칠 때 볼 숫자를 남겨 둔다.
 pub(super) async fn forward(
     lease: RequestLease,
     request: Request<Incoming>,
