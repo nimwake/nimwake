@@ -131,6 +131,17 @@ jobs:
       - name: Forbid blocking clients on a single-threaded runtime
         run: python3 scripts/check-blocking-clients.py
 
+      # **문서가 스스로 모순되지 않는지 본다.**
+      #
+      # 이 세션에 손으로 찾은 오류 넷이 모두 읽어 보면 알 수 있는 것이었다 —
+      # 자기모순인 체크리스트, 뒤처진 두 줄, 다른 파일의 절을 같은 문서 앵커로
+      # 적은 링크 셋. 읽어 보면 아는 것은 읽지 않으면 모른다.
+      #
+      # 내용이 사실인지는 보지 않는다. 구조만 본다 — 번호의 중복과 빈 칸,
+      # 링크가 가리키는 파일, 같은 문서 앵커, 존재하지 않는 §N 참조.
+      - name: Forbid documents that contradict themselves
+        run: python3 scripts/check-docs.py
+
       # Invariant 6 — 오래 걸리는 작업은 AppManager의 event loop 밖에서 수행한다.
       #
       # 판단 경로(`transition`)는 **동기 순수 함수**다. async가 아니면 애초에
