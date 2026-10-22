@@ -2438,3 +2438,47 @@ fn a_silent_control_connection_is_cut_off() {
     // 그 뒤에도 창구는 살아 있다.
     drop(daemon);
 }
+
+/// **`listening on` 직후의 `SIGTERM`도 종료 절차를 돈다.** (Invariant 10)
+///
+/// 전에는 종료 신호를 `gateway.serve(...)` 호출 시점에 처음 등록했는데 그것은
+/// `listening on`보다 뒤다. 그 창에 `SIGTERM`이 오면 기본 동작인 **즉시 종료**가
+/// 일어나 종료 절차가 하나도 돌지 않았다 — application이 살아남고 control
+/// socket 파일도 남는다.
+///
+/// CI에서 드러났다: `stop()`이 20ms에 돌아왔고 daemon의 출력이 `listening on`
+/// 에서 끝나 있었다. **supervisor가 띄우고 바로 멈추면 실기기에서도 같다.**
+#[test]
+fn a_shutdown_signal_right_after_startup_still_runs_the_shutdown_sequence() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "racy", port, Lifecycle::default());
+
+    let socket = apps.path().join("control.sock");
+    let mut daemon =
+        Daemon::start_with(&apps, &["--control-socket", &socket.display().to_string()]);
+
+    // `listening on`을 읽은 **직후**에 보낸다. 사이에 아무것도 하지 않는다 —
+    // 그것이 이 테스트의 요점이다.
+    daemon.stop();
+
+    let output = daemon.output().join("\n");
+    assert!(
+        output.contains("shutdown signal received"),
+        "종료 신호를 받았다는 기록이 없다 — 기본 동작으로 죽었다:\n{output}",
+    );
+    assert!(
+        output.contains("stopping every application"),
+        "종료 절차가 돌지 않았다 — application이 살아남는다 (Invariant 10):\n{output}",
+    );
+    assert!(
+        !socket.exists(),
+        "종료 절차가 돌았으면 socket 파일이 없다. 남은 것: {:?}",
+        std::fs::read_dir(apps.path())
+            .map(|entries| entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name())
+                .collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
+}
