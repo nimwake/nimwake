@@ -37,7 +37,9 @@
 | | |
 | --- | --- |
 | 기본 비노출 | `127.0.0.1`. 노출은 `--listen`으로 명시해야 한다 |
-| 관리 창구 없음 | 상태 조회는 `SIGUSR1`뿐 — **같은 uid를 요구한다.** 네트워크로 열린 관리 API가 없다 ([§79](.docs/prd/04-platform/03-host-interface.md)) |
+| 네트워크 관리 API 없음 | 상태를 묻는 길은 둘인데 **둘 다 네트워크가 아니다** — `SIGUSR1`(같은 uid를 요구한다, [§79](.docs/prd/04-platform/03-host-interface.md))과 unix socket ([§85](.docs/prd/04-platform/03-host-interface.md)) |
+| control socket은 기본이 꺼짐 | `--control-socket <PATH>`를 주지 않으면 만들지 않는다. 열면 권한 `0600`, **같은 uid만** 닿는다. 디렉터리는 호스트가 만든다 — Core가 만들면 디렉터리 권한을 Core가 정하게 되고 그것이 socket보다 느슨하면 `0600`이 무의미해진다 ([§85](.docs/prd/04-platform/03-host-interface.md)) |
+| control socket은 읽기만 | `status` 하나뿐이다. 멈추거나 깨우는 명령은 **없다** — "누가 이 app을 멈출 수 있는가"는 `0600`보다 섬세한 질문이고, 그것을 정하기 전에는 열지 않는다 ([§86](.docs/prd/04-platform/03-host-interface.md)) |
 | application 격리 | 각 application은 자기 process. gateway는 `127.0.0.1:<port>`로만 접속한다 |
 | manifest 검증 | 기동 시 전부 검증한다. 하나라도 틀리면 **뜨지 않는다** ([§21](.docs/prd/02-architecture/05-manifest-and-readiness.md)) |
 | `X-Forwarded-For` | gateway가 관측한 peer를 덧붙인다. **맨 오른쪽만 믿을 수 있다** ([§81](.docs/prd/02-architecture/06-gateway-and-requests.md)) |
@@ -65,7 +67,8 @@
 - gateway가 요청을 잘못 라우팅하거나 app 경계를 넘기는 것
 - process 생애주기로 권한이 올라가거나 process가 남는 것
 - manifest 검증을 우회해 의도하지 않은 명령이 실행되는 것
-- 로그나 `SIGUSR1` 보고로 비밀이 새는 것
+- 로그나 `SIGUSR1` 보고, control socket 응답으로 비밀이 새는 것
+- control socket이 같은 uid가 아닌 쪽에 닿는 것, 또는 `status`가 아닌 일을 하는 것
 
 범위가 아닙니다:
 
@@ -75,4 +78,9 @@
 
 ## 지원 버전
 
-`v0.1.0` 이전입니다. **최신 태그만** 고칩니다.
+**최신 태그만** 고칩니다. 아직 1.0 이전이고 뒤로 물러서서 고치지 않습니다.
+
+여기에 버전 번호를 적지 않습니다 — 한 번 적으면 릴리스마다 같이 올려야 하고,
+이 줄이 실제로 그렇게 낡았습니다(`v0.1.0 이전`이라고 적힌 동안 `v0.1.4`까지
+나왔습니다). 지금 무엇이 최신인지는
+[Releases](https://github.com/nimwake/nimwake/releases)가 말해 줍니다.

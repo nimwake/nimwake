@@ -43,8 +43,18 @@ def slug(heading: str) -> str:
     return re.sub(r"\s+", "-", text).strip("-")
 
 
+# 뿌리의 문서들. `.docs/` 밖이지만 **링크가 깨지면 가장 먼저 보인다.**
+#
+# 이 세션에 SECURITY.md의 §75·§79·§81 링크 경로를 틀렸고, 검사가 `.docs/`만
+# 보고 있어서 통과했다. 공개 저장소의 첫 화면이 가리키는 곳이다.
+ROOT_DOCS = ("README.md", "SECURITY.md", "CONTRIBUTING.md", "CHANGELOG.md")
+
+
 def markdown_files() -> list[pathlib.Path]:
-    return sorted(p for p in DOCS.rglob("*.md") if p.is_file())
+    """링크와 `§N` 참조를 볼 대상. `.docs/` 전체와 뿌리의 문서들."""
+    files = [p for p in DOCS.rglob("*.md") if p.is_file()]
+    files.extend(pathlib.Path(name) for name in ROOT_DOCS if pathlib.Path(name).is_file())
+    return sorted(files)
 
 
 def collect_sections() -> tuple[dict[int, list[str]], list[str]]:
@@ -90,6 +100,12 @@ def check_headings(problems: list[str]) -> dict[int, list[str]]:
     return sections
 
 
+def anchors_of(path: pathlib.Path) -> set[str]:
+    """그 문서의 제목들이 만드는 앵커."""
+    text = path.read_text(encoding="utf-8")
+    return {slug(line.lstrip("#").strip()) for line in text.splitlines() if line.startswith("#")}
+
+
 def check_links(problems: list[str]) -> None:
     for path in markdown_files():
         text = path.read_text(encoding="utf-8")
@@ -109,12 +125,26 @@ def check_links(problems: list[str]) -> None:
                     )
                 continue
 
-            file_part = target.split("#", 1)[0]
+            file_part, _, anchor = target.partition("#")
             if not file_part:
                 continue
             resolved = (path.parent / file_part).resolve()
             if not resolved.exists():
                 problems.append(f"{path.as_posix()}: `{target}` — 그런 파일이 없다")
+                continue
+
+            # **다른 파일의 앵커도 본다.**
+            #
+            # 전에는 파일이 있는지만 봤다. 그래서 `다른-파일.md#85-control-socket`처럼
+            # **파일은 맞고 앵커는 그 파일에 없는** 링크가 통과했다. 이 세션에
+            # SECURITY.md에서 실제로 그렇게 틀렸고 검사가 잡지 못했다.
+            if anchor and resolved.suffix == ".md":
+                if anchor not in anchors_of(resolved):
+                    problems.append(
+                        f"{path.as_posix()}: `{target}` — 그 파일에 `#{anchor}`에 "
+                        "해당하는 제목이 없다. 절이 다른 파일에 있으면 그 파일을 "
+                        "가리켜야 한다"
+                    )
 
 
 def check_references(problems: list[str], sections: dict[int, list[str]]) -> None:
