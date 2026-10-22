@@ -130,6 +130,62 @@ def check_references(problems: list[str], sections: dict[int, list[str]]) -> Non
         )
 
 
+
+# `[lifecycle]` 블록의 `키 = 값`. 뒤에 `# §75` 같은 주석이 붙을 수 있다.
+MANIFEST_DEFAULT = re.compile(r"^([a-z_]+) = (\d+)", re.M)
+# `const DEFAULT_IDLE_TIMEOUT_SECONDS: u64 = 60;`
+RUST_DEFAULT = re.compile(r"const DEFAULT_([A-Z_]+)\s*:\s*\w+\s*=\s*(\d+)")
+
+MANIFEST_DOC = PRD / "02-architecture" / "05-manifest-and-readiness.md"
+SPEC_SOURCE = pathlib.Path("crates/nimwake-core/src/app/spec.rs")
+
+
+def check_documented_defaults(problems: list[str]) -> int:
+    """PRD §21의 manifest 예시와 코드의 기본값이 같은가.
+
+    **테스트로는 이것을 지킬 수 없다.** 코드 상수를 테스트의 숫자와 비교하는
+    것은 코드를 코드에 묶는 것이고, 문서를 바꿔도 통과한다. 운영자는 문서를
+    베껴 쓰므로 둘이 어긋나면 문서가 거짓말을 한다.
+
+    비교하는 쌍은 이름으로 찾는다 — `idle_timeout_seconds`는
+    `DEFAULT_IDLE_TIMEOUT_SECONDS`다.
+    """
+    if not MANIFEST_DOC.is_file() or not SPEC_SOURCE.is_file():
+        problems.append(
+            f"기본값을 비교할 수 없다: {MANIFEST_DOC} 또는 {SPEC_SOURCE}가 없다"
+        )
+        return 0
+
+    text = MANIFEST_DOC.read_text(encoding="utf-8")
+    start = text.find("[lifecycle]")
+    if start == -1:
+        problems.append(f"{MANIFEST_DOC.as_posix()}: `[lifecycle]` 예시가 없다")
+        return 0
+    end = text.find("```", start)
+    documented = dict(MANIFEST_DEFAULT.findall(text[start:end if end != -1 else len(text)]))
+
+    code = {
+        name: value
+        for name, value in RUST_DEFAULT.findall(SPEC_SOURCE.read_text(encoding="utf-8"))
+    }
+
+    compared = 0
+    for key, doc_value in sorted(documented.items()):
+        constant = f"{key.upper()}"
+        if constant not in code:
+            problems.append(
+                f"§21이 `{key} = {doc_value}`를 적는데 "
+                f"`DEFAULT_{constant}` 상수가 없다 — 문서가 없는 기본값을 약속한다"
+            )
+            continue
+        compared += 1
+        if code[constant] != doc_value:
+            problems.append(
+                f"`{key}`의 기본값이 어긋난다: §21은 {doc_value}, "
+                f"코드는 {code[constant]} — 운영자는 문서를 베껴 쓴다"
+            )
+    return compared
+
 def main() -> int:
     if not PRD.is_dir():
         print(f"{PRD}가 없다 — 저장소 뿌리에서 실행해야 한다", file=sys.stderr)
@@ -139,6 +195,7 @@ def main() -> int:
     sections = check_headings(problems)
     check_links(problems)
     check_references(problems, sections)
+    defaults = check_documented_defaults(problems)
 
     if problems:
         for problem in problems:
@@ -148,7 +205,8 @@ def main() -> int:
 
     print(
         f"docs are consistent: {len(sections)} PRD sections, "
-        f"{len(markdown_files())} markdown files, links and §N references resolve"
+        f"{len(markdown_files())} markdown files, links and §N references resolve, "
+        f"{defaults} documented defaults match the code"
     )
     return 0
 

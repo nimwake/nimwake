@@ -194,6 +194,18 @@ fn serve(specs: Vec<AppSpec>, options: &Options) -> Result<(), Failure> {
         // 기본 동작이 종료인 신호에 경쟁을 남겨 둘 이유가 없다.
         let hangup = signal_stream(SignalKind::hangup(), "SIGHUP");
         let user1 = signal_stream(SignalKind::user_defined1(), "SIGUSR1");
+        // **종료 신호도 여기서 등록한다.**
+        //
+        // 전에는 `gateway.serve(shutdown_signal())`에서 처음 등록했는데 그것은
+        // `listening on`보다 **뒤**다. 그 창에 SIGTERM이 오면 기본 동작인
+        // 즉시 종료가 일어나 **종료 절차가 하나도 돌지 않는다** — application이
+        // 살아남고(Invariant 10 위반) socket 파일도 남는다.
+        //
+        // CI에서 드러났다: `stop()`이 20ms에 돌아왔고 daemon의 출력이
+        // `listening on`에서 끝나 있었다. supervisor가 띄우고 바로 멈추면
+        // 실기기에서도 같은 일이 난다.
+        let interrupt = signal_stream(SignalKind::interrupt(), "SIGINT");
+        let terminate = signal_stream(SignalKind::terminate(), "SIGTERM");
 
         // **`listening on`보다 먼저 연다.** (PRD §85)
         //
@@ -256,7 +268,7 @@ fn serve(specs: Vec<AppSpec>, options: &Options) -> Result<(), Failure> {
             limits,
         ));
 
-        gateway.serve(shutdown_signal()).await;
+        gateway.serve(await_shutdown(interrupt, terminate)).await;
         reloader.abort();
         reporter.abort();
         evictor.abort();
@@ -467,29 +479,41 @@ async fn reload_on_hangup(
     }
 }
 
-/// `SIGINT` 또는 `SIGTERM`이 오면 완료된다.
-#[cfg(unix)]
-async fn shutdown_signal() {
-    use tokio::signal::unix::{signal, SignalKind};
-
-    let mut interrupt = match signal(SignalKind::interrupt()) {
-        Ok(signal) => signal,
-        Err(error) => {
-            error!(%error, "failed to listen for SIGINT");
-            return;
+/// 미리 등록해 둔 종료 신호 중 하나를 기다린다.
+///
+/// **스트림을 여기서 만들지 않는다.** 등록은 `listening on`보다 먼저 끝나야
+/// 한다 — `SIGTERM`과 `SIGINT`의 기본 동작은 **즉시 종료**이고, 그 창에 신호가
+/// 오면 종료 절차가 하나도 돌지 않는다. application이 살아남고(Invariant 10
+/// 위반) control socket 파일도 남는다.
+///
+/// CI에서 드러났다: `stop()`이 20ms에 돌아왔고 daemon의 출력이 `listening on`
+/// 에서 끝나 있었다. supervisor가 띄우고 바로 멈추면 실기기에서도 같다.
+///
+/// 둘 다 등록에 실패했으면 영원히 기다린다 — 그때는 신호로 멈출 수 없고
+/// 호출자가 다른 방법으로 끝내야 한다. 등록 실패는 `signal_stream`이 로그에
+/// 남긴다.
+async fn await_shutdown(
+    interrupt: Option<tokio::signal::unix::Signal>,
+    terminate: Option<tokio::signal::unix::Signal>,
+) {
+    let received = match (interrupt, terminate) {
+        (Some(mut interrupt), Some(mut terminate)) => tokio::select! {
+            _ = interrupt.recv() => "SIGINT",
+            _ = terminate.recv() => "SIGTERM",
+        },
+        (Some(mut interrupt), None) => {
+            interrupt.recv().await;
+            "SIGINT"
         }
-    };
-    let mut terminate = match signal(SignalKind::terminate()) {
-        Ok(signal) => signal,
-        Err(error) => {
-            error!(%error, "failed to listen for SIGTERM");
-            return;
+        (None, Some(mut terminate)) => {
+            terminate.recv().await;
+            "SIGTERM"
         }
-    };
-
-    let received = tokio::select! {
-        _ = interrupt.recv() => "SIGINT",
-        _ = terminate.recv() => "SIGTERM",
+        (None, None) => {
+            error!("no shutdown signal is registered; this daemon cannot be stopped by a signal");
+            std::future::pending::<()>().await;
+            unreachable!("pending never completes")
+        }
     };
     tracing::info!(signal = received, "shutdown signal received");
 }
