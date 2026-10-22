@@ -153,6 +153,22 @@ pub fn compare(
 ///
 /// `daemon RSS`만 2%다. 그 행의 변화는 읽을 만하고, 나머지는 이 폭을 넘을 때만
 /// 눈여겨볼 값이다.
+/// 그 지표가 어디서 오는가. 빠졌을 때 어디를 볼지 알려 준다.
+///
+/// `/proc`에서 오는 둘을 특히 분명히 적는다 — **기기의 proot는 `/proc` 일부를
+/// 막는다.** 경고에 경로가 적혀 있으면 기기에서 바로 확인할 수 있다.
+#[must_use]
+pub fn metric_source(key: &str) -> &'static str {
+    match key {
+        "daemon_rss_mb" => "/proc/<pid>/status 의 VmRSS",
+        "sustained_cpu_pct_of_wall" => "/proc/<pid>/stat 의 utime·stime",
+        key if key.starts_with("cold_start_") => "nimwake::startup trace (--trace-json)",
+        key if key.starts_with("request_") => "nimwake::request trace (--trace-json)",
+        key if key.starts_with("concurrency_") => "concurrency sweep",
+        _ => "warm load",
+    }
+}
+
 pub const TRACKED: &[(&str, &str, &str, f64)] = &[
     ("warm_p50_ms", "warm p50", "ms", 57.0),
     ("warm_p95_ms", "warm p95", "ms", 57.0),
