@@ -405,4 +405,58 @@ mod tests {
         assert_eq!(cidr("127.0.0.1").to_string(), "127.0.0.1/32");
         assert_eq!(cidr("fd00::/8").to_string(), "fd00::/8");
     }
+
+    /// **쓴 것을 다시 읽으면 같은 것이 나온다.** (PRD §82)
+    ///
+    /// `Display`와 `parse`는 짝인데 위의 테스트는 **쓴 것만** 본다. 되돌려
+    /// 읽지 않으면 `Display`가 `parse`가 거부하는 형태를 뱉어도 아무도 모른다.
+    ///
+    /// 거부 쪽이 특히 위험하다 — `normalize`가 host bit이 선 주소와 IPv4로 맞춘
+    /// IPv6 literal을 거부하므로, `Display`가 그런 형태로 쓰면 **로그에 찍힌
+    /// 값을 설정에 그대로 붙여 넣을 수 없다.**
+    #[test]
+    fn what_it_writes_parses_back_to_the_same_thing() {
+        for text in [
+            "192.168.0.0/16",
+            "127.0.0.1",
+            "10.0.0.0/8",
+            "0.0.0.0/0",
+            "255.255.255.255/32",
+            "fd00::/8",
+            "::1",
+            "::/0",
+            "2001:db8::/32",
+        ] {
+            let once = cidr(text);
+            let written = once.to_string();
+
+            // 쓴 것을 운영자가 설정에 붙여 넣을 수 있어야 한다.
+            let twice = Cidr::parse(&written)
+                .unwrap_or_else(|error| panic!("`{written}`을 다시 읽을 수 없다: {error}"));
+
+            assert_eq!(
+                twice.to_string(),
+                written,
+                "`{text}`을 쓰고 다시 읽으면 달라진다",
+            );
+
+            // 같은 글자가 아니라 **같은 그물**이어야 한다.
+            for probe in [
+                "192.168.1.1",
+                "127.0.0.1",
+                "10.1.2.3",
+                "255.255.255.255",
+                "fd00::1",
+                "::1",
+                "2001:db8::1",
+            ] {
+                let address: std::net::IpAddr = probe.parse().expect("probe parses");
+                assert_eq!(
+                    once.contains(address),
+                    twice.contains(address),
+                    "`{text}`을 왕복시키면 {probe}에 대한 답이 달라진다",
+                );
+            }
+        }
+    }
 }
