@@ -11,6 +11,8 @@
 //! lifecycle state machine(`v0.0.1`) 위에 실제 OS process(`v0.0.2`)와 gateway(`v0.0.3`)가 올라가 있다.
 
 pub mod app;
+#[cfg(unix)]
+pub mod control;
 pub mod error;
 pub mod eviction;
 pub mod gateway;

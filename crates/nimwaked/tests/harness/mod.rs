@@ -223,19 +223,52 @@ impl Daemon {
     /// daemon을 한 번 실행하고 끝날 때까지 기다린다. 종료 코드와 출력을 돌려준다.
     ///
     /// 종료 코드는 supervisor가 재기동 여부를 판단하는 근거다. (PRD §74)
+    /// daemon을 띄우고 **끝나기를 기다린다.** 끝나지 않으면 죽이고 알린다.
+    ///
+    /// 기동을 거부해야 하는 경우를 보는 테스트들이 이것을 쓴다. 상한이 없으면
+    /// 거부하지 않는 회귀가 **실패가 아니라 멈춤**으로 나타나 스위트 전체를
+    /// 붙잡는다 — 실제로 겪었다(§85의 뮤테이션).
     pub fn run(args: &[&str]) -> (i32, String) {
-        let out = Command::new(env!("CARGO_BIN_EXE_nimwaked"))
+        const LIMIT: Duration = Duration::from_secs(20);
+
+        let mut child = Command::new(env!("CARGO_BIN_EXE_nimwaked"))
             .args(args)
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .expect("nimwaked runs");
 
-        let code = out.status.code().unwrap_or(-1);
+        let deadline = std::time::Instant::now() + LIMIT;
+        let status = loop {
+            match child.try_wait().expect("child status is readable") {
+                Some(status) => break Some(status),
+                None if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                None => std::thread::sleep(Duration::from_millis(20)),
+            }
+        };
+
+        let out = child.wait_with_output().expect("child output is collected");
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
         );
-        (code, text)
+
+        match status {
+            Some(status) => (status.code().unwrap_or(-1), text),
+            // 끝나야 할 daemon이 끝나지 않았다. 멈추지 말고 알린다.
+            None => (
+                -2,
+                format!(
+                    "nimwaked did not exit within {LIMIT:?}
+{text}"
+                ),
+            ),
+        }
     }
 
     /// daemon이 알린 실제 listen 주소.
