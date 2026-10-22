@@ -66,6 +66,21 @@ jobs:
         timeout-minutes: 15
         run: cargo test --workspace --all-features
 
+      # **선언한 MSRV로 실제 빌드한다.**
+      #
+      # rust-toolchain.toml이 `stable`을 고정하므로 다른 job은 전부 최신으로
+      # 돈다. 그래서 `rust-version`은 검증되지 않는 숫자였고 실제로 틀려
+      # 있었다 — 1.75로 적혀 있었지만 의존성 트리는 1.85를 요구했다.
+      #
+      # 테스트까지 돌리지 않는다. 컴파일되는지가 MSRV의 뜻이고, 그 이상은
+      # 다른 job이 최신 toolchain에서 한다.
+      - name: Build at the declared MSRV
+        run: |
+          msrv="$(grep -m1 '^rust-version' Cargo.toml | tr -d '"' | awk '{print $3}')"
+          echo "declared MSRV: ${msrv}"
+          rustup toolchain install "${msrv}" --profile minimal --no-self-update
+          cargo "+${msrv}" check --workspace --all-features --locked
+
       # 상한 없는 대기열은 Invariant 9 위반이다. 리뷰에 의존하지 않고 기계로 막는다.
       - name: Forbid unbounded queues
         run: |
