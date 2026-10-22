@@ -1978,3 +1978,211 @@ fn other_upgrade_tokens_still_pass_through() {
         );
     }
 }
+
+/// control socket으로 요청 한 줄을 보내고 응답 한 줄을 받는다. (PRD §85)
+fn control(path: &std::path::Path, request: &str) -> std::io::Result<String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(path)?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.write_all(request.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line)?;
+    Ok(line)
+}
+
+/// `status`가 §79의 로그 대신 기계가 읽는 형식을 준다. (PRD §85)
+///
+/// `nimwake-android`가 `kill -USR1` 뒤 `nimwaked.log`를 grep하고 있었다. 이
+/// 창구가 그것을 대체한다.
+#[test]
+fn the_control_socket_answers_status() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "reported", port, Lifecycle::default());
+
+    let socket = apps.path().join("control.sock");
+    let daemon = Daemon::start_with(&apps, &["--control-socket", &socket.display().to_string()]);
+
+    // daemon이 `listening on`을 낸 뒤에는 socket이 이미 있어야 한다.
+    let response = control(&socket, r#"{"command":"status"}"#).expect("control socket answers");
+
+    assert!(
+        response.contains(r#""contract":1"#),
+        "계약 번호가 있어야 읽는 쪽이 형식 변경을 안다: {response}",
+    );
+    assert!(
+        response.contains(&format!(r#""version":"{}""#, env!("CARGO_PKG_VERSION"))),
+        "돌고 있는 daemon의 버전: {response}",
+    );
+    assert!(
+        response.contains(r#""name":"reported""#),
+        "app이 들어 있어야 한다: {response}",
+    );
+    assert!(
+        response.contains(r#""state":"SLEEPING""#),
+        "깨우지 않은 app은 SLEEPING이다: {response}",
+    );
+    assert!(
+        response.contains(r#""host":"reported.localhost""#),
+        "host가 있어야 라우팅과 맞출 수 있다: {response}",
+    );
+
+    // 상태를 묻는 것이 app을 깨우지 않는다.
+    assert!(!is_listening(port), "status가 application을 깨우면 안 된다");
+
+    drop(daemon);
+}
+
+/// 깨운 뒤에는 OS pid가 들어온다. (PRD §85)
+///
+/// **내부 식별자가 아니라 `ps`와 맞출 수 있는 값이어야 한다** — §79에서 한 번
+/// 틀렸던 것이다.
+#[test]
+fn status_reports_the_os_pid_of_a_running_app() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "awake", port, Lifecycle::default());
+
+    let socket = apps.path().join("control.sock");
+    let daemon = Daemon::start_with(&apps, &["--control-socket", &socket.display().to_string()]);
+
+    let served = daemon.get("awake.localhost");
+    assert_eq!(served.status, 200);
+
+    let response = control(&socket, r#"{"command":"status"}"#).expect("control socket answers");
+    assert!(
+        response.contains(r#""state":"RUNNING""#),
+        "서빙 중이면 RUNNING이다: {response}",
+    );
+
+    // backend가 자기 pid를 돌려준다. 그것과 같아야 한다.
+    let reported = response
+        .split(r#""pid":"#)
+        .nth(1)
+        .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|digits| digits.parse::<u32>().ok())
+        .unwrap_or_else(|| panic!("pid를 읽을 수 없다: {response}"));
+
+    assert_eq!(
+        reported,
+        served.pid(),
+        "control socket의 pid가 backend가 말한 pid와 달라서는 안 된다 — \
+         내부 식별자를 내보내고 있다: {response}",
+    );
+
+    drop(daemon);
+}
+
+/// 모르는 명령은 오류를 돌려주고 **연결을 끊지 않는다.** (PRD §85)
+///
+/// 끊으면 읽는 쪽이 "daemon이 죽었나"와 "명령을 모르나"를 구분할 수 없다.
+#[test]
+fn an_unknown_command_gets_an_error_not_a_closed_connection() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "any", port, Lifecycle::default());
+
+    let socket = apps.path().join("control.sock");
+    let daemon = Daemon::start_with(&apps, &["--control-socket", &socket.display().to_string()]);
+
+    for request in [
+        r#"{"command":"nonsense"}"#,
+        r#"{"not-a-command":1}"#,
+        "not json at all",
+        "",
+    ] {
+        let response = control(&socket, request)
+            .unwrap_or_else(|error| panic!("`{request}`에 응답해야 한다: {error}"));
+        assert!(
+            response.contains(r#""error""#),
+            "`{request}` → 오류 객체여야 한다: {response}",
+        );
+        assert!(
+            response.contains(r#""contract":1"#),
+            "오류에도 계약 번호가 있어야 한다: {response}",
+        );
+    }
+
+    // 오류를 준 뒤에도 창구는 살아 있다.
+    let after = control(&socket, r#"{"command":"status"}"#).expect("still answering");
+    assert!(after.contains(r#""apps""#), "{after}");
+
+    drop(daemon);
+}
+
+/// 켜지 않으면 socket을 만들지 않는다. (PRD §85)
+#[test]
+fn no_socket_is_created_unless_asked() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "quiet", port, Lifecycle::default());
+    let daemon = Daemon::start(&apps);
+
+    assert_eq!(daemon.get("quiet.localhost").status, 200);
+
+    let strays: Vec<_> = std::fs::read_dir(apps.path())
+        .expect("apps dir is readable")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "sock"))
+        .collect();
+    assert!(
+        strays.is_empty(),
+        "요구하지 않은 socket을 만들면 안 된다: {:?}",
+        strays
+            .iter()
+            .map(std::fs::DirEntry::path)
+            .collect::<Vec<_>>(),
+    );
+}
+
+/// 디렉터리가 없으면 **기동하지 않는다.** (PRD §85)
+///
+/// 만들어 주면 그 권한을 Core가 정하게 되고, 0600 socket의 의미가 사라진다.
+#[test]
+fn a_missing_socket_directory_refuses_to_start() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "nowhere", port, Lifecycle::default());
+
+    let socket = apps.path().join("no-such-dir").join("control.sock");
+    let (code, output) = Daemon::run(&[
+        "--apps",
+        &apps.path().display().to_string(),
+        "--port",
+        "0",
+        "--control-socket",
+        &socket.display().to_string(),
+    ]);
+
+    assert_eq!(code, 78, "디렉터리가 없으면 설정 오류다: {output}");
+    assert!(
+        output.contains("control socket"),
+        "무엇이 문제인지 말해야 한다: {output}",
+    );
+}
+
+/// 정상 종료에서 socket 파일을 남기지 않는다. (PRD §85)
+#[test]
+fn the_socket_file_is_removed_on_shutdown() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "tidy", port, Lifecycle::default());
+
+    let socket = apps.path().join("control.sock");
+    let mut daemon =
+        Daemon::start_with(&apps, &["--control-socket", &socket.display().to_string()]);
+    assert!(socket.exists(), "기동하면 socket이 있어야 한다");
+
+    daemon.stop();
+
+    wait_for(
+        "the socket file to be removed",
+        Duration::from_secs(5),
+        || !socket.exists(),
+    );
+}

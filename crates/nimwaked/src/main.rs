@@ -195,6 +195,36 @@ fn serve(specs: Vec<AppSpec>, options: &Options) -> Result<(), Failure> {
         let hangup = signal_stream(SignalKind::hangup(), "SIGHUP");
         let user1 = signal_stream(SignalKind::user_defined1(), "SIGUSR1");
 
+        // **`listening on`보다 먼저 연다.** (PRD §85)
+        //
+        // 그 줄을 읽고 바로 움직이는 쪽(supervisor · 스크립트 · 테스트)이 있다.
+        // 신호 등록을 앞으로 옮긴 것과 같은 이유다 — 창구가 아직 없는 창을
+        // 남기지 않는다.
+        //
+        // 열지 못하면 **기동을 거부한다.** 창구가 있다고 믿는 쪽이 조용히
+        // 실패하는 것보다 낫다.
+        let control = match &options.control_socket {
+            None => None,
+            Some(path) => {
+                let socket = nimwake_core::control::ControlSocket::bind(path)
+                    .await
+                    .map_err(|error| match error.kind() {
+                        // 디렉터리가 없는 것은 설정 문제다. 만들어 주지 않는다.
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput => {
+                            Failure::config(format!(
+                                "failed to open the control socket at {}: {error}",
+                                path.display()
+                            ))
+                        }
+                        _ => Failure::unavailable(format!(
+                            "failed to open the control socket at {}: {error}",
+                            path.display()
+                        )),
+                    })?;
+                Some(tokio::spawn(socket.serve(Arc::clone(&registry))))
+            }
+        };
+
         if !addr.ip().is_loopback() {
             // 외부 노출은 opt-in이다. 선택했다는 사실을 남긴다. (PRD §74, §46)
             warn!(%addr, "gateway is reachable beyond loopback; Nimwake provides no TLS or auth");
@@ -230,6 +260,10 @@ fn serve(specs: Vec<AppSpec>, options: &Options) -> Result<(), Failure> {
         reloader.abort();
         reporter.abort();
         evictor.abort();
+        // abort하면 `ControlSocket`이 drop되고 socket 파일이 지워진다. (PRD §85)
+        if let Some(control) = control {
+            control.abort();
+        }
 
         // child process의 수명은 daemon의 수명을 넘지 않는다. (Invariant 10 / PRD §71)
         info!("stopping every application");

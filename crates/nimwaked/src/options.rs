@@ -44,6 +44,10 @@ OPTIONS:
                         요청 본문의 최대 크기. 기본 0은 검사하지 않는다
                         넘으면 413. gateway는 본문을 버퍼링하지 않으므로
                         이것은 application을 위한 방어다 (PRD §83)
+    --control-socket <PATH>
+                        기계가 읽는 상태 창구를 그 경로에 연다 (PRD §85)
+                        없으면 만들지 않는다. 권한 0600, 같은 uid만 닿는다
+                        디렉터리는 호스트가 만든다 — 없으면 기동하지 않는다
     --trace-json        구간 계측을 JSON 한 줄씩 출력한다 (benchmark mode, PRD §72)
                         요청 구간은 평소 꺼져 있고 이때만 켜진다
     -V, --version       버전만 출력하고 끝낸다 (daemon을 띄우지 않는다)
@@ -74,6 +78,8 @@ pub struct Options {
     pub limits: Limits,
     /// 요청을 받는 쪽의 상한. (PRD §83)
     pub request_limits: RequestLimits,
+    /// 기계가 읽는 상태 창구의 경로. `None`이면 열지 않는다. (PRD §85)
+    pub control_socket: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -84,6 +90,7 @@ impl Default for Options {
             trace_json: false,
             limits: Limits::default(),
             request_limits: RequestLimits::default(),
+            control_socket: None,
         }
     }
 }
@@ -173,6 +180,11 @@ where
                 })?;
                 options.request_limits.max_request_body_bytes =
                     (megabytes > 0).then(|| megabytes * 1024 * 1024);
+            }
+
+            // 켜야 생긴다. 아무도 요구하지 않은 파일을 만들지 않는다. (PRD §85)
+            "--control-socket" => {
+                options.control_socket = Some(PathBuf::from(value(&mut args, "--control-socket")?));
             }
 
             // port만 바꾼다. `--listen 0.0.0.0:8080 --port 0`처럼 조합할 수 있다.
@@ -265,6 +277,28 @@ mod tests {
     }
 
     /// 인자가 없으면 §83의 기본값이 그대로 온다. (PRD §83)
+    /// 켜야 생긴다. 기본은 없음이다. (PRD §85)
+    #[test]
+    fn the_control_socket_is_off_by_default() {
+        assert_eq!(parse_args(&[]).expect("valid").control_socket, None);
+    }
+
+    /// 경로를 그대로 받는다.
+    #[test]
+    fn the_control_socket_path_is_taken_as_given() {
+        let options = parse_args(&["--control-socket", "/run/nimwake/x.sock"]).expect("valid");
+        assert_eq!(
+            options.control_socket,
+            Some(PathBuf::from("/run/nimwake/x.sock")),
+        );
+    }
+
+    /// 값이 없으면 설정 오류다.
+    #[test]
+    fn the_control_socket_requires_a_value() {
+        assert!(parse_args(&["--control-socket"]).is_err());
+    }
+
     #[test]
     fn request_limits_keep_their_defaults() {
         let options = parse_args(&[]).expect("no arguments is valid");
