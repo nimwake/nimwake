@@ -70,11 +70,15 @@ GET / HEAD / POST / PUT / DELETE / PATCH
 
 Not guaranteed (v0.1.0)
 ────────────────────────────
-WebSocket upgrade
-SSE
-매우 큰 streaming upload
+WebSocket upgrade        → 501로 거절한다. 조용히 내려가지 않는다 (§84)
+SSE                      → 응답 body는 흘러간다. 다만 연결이 열려 있는 동안
+                           lease를 쥐므로 app이 잠들지 않는다
+매우 큰 streaming upload  → 상한을 켤 수 있다 (§83). 기본은 꺼짐
 임의로 오래 유지되는 long-lived request
 ```
+
+**"보장하지 않음"이 "아무 말 없이 실패한다"는 뜻은 아니다.** WebSocket은 §84가
+`501`로 거절하고 로그를 남긴다 — 지원하지 않는다는 사실이 보여야 한다.
 
 POST 계열을 금지하지 않는다. body는 streaming abstraction으로 전달하되,
 cold start 동안은 header 수신 후 lease 확보까지 대기한다.
@@ -745,6 +749,71 @@ Content-Length가 상한을 넘는다   413, app을 깨우지 않는다
 [§82 Per-Application Peer Allowlist](#82-per-application-peer-allowlist) ·
 [§24 HTTP Contract](#24-http-contract) ·
 [§61 Security](../05-beyond-mvp/02-platform-features.md)
+
+---
+
+## 84. Upgrade Requests Are Refused, Not Downgraded
+
+gateway는 `Upgrade: websocket` 요청을 **`501`로 거절한다.** 조용히 header를 지우고
+평범한 요청으로 넘기지 않는다.
+
+### 무엇이 문제였나
+
+§24가 WebSocket을 "보장하지 않음"으로 두었다. 그 결정은 그대로다 — 이 절은
+WebSocket을 **지원하는 것이 아니라, 지원하지 않는다는 사실을 보이게 하는 것**이다.
+
+지금까지의 동작:
+
+```text
+클라이언트   GET /ws
+            Upgrade: websocket        hop-by-hop이라 gateway가 지운다
+            Connection: Upgrade       같이 지운다
+     ↓
+backend     평범한 GET으로 보인다 → 200이나 400을 돌려준다 (101이 아니다)
+     ↓
+클라이언트   "handshake failed" — 왜인지 알 수 없다
+```
+
+**지운 쪽이 아무 말도 하지 않는 것이 문제다.** 앱을 의심하고, 프레임워크를
+의심하고, 터널을 의심한 다음에야 gateway에 닿는다.
+
+### 무엇을 하나
+
+```text
+Upgrade: websocket        501, app을 깨우지 않는다, 로그 한 줄
+그 밖의 Upgrade 토큰       지금처럼 지우고 넘긴다
+```
+
+`501 Not Implemented`가 맞는 코드다 — 요청은 올바르고 **이 서버가 그 기능을
+구현하지 않았다.** `400`은 클라이언트를 탓하는 것이고, `426 Upgrade Required`는
+방향이 반대다.
+
+**`websocket`만 본다.** `Upgrade: h2c`처럼 다른 토큰을 보내는 클라이언트가 있고,
+RFC는 서버가 그것을 무시해도 된다고 한다. 지금 그 요청들은 정상 처리되고 있으므로
+깨뜨리지 않는다.
+
+### 깨우지 않는다
+
+§82 · §83과 같은 자리다. 거절할 요청이 process를 띄울 이유가 없고, 핸드셰이크에
+실패한 클라이언트는 **대개 바로 다시 시도한다** — 그때마다 앱을 깨우면 그것만으로
+자원이 샌다.
+
+### 지원하게 된다면
+
+이 절을 지우고 §24의 "보장하지 않음"에서 WebSocket을 뺀 뒤, hyper의 upgrade
+경로를 붙인다. 그때 scale-to-zero와의 상호작용을 먼저 정해야 한다 —
+
+```text
+연결이 열려 있는 동안 앱을 재울 수 없다      lease를 쥐는 것으로 될 것이다
+연결이 오래 살아 있으면 idle이 영영 오지 않는다
+재적재(§76)와 eviction(§80)이 연결을 끊는가
+```
+
+**지금 정하지 않는다.** 실제로 필요해진 뒤에 정한다 ([§64 Rule 8](../06-conventions/01-development-rules.md)).
+
+→ [§24 HTTP Contract](#24-http-contract) ·
+[§82 Per-Application Peer Allowlist](#82-per-application-peer-allowlist) ·
+[§83 Request Intake Limits](#83-request-intake-limits)
 
 ---
 
