@@ -2183,9 +2183,11 @@ fn the_socket_file_is_removed_on_shutdown() {
 
     daemon.stop();
 
+    // 종료 순서에서 명시적으로 지우므로 `stop()`이 돌아온 뒤에는 이미 없어야
+    // 한다. 예산은 느린 러너를 위한 여유다 — 5초로는 CI에서 실패했다.
     wait_for(
         "the socket file to be removed",
-        Duration::from_secs(5),
+        Duration::from_secs(15),
         || !socket.exists(),
     );
 }

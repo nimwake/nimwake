@@ -260,9 +260,24 @@ fn serve(specs: Vec<AppSpec>, options: &Options) -> Result<(), Failure> {
         reloader.abort();
         reporter.abort();
         evictor.abort();
-        // abort하면 `ControlSocket`이 drop되고 socket 파일이 지워진다. (PRD §85)
+        // **socket 파일을 명시적으로 지운다.** (PRD §85)
+        //
+        // 전에는 `abort()`가 `ControlSocket`을 drop시키는 것에 기댔다. 그런데
+        // abort는 취소를 **요청**할 뿐이고 Drop이 언제 도는지는 런타임이
+        // 정한다 — 종료 중에는 돌기 전에 process가 끝날 수 있다. CI에서
+        // `socket 파일이 5초 안에 지워지지 않았다`로 드러났다.
+        //
+        // `Drop`은 그대로 둔다 — 비정상 종료에서 그것만이 치울 기회다.
         if let Some(control) = control {
             control.abort();
+            if let Some(path) = &options.control_socket {
+                if let Err(error) = std::fs::remove_file(path) {
+                    // 이미 없으면 할 일이 없다. 다음 기동이 stale로 보고 치운다.
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        warn!(path = %path.display(), %error, "failed to remove the control socket");
+                    }
+                }
+            }
         }
 
         // child process의 수명은 daemon의 수명을 넘지 않는다. (Invariant 10 / PRD §71)
