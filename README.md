@@ -200,9 +200,8 @@ These can be integrated externally.
 
 ### Linux first, Android friendly
 
-Linux is the primary runtime environment.
-
-Android support is planned through:
+Linux is the primary runtime environment. Android works today — the Status
+section above describes a phone serving a real application:
 
 ```text
 Android
@@ -214,7 +213,8 @@ Linux / proot
 Nimwake
 ```
 
-Android-specific lifecycle management will remain outside Nimwake Core.
+Android-specific lifecycle management lives outside Nimwake Core, in
+[nimwake-android](https://github.com/nimwake/nimwake-android).
 
 ### Single-machine first
 
@@ -226,7 +226,7 @@ The initial goal is to make scale-to-zero application hosting reliable on **one 
 
 # Architecture
 
-The planned architecture is:
+The architecture is:
 
 ```text
                      HTTP
@@ -265,7 +265,7 @@ All lifecycle transitions are owned by the application's `AppManager`.
 
 # Lifecycle
 
-The initial state machine is:
+The state machine is:
 
 ```text
                     request
@@ -365,27 +365,21 @@ trait Runtime {
 }
 ```
 
-The test suite primarily uses:
+`ProcessRuntime`, built on `tokio::process`, is what runs applications. The
+test suite also uses:
 
 ```text
 FakeRuntime
 ```
 
-to test lifecycle behavior without creating real operating-system processes.
-
-A real:
-
-```text
-ProcessRuntime
-```
-
-based on `tokio::process` is planned for `v0.0.2`.
+to test lifecycle behavior without creating real operating-system processes —
+a startup race is easier to drive when starting costs nothing.
 
 ---
 
 # Application Manifest
 
-Applications will eventually be configured using `nimwake.toml`.
+Applications are configured with a `nimwake.toml` file in their directory.
 
 Example:
 
@@ -406,7 +400,10 @@ startup_timeout_seconds = 5
 shutdown_timeout_seconds = 5
 ```
 
-The manifest format is still experimental and may change before `v0.1.0`.
+Nimwake is pre-1.0, so the manifest format may still change. Defaults for
+every `[lifecycle]` key are in
+[§21](.docs/prd/02-architecture/05-manifest-and-readiness.md) — a machine check
+keeps that section and the code in agreement.
 
 ---
 
@@ -422,9 +419,12 @@ nimwake/
 ├── rustfmt.toml
 │
 ├── crates/
-│   ├── nimwaked/
-│   ├── nimwake-core/
-│   └── nimwake-cli/
+│   ├── nimwake-core/        lifecycle, gateway, registry
+│   ├── nimwaked/            the daemon — and `nimwake`, its second binary
+│   ├── nimwake-bench/       benchmark harness and release gate
+│   └── nimwake-fixtures/    test servers (echo, crash, slow-body, noisy)
+│
+├── scripts/
 │
 ├── tests/
 │
@@ -432,6 +432,10 @@ nimwake/
 │
 └── .docs/
 ```
+
+The `nimwake` CLI is a second `[[bin]]` in `nimwaked` rather than its own crate:
+`CARGO_BIN_EXE_nimwake` is only visible to the owning package's tests, and the
+end-to-end tests need to run the real binary against a real daemon.
 
 Subsystems should remain modules inside `nimwake-core` until there is a clear reason to extract them into separate crates.
 
@@ -592,17 +596,24 @@ for what is planned — see [§62](.docs/prd/05-beyond-mvp/03-long-term-roadmap.
 - performance baseline
 - release gate
 
-### v0.1.0 — Core MVP
+### v0.1.0 — Core MVP *(shipped)*
 
-The first Core MVP release.
+The first Core MVP release. The bar was not that scale-to-zero works manually,
+but that its lifecycle had passed automated concurrency, E2E and stress testing.
 
-The goal is not merely that scale-to-zero works manually, but that its lifecycle has passed automated concurrency, E2E, and stress testing.
+### v0.1.1 — v0.1.4 *(shipped)*
+
+- `nimwake status` over a unix socket, with `--json`
+- per-application peer allowlists, request intake limits, WebSocket refusal
+- machine checks for MSRV, documented defaults and written-out versions
+- two urgent fixes: shutdown ordering on startup, and `status` with a failed
+  application — **do not run `v0.1.2`**, see the release notes
 
 ---
 
 # After v0.1.0
 
-The first major integration target is Android.
+The first integration target was Android, and it has been validated:
 
 ```text
 Android
@@ -616,18 +627,16 @@ Nimwake
 Applications
 ```
 
-The initial validation will include:
+All of it ran on a Galaxy A51 5G — boot recovery, automatic daemon startup,
+cold start, scale-to-zero, repeated wake/sleep cycles, a realistic Next.js
+application, and both the 24-hour and 72-hour soak runs.
 
-- boot recovery
-- automatic daemon startup
-- application cold start
-- scale-to-zero
-- repeated wake/sleep cycles
-- realistic Next.js application
-- 24-hour soak test
-- 72-hour soak test
+One finding worth repeating: the phone drew about 1.8 % of battery per hour
+under the soak, roughly six times the idle-fixture rate, and drained flat in
+55 hours. **A phone used as a server needs to stay plugged in.**
 
-Android-specific functionality will live outside Nimwake Core.
+Android-specific functionality lives outside Nimwake Core, in
+[nimwake-android](https://github.com/nimwake/nimwake-android).
 
 ---
 
@@ -677,6 +686,7 @@ single-topic files:
 
 - Requirements — what and why: [`.docs/prd/`](.docs/prd/README.md)
 - Execution — when and in what order: [`.docs/phases/`](.docs/phases/README.md)
-- Current work: [Phase 1 — Core MVP](.docs/phases/phase-1/README.md) targeting `v0.1.0`
+- Phase 1 — Core MVP: [complete](.docs/phases/phase-1/README.md), shipped as
+  `v0.1.0`
 
 The PRD is authoritative. Phase documents link to PRD sections instead of restating them.
