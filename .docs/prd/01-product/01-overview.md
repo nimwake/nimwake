@@ -6,7 +6,7 @@
 
 ---
 
-# 1. 문서 개요
+## 1. 문서 개요
 
 - **프로젝트명:** Nimwake
 - **한 줄 설명:** 자원이 제한된 Linux 환경을 위한 Rust 기반 초경량 Scale-to-Zero PaaS

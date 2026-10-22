@@ -256,7 +256,7 @@ signal 등록  →  "listening on ..." 출력  →  serve
 창이 좁아 15회 시도에서 재현되지 않았다. **그래도 기본 동작이 종료인 신호에
 경쟁을 남겨 두지 않는다.**
 
-→ [§11 상태 모델](../02-architecture/03-lifecycle-and-state.md) ·
+→ [§11 상태 모델](../02-architecture/01-core-architecture.md) ·
 [§56 CLI](../05-beyond-mvp/02-platform-features.md) ·
 [§76 Manifest Reload](../02-architecture/05-manifest-and-readiness.md)
 
