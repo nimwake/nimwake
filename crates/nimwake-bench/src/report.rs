@@ -173,6 +173,44 @@ impl Report {
         baseline
     }
 
+    /// 돌린 시나리오가 내놓아야 하는데 **없는** 지표들.
+    ///
+    /// 없으면 그 지표는 `직전 대비`에서 비교되지 않는다. 행이 사라지는 것이
+    /// 전부여서 보는 사람은 "변화 없음"과 "재지 못했음"을 구분할 수 없다.
+    ///
+    /// 빠지는 경로가 실제로 있다. `daemon_rss_mb`와 `sustained_cpu_pct_of_wall`은
+    /// `/proc/<pid>/`에서 오고 **기기의 proot는 `/proc` 일부를 막는다.** 개발
+    /// 기계와 CI에서는 늘 읽히므로 그 경로를 아무도 보지 않는다 — §50이 둘을
+    /// 같은 지표로 비교하라고 하는데, 비교가 가장 중요한 쪽에서 조용히 사라질
+    /// 수 있었다.
+    ///
+    /// **돌지 않은 시나리오의 지표는 세지 않는다.** 처음에 그것까지 셌더니 기본
+    /// 실행에서 12개 중 5개가 "없다"고 나왔다 — stress와 sustained를 돌지 않았으니
+    /// 당연히 없는 것이다. 상시로 뜨는 경고는 없는 것과 같다.
+    #[must_use]
+    pub fn unmeasured_metrics(&self, measured: &Baseline) -> Vec<&'static str> {
+        baseline::TRACKED
+            .iter()
+            .map(|(key, _, _, _)| *key)
+            .filter(|key| self.scenario_ran(key) && measured.get(key).is_none())
+            .collect()
+    }
+
+    /// 그 지표를 내놓는 시나리오가 이번 실행에 돌았는가.
+    fn scenario_ran(&self, key: &str) -> bool {
+        if key.starts_with("cold_start_") {
+            return self.stress.is_some();
+        }
+        if key.starts_with("sustained_") {
+            return self.sustained.is_some();
+        }
+        if key.starts_with("concurrency_") {
+            return !self.sweep.is_empty();
+        }
+        // warm 측정은 늘 돈다.
+        true
+    }
+
     /// release를 막을 사유. **correctness만 들어온다.** (PRD §44)
     pub fn correctness_problems(&self) -> Vec<String> {
         let mut problems = Vec::new();

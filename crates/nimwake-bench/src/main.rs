@@ -137,8 +137,28 @@ fn run() -> Result<String, String> {
             .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
         eprintln!("report written to {}", path.display());
     }
+    // **빠진 지표를 말한다.** `직전 대비` 표에서 행이 사라지는 것만으로는
+    // "변화 없음"과 "재지 못했음"을 구분할 수 없다. 기기의 proot가 `/proc`
+    // 일부를 막으므로 이 경로는 실제로 열린다 — 그런데 개발 기계와 CI에서는
+    // 늘 읽혀서 아무도 보지 않았다.
+    //
+    // baseline을 쓰지 않는 실행에서도 알린다. 지표가 빠진 사실은 baseline을
+    // 어디에 쓰는지와 무관하다.
+    let measured = report.baseline();
+    let missing = report.unmeasured_metrics(&measured);
+    if !missing.is_empty() {
+        eprintln!(
+            "warning: {} of {} tracked metrics are absent — they will not be compared:",
+            missing.len(),
+            baseline::TRACKED.len(),
+        );
+        for key in &missing {
+            eprintln!("  {key}  (from {})", baseline::metric_source(key));
+        }
+    }
+
     if let Some(path) = &options.baseline_out {
-        std::fs::write(path, report.baseline().render())
+        std::fs::write(path, measured.render())
             .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
         eprintln!("baseline written to {}", path.display());
     }
