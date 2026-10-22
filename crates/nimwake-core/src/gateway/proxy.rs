@@ -80,17 +80,26 @@ pub(super) fn status_for(error: &ProxyError) -> http::StatusCode {
 /// 다음 요청에서 그대로 실패한다. pool을 쓰려면 lifecycle 이벤트로 무효화해야 하고
 /// 그것은 Core MVP의 범위가 아니다.
 ///
-/// **값을 재 두었다.** 지연은 무시할 만하지만 포트에는 천장이 있다.
+/// **값을 재 두었다.** 지연은 무시할 만하고, 포트는 생각했던 문제가 아니었다.
 ///
 /// ```text
-/// 연결 비용        0.033ms — ttfb 1.296ms의 2.5% (v0.1.1 baseline)
-/// TIME_WAIT        요청 3,000개 → backend 쪽 소켓 2,908개
-/// 천장             ephemeral 28,232개 ÷ TIME_WAIT 60초 ≈ 470 req/s
+/// 연결 비용    0.033ms — ttfb 1.296ms의 2.5% (v0.1.1 baseline)
+/// TIME_WAIT    요청 2,000개 → backend의 listen 소켓 쪽 1,999개
+///                            gateway의 ephemeral 쪽      4개
 /// ```
 ///
-/// `tcp_tw_reuse`가 켜져 있으면 가려지지만 **Linux 기본값은 꺼짐**이고, Android는
-/// 그 값을 읽지도 바꾸지도 못한다. 실사용 트래픽(초당 몇 건)과는 두 자리 차이라
-/// 지금 고치지 않는다 — 고칠 때 볼 숫자를 남겨 둔다.
+/// **TIME_WAIT를 쥐는 쪽은 backend다.** 먼저 닫는 쪽에 남고, backend가 먼저
+/// 닫는다. gateway의 ephemeral 포트는 **즉시 풀린다** — 요청마다 연결을 열어도
+/// 포트가 고갈되지 않는다. `echo-server`(`connection: close`)와 keep-alive
+/// 백엔드에서 모두 같았다.
+///
+/// 관련 한계는 ephemeral 범위가 아니라 `tcp_max_tw_buckets`다(기본 65,536).
+/// 넘기면 커널이 오래된 항목을 재활용하고 경고를 남긴다 — 연결이 실패하지
+/// 않는다. bench가 30초간 7,098 rps를 버티는 것이 그 증거다.
+///
+/// 처음에 "ephemeral 28,232 ÷ 60초 ≈ 470 req/s에서 고갈된다"고 적었다.
+/// **틀렸다** — TIME_WAIT를 어느 쪽이 쥐는지 구분하지 않고 "app port와 일치하는
+/// 소켓"을 세었다. 그 수치는 거의 전부 backend 쪽이었다.
 pub(super) async fn forward(
     lease: RequestLease,
     request: Request<Incoming>,
