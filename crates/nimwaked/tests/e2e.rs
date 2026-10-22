@@ -2170,6 +2170,10 @@ fn a_missing_socket_directory_refuses_to_start() {
 }
 
 /// 정상 종료에서 socket 파일을 남기지 않는다. (PRD §85)
+///
+/// **실패하면 무엇이 일어났는지 말한다.** `wait_for`만으로는 "지워지지 않았다"
+/// 뿐이고, daemon이 정상 종료했는지 · 종료 로그를 어디까지 냈는지 · 디렉터리에
+/// 무엇이 남았는지를 알 수 없다. CI에서 세 번 실패하면서 추론만 쌓았다.
 #[test]
 fn the_socket_file_is_removed_on_shutdown() {
     let apps = Apps::new();
@@ -2181,14 +2185,32 @@ fn the_socket_file_is_removed_on_shutdown() {
         Daemon::start_with(&apps, &["--control-socket", &socket.display().to_string()]);
     assert!(socket.exists(), "기동하면 socket이 있어야 한다");
 
-    daemon.stop();
+    let took = daemon.stop();
 
-    // 종료 순서에서 명시적으로 지우므로 `stop()`이 돌아온 뒤에는 이미 없어야
-    // 한다. 예산은 느린 러너를 위한 여유다 — 5초로는 CI에서 실패했다.
-    wait_for(
-        "the socket file to be removed",
-        Duration::from_secs(15),
-        || !socket.exists(),
+    // 종료 순서에서 명시적으로 지운다. `stop()`이 돌아온 뒤에는 이미 없어야
+    // 한다 — 예산은 느린 러너를 위한 여유다.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while socket.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    assert!(
+        !socket.exists(),
+        "socket 파일이 남았다.
+         stop()이 걸린 시간: {took:?}  (SHUTDOWN_DEADLINE을 넘겼다면 SIGKILL이다)
+         디렉터리에 남은 것: {:?}
+         daemon의 마지막 출력:
+{}",
+        std::fs::read_dir(apps.path())
+            .map(|entries| entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name())
+                .collect::<Vec<_>>())
+            .unwrap_or_default(),
+        daemon.output().join(
+            "
+"
+        ),
     );
 }
 
