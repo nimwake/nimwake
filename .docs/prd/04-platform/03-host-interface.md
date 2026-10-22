@@ -123,7 +123,7 @@ host/port가 충돌하거나, 명령줄 인자가 잘못된 경우가 여기 해
 
 ```text
 nimwaked --version
-nimwaked 0.1.0-rc5
+nimwaked 0.1.4-rc5
 ```
 
 **daemon을 띄우지 않고** 묻는다. manifest도 읽지 않으므로 배포 전에도 답한다.
@@ -358,7 +358,7 @@ daemon이 같은 app을 관리하는 상태로 간다. Invariant 1이 금지하�
 
 ```text
 클라이언트 → {"command":"status"}\n
-서버      → {"contract":1,"version":"0.1.1","apps":[…]}\n
+서버      → {"contract":1,"version":"0.1.4","apps":[…]}\n
             연결 닫음
 ```
 

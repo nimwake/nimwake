@@ -186,6 +186,61 @@ def check_documented_defaults(problems: list[str]) -> int:
             )
     return compared
 
+# 프로그램 출력을 흉내 낸 버전. `nimwaked 0.1.4`, `"version":"0.1.4"`, `Version: `v0.1.4``
+OUTPUT_VERSION = re.compile(
+    r"nimwaked? (\d+\.\d+\.\d+)"
+    r'|"version"\s*:\s*"(\d+\.\d+\.\d+)"'
+    r"|Version: `v(\d+\.\d+\.\d+)`"
+)
+# `[workspace.package]`의 version.
+CARGO_VERSION = re.compile(r'^version = "(\d+\.\d+\.\d+)"', re.M)
+
+# 역사 기록이다. 그때 그 버전이 맞으므로 **고치면 거짓이 된다.**
+HISTORICAL = PRD.parent / "phases"
+
+
+def current_versions(problems: list[str]) -> int:
+    """지금 버전이라고 적은 곳이 Cargo.toml과 같은가.
+
+    릴리스마다 손으로 챙기던 곳이 다섯이었고 **둘이 뒤처져 있었다** — §74의
+    `nimwaked 0.1.0`과 §85의 `"version":"0.1.1"`. 둘 다 "지금 daemon이 이렇게
+    답한다"고 적은 곳이라, 운영자가 보고 자기 설치가 낡았다고 오해한다.
+
+    `.docs/phases/`는 보지 않는다. 그쪽의 `nimwaked 0.0.1`은 그때의 기록이고
+    **고치면 거짓이 된다.**
+
+    `--version`의 출력 자체는 `CARGO_PKG_VERSION`에서 오므로 테스트가 지킨다.
+    여기서 보는 것은 **문서가 베껴 적은 값**이다.
+    """
+    cargo = pathlib.Path("Cargo.toml")
+    if not cargo.is_file():
+        problems.append("Cargo.toml이 없다 — 버전을 대조할 수 없다")
+        return 0
+    match = CARGO_VERSION.search(cargo.read_text(encoding="utf-8"))
+    if not match:
+        problems.append("Cargo.toml에서 version을 찾지 못했다")
+        return 0
+    current = match.group(1)
+
+    targets = [pathlib.Path("README.md")]
+    targets.extend(sorted(PRD.rglob("*.md")))
+
+    checked = 0
+    for path in targets:
+        if not path.is_file() or HISTORICAL in path.parents:
+            continue
+        for found in OUTPUT_VERSION.finditer(path.read_text(encoding="utf-8")):
+            written = next(group for group in found.groups() if group)
+            checked += 1
+            if written != current:
+                problems.append(
+                    f"{path.as_posix()}: `{found.group(0)}`이 지금 버전과 어긋난다 — "
+                    f"Cargo.toml은 {current}다. 운영자가 보고 자기 설치가 낡았다고 "
+                    "오해한다 (역사 기록이면 .docs/phases/로 옮긴다)"
+                )
+    return checked
+
+
 def main() -> int:
     if not PRD.is_dir():
         print(f"{PRD}가 없다 — 저장소 뿌리에서 실행해야 한다", file=sys.stderr)
@@ -196,6 +251,7 @@ def main() -> int:
     check_links(problems)
     check_references(problems, sections)
     defaults = check_documented_defaults(problems)
+    versions = current_versions(problems)
 
     if problems:
         for problem in problems:
@@ -206,7 +262,8 @@ def main() -> int:
     print(
         f"docs are consistent: {len(sections)} PRD sections, "
         f"{len(markdown_files())} markdown files, links and §N references resolve, "
-        f"{defaults} documented defaults match the code"
+        f"{defaults} documented defaults match the code, "
+        f"{versions} written-out versions match Cargo.toml"
     )
     return 0
 
