@@ -7,6 +7,7 @@
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -49,6 +50,16 @@ pub struct Daemon {
     port: u16,
     startups: Arc<Mutex<Vec<StartupSpans>>>,
     requests: Arc<Mutex<Vec<RequestSpans>>>,
+    /// 기동 구간 trace로 보이는 줄을 몇 개 봤는가.
+    ///
+    /// **파싱 실패를 그냥 버리는 것은 의도된 것이다** — 404나 acquire 실패로
+    /// 끝난 요청은 구간이 모두 없고, 그런 줄은 구간 비교에 쓸 수 없다.
+    ///
+    /// 그런데 **줄은 봤는데 하나도 못 읽었다면** 그것은 필드 이름이 어긋난
+    /// 것이다. core가 `tracing::debug!`의 식별자로 내보내고 bench가 문자열로
+    /// 찾으므로 컴파일러가 둘을 묶어 주지 않는다. 그 경우를 구분하려고 센다.
+    startup_lines: Arc<AtomicUsize>,
+    request_lines: Arc<AtomicUsize>,
 }
 
 impl Daemon {
@@ -66,6 +77,8 @@ impl Daemon {
 
         let startups = Arc::new(Mutex::new(Vec::new()));
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let startup_lines = Arc::new(AtomicUsize::new(0));
+        let request_lines = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = mpsc::channel();
 
         // pipe를 방치하면 daemon이 멈춘다. 두 스트림 모두 계속 읽는다.
@@ -73,12 +86,16 @@ impl Daemon {
             child.stdout.take(),
             Arc::clone(&startups),
             Arc::clone(&requests),
+            Arc::clone(&startup_lines),
+            Arc::clone(&request_lines),
             Some(tx),
         );
         collect(
             child.stderr.take(),
             Arc::clone(&startups),
             Arc::clone(&requests),
+            Arc::clone(&startup_lines),
+            Arc::clone(&request_lines),
             None,
         );
 
@@ -87,6 +104,8 @@ impl Daemon {
             .map_err(|_| "nimwaked never reported a listen address".to_owned())?;
 
         Ok(Self {
+            startup_lines,
+            request_lines,
             child,
             port,
             startups,
@@ -103,6 +122,30 @@ impl Daemon {
     }
 
     /// 지금까지 관측한 기동 구간들.
+    /// 구간을 하나도 못 읽었는데 trace 줄은 봤는가. (PRD §72)
+    ///
+    /// **그렇다면 필드 이름이 어긋난 것이다.** core가 `tracing::debug!`의
+    /// 식별자(`ttfb_us = …`)로 내보내고 bench가 문자열(`"ttfb_us"`)로 찾는다 —
+    /// 컴파일러가 둘을 묶어 주지 않으므로 한쪽만 바뀌면 조용히 지표가 사라진다.
+    ///
+    /// 파싱 실패 자체는 정상이다(404나 acquire 실패로 끝난 요청은 구간이
+    /// 없다). **전부 실패한 것**만 드리프트다.
+    /// 어긋난 종류의 이름. 둘 다 멀쩡하면 `None`.
+    ///
+    /// **종류별로 센다.** 처음에 "둘 다 비었는가"로 판정했더니 `ttfb_us` 하나만
+    /// 바꾸는 뮤테이션을 놓쳤다 — 요청 구간은 전부 실패하는데 기동 구간은
+    /// 멀쩡해서 조건이 거짓이었다.
+    #[must_use]
+    pub fn drifted_spans(&self) -> Option<&'static str> {
+        if self.startup_lines.load(Ordering::Relaxed) > 0 && self.startups().is_empty() {
+            return Some("nimwake::startup");
+        }
+        if self.request_lines.load(Ordering::Relaxed) > 0 && self.requests().is_empty() {
+            return Some("nimwake::request");
+        }
+        None
+    }
+
     pub fn startups(&self) -> Vec<StartupSpans> {
         self.startups
             .lock()
@@ -144,6 +187,8 @@ fn collect<R>(
     reader: Option<R>,
     startups: Arc<Mutex<Vec<StartupSpans>>>,
     requests: Arc<Mutex<Vec<RequestSpans>>>,
+    startup_lines: Arc<AtomicUsize>,
+    request_lines: Arc<AtomicUsize>,
     listen: Option<mpsc::Sender<u16>>,
 ) where
     R: std::io::Read + Send + 'static,
@@ -159,6 +204,7 @@ fn collect<R>(
             }
 
             if line.contains("nimwake::startup") {
+                startup_lines.fetch_add(1, Ordering::Relaxed);
                 if let Some(spans) = parse_startup(&line) {
                     if let Ok(mut startups) = startups.lock() {
                         startups.push(spans);
@@ -167,6 +213,7 @@ fn collect<R>(
             }
 
             if line.contains("nimwake::request") {
+                request_lines.fetch_add(1, Ordering::Relaxed);
                 if let Some(spans) = parse_request(&line) {
                     if let Ok(mut requests) = requests.lock() {
                         requests.push(spans);
