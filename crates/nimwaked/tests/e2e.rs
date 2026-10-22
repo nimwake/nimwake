@@ -2372,3 +2372,42 @@ fn help_and_version_need_no_socket() {
     assert_eq!(code, 0);
     assert_eq!(out.trim(), format!("nimwake {}", env!("CARGO_PKG_VERSION")));
 }
+
+/// 연결해 놓고 보내지 않으면 **상한에 걸려 오류를 받는다.** (PRD §85)
+///
+/// 크기 상한만으로는 모자라다 — 아무것도 보내지 않는 쪽이 task를 영원히
+/// 붙잡는다. §83이 gateway에서 막은 것과 같은 모양이다.
+#[test]
+fn a_silent_control_connection_is_cut_off() {
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::net::UnixStream;
+
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "patient", port, Lifecycle::default());
+
+    let socket = apps.path().join("control.sock");
+    let daemon = Daemon::start_with(&apps, &["--control-socket", &socket.display().to_string()]);
+
+    let stream = UnixStream::connect(&socket).expect("control socket accepts");
+    // 우리 쪽 읽기 상한은 서버의 10초보다 넉넉해야 한다 — 서버가 먼저 답해야 한다.
+    stream
+        .set_read_timeout(Some(Duration::from_secs(25)))
+        .expect("read timeout is set");
+
+    // 한 글자도 보내지 않는다.
+    let mut line = String::new();
+    let read = BufReader::new(stream).read_line(&mut line);
+
+    assert!(
+        read.is_ok(),
+        "서버가 상한 안에 답해야 한다. 우리 쪽이 시간 초과했다면 상한이 없는 것이다: {read:?}",
+    );
+    assert!(
+        line.contains(r#""error""#),
+        "왜 끊겼는지 알려야 한다: {line:?}",
+    );
+
+    // 그 뒤에도 창구는 살아 있다.
+    drop(daemon);
+}
