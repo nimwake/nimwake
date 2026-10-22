@@ -241,6 +241,48 @@ def current_versions(problems: list[str]) -> int:
     return checked
 
 
+# README의 저장소 구조 트리에서 `crates/` 아래의 이름들.
+TREE_CRATE = re.compile(r"^│\s+[├└]── (nimwake[a-z-]*)/", re.M)
+
+
+def crate_list(problems: list[str]) -> int:
+    """README가 적은 crate 목록이 실제와 같은가.
+
+    **README가 `nimwake-cli/`를 적어 두었는데 그런 crate가 없었다.** CLI는
+    `nimwaked`의 두 번째 바이너리다. 대신 `nimwake-bench`와 `nimwake-fixtures`가
+    빠져 있었다 — 세 개가 틀렸다.
+
+    처음 보는 사람이 가장 먼저 읽는 지도다. 없는 디렉터리를 찾게 만들면 안 된다.
+    """
+    readme = pathlib.Path("README.md")
+    crates = pathlib.Path("crates")
+    if not readme.is_file() or not crates.is_dir():
+        problems.append("README.md 또는 crates/가 없다 — crate 목록을 대조할 수 없다")
+        return 0
+
+    actual = {path.name for path in crates.iterdir() if (path / "Cargo.toml").is_file()}
+    written = set(TREE_CRATE.findall(readme.read_text(encoding="utf-8")))
+
+    if not written:
+        problems.append(
+            "README의 저장소 구조에서 crate 목록을 찾지 못했다 — "
+            "트리 모양이 바뀌었으면 이 검사도 같이 고친다"
+        )
+        return 0
+
+    for name in sorted(written - actual):
+        problems.append(
+            f"README가 `crates/{name}/`을 적는데 그런 crate가 없다 — "
+            "처음 보는 사람이 없는 디렉터리를 찾는다"
+        )
+    for name in sorted(actual - written):
+        problems.append(
+            f"`crates/{name}/`이 있는데 README의 구조에 없다 — "
+            "지도에 없는 것은 읽는 사람에게 없는 것이다"
+        )
+    return len(actual)
+
+
 def main() -> int:
     if not PRD.is_dir():
         print(f"{PRD}가 없다 — 저장소 뿌리에서 실행해야 한다", file=sys.stderr)
@@ -252,6 +294,7 @@ def main() -> int:
     check_references(problems, sections)
     defaults = check_documented_defaults(problems)
     versions = current_versions(problems)
+    crates = crate_list(problems)
 
     if problems:
         for problem in problems:
@@ -263,7 +306,8 @@ def main() -> int:
         f"docs are consistent: {len(sections)} PRD sections, "
         f"{len(markdown_files())} markdown files, links and §N references resolve, "
         f"{defaults} documented defaults match the code, "
-        f"{versions} written-out versions match Cargo.toml"
+        f"{versions} written-out versions match Cargo.toml, "
+        f"README lists all {crates} crates"
     )
     return 0
 
