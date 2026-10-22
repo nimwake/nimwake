@@ -27,7 +27,7 @@ request
 
 ## Status
 
-> **Version: `v0.1.2` — Core Lifecycle**
+> **Version: `v0.1.3` — Core Lifecycle**
 
 Nimwake runs. It serves a real Next.js blog on a real phone — a Galaxy A51 5G on
 Android 13, through Termux and proot — reachable from the internet through a
@@ -49,7 +49,7 @@ What works today:
 
 ```text
 $ nimwake status --socket /run/nimwake/nimwake.sock
-nimwaked 0.1.2
+nimwaked 0.1.3
 APP              STATE           PID  ACTIVE     IDLE
 blog             RUNNING       12971       0     3.1s
 notes            SLEEPING          —       0        —
