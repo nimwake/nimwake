@@ -303,6 +303,21 @@ fn measure_warm(options: &Options) -> Result<WarmResult, String> {
         (WARM_REQUESTS / 2).div_ceil(connections * 2).max(1),
     );
 
+    // **구간을 하나도 못 읽었으면 멈춘다.** (PRD §72)
+    //
+    // core가 `tracing::debug!`의 식별자로 trace를 내보내고 bench가 문자열로
+    // 찾는다. 컴파일러가 둘을 묶어 주지 않으므로 한쪽만 바뀌면 baseline에서
+    // `request_*_ms`가 **조용히 사라진다.**
+    //
+    // 파싱 실패 자체는 정상이다 — 404나 acquire 실패로 끝난 요청은 구간이
+    // 없다. 여기서는 warm 요청 수천 개를 성공시킨 뒤이므로, 그래도 하나도
+    // 못 읽었다면 이름이 어긋난 것이다.
+    if let Some(target) = daemon.drifted_spans() {
+        return Err(format!(
+            "the daemon emitted `{target}` trace lines but none parsed. The span field names in nimwake-core's trace.rs and this crate's daemon.rs have drifted apart (PRD §72)."
+        ));
+    }
+
     let result = WarmResult {
         paired,
         connections,
