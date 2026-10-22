@@ -27,7 +27,7 @@ request
 
 ## Status
 
-> **Version: `v0.1.1` — Core Lifecycle**
+> **Version: `v0.1.2` — Core Lifecycle**
 
 Nimwake runs. It serves a real Next.js blog on a real phone — a Galaxy A51 5G on
 Android 13, through Termux and proot — reachable from the internet through a
@@ -43,15 +43,26 @@ What works today:
 - concurrent cold-start deduplication — N simultaneous requests spawn one process
 - crash-loop backoff, memory admission control and idle eviction under pressure
 - manifest reload on `SIGHUP`, status snapshot on `SIGUSR1`
+- `nimwake status` over a unix socket, with `--json` for scripts
+- per-application peer allowlists — `allow = ["192.168.0.0/16"]`
 - `X-Forwarded-For`, request-span instrumentation, a benchmark harness
+
+```text
+$ nimwake status --socket /run/nimwake/nimwake.sock
+nimwaked 0.1.2
+APP              STATE           PID  ACTIVE     IDLE
+blog             RUNNING       12971       0     3.1s
+notes            SLEEPING          —       0        —
+```
 
 Not yet:
 
 - authentication, TLS or rate limiting — **by design**, see [Security](#security)
-- per-application access control
-- CLI and deployment tooling (Phase 2)
-- persistent state across daemon restarts
-- WebSocket and Server-Sent Events
+- WebSocket upgrades — refused with `501` rather than silently downgraded
+- Server-Sent Events work, but hold the application awake while a stream is open
+- deployment and rollback — the host layer owns these, not Nimwake
+- persistent state across daemon restarts: a restart stops every application
+- commands that change state (`wake`, `sleep`, `restart`) — `status` only, for now
 
 Nimwake is **pre-1.0 and not ready for production use**. The HTTP contract and
 the manifest format may still change.
