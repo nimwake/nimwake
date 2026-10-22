@@ -1799,25 +1799,28 @@ fn stopping_an_application_logs_its_completion_and_duration() {
     assert_eq!(daemon.get("brief.localhost").status, 200);
     assert!(is_listening(port), "application is awake");
 
-    // idle timeout이 정지시킬 때까지 기다린다.
-    wait_for(
-        "the idle timeout to stop the app",
-        Duration::from_secs(10),
-        || !is_listening(port),
-    );
-
-    // **포트가 닫힌 것과 로그가 수집된 것은 다르다.** 완료 로그는 daemon이
-    // `StopCompleted`를 처리할 때 쓰므로 프로세스가 사라진 뒤다. 포트만 보고
-    // 바로 읽으면 CI에서 흔들린다 — 실제로 겪었다.
+    // **기다릴 것은 로그 한 줄이다.** 그것이 정지 완료를 함의한다.
+    //
+    // 전에는 포트가 닫히기를 10초, 로그가 오기를 또 10초 기다렸다. 두 예산이
+    // 직렬이라 느린 러너에서 앞쪽이 먹어 버리면 뒤쪽이 모자란다 — CI에서
+    // `timed out after 10s waiting for the stop completion`으로 실패했다.
+    //
+    // 완료 로그는 daemon이 `StopCompleted`를 처리할 때 쓰므로 프로세스가 사라진
+    // 뒤다. 포트가 닫힌 것과 로그가 수집된 것은 다르다.
     wait_for(
         "the stop completion to reach the log",
-        Duration::from_secs(10),
+        Duration::from_secs(30),
         || {
             daemon
                 .output()
                 .iter()
                 .any(|line| line.contains("stopped application") && line.contains("app=brief"))
         },
+    );
+
+    assert!(
+        !is_listening(port),
+        "정지 완료 로그가 났으면 프로세스는 사라졌다",
     );
 
     let lines = daemon.output();
@@ -1888,7 +1891,7 @@ fn a_request_joining_a_stop_does_not_shorten_the_reported_duration() {
     // 완료 로그가 수집되기를 기다린다 — 위 테스트와 같은 이유다.
     wait_for(
         "the stop completion to reach the log",
-        Duration::from_secs(15),
+        Duration::from_secs(30),
         || {
             daemon
                 .output()

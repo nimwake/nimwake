@@ -492,24 +492,7 @@ pub(super) fn on_stop_completed(
             waiters,
             since,
             process,
-        } if current == operation_id => {
-            // **정지 완료를 남긴다.** (PRD §79)
-            //
-            // 전에는 `stopping application`만 있어서 정지가 끝났는지, 얼마나
-            // 걸렸는지 로그로 알 수 없었다. `nimwake-android`가 블로그의
-            // SIGTERM 정지를 재면서 프로세스를 직접 봐야 했다.
-            //
-            // `operation_id`가 시작 줄과 짝이 된다.
-            info!(
-                app = %ctx.spec.name,
-                %operation_id,
-                process = %process.id(),
-                took_ms = ctx.now.saturating_duration_since(since).as_millis(),
-                waiting = waiters.len(),
-                "stopped application",
-            );
-            finish_stop(waiters, ctx)
-        }
+        } if current == operation_id => finish_stop(waiters, operation_id, &process, since, ctx),
         other => Step::new(other),
     }
 }
@@ -543,9 +526,17 @@ pub(super) fn on_process_exited(
         }
 
         // STOPPING 중의 exit은 정상 종료 경로다. (PRD §32)
+        //
+        // **이 경로도 완료를 남겨야 한다.** `StopCompleted`와 `ProcessExited`는
+        // 어느 쪽이 먼저 올지 정해져 있지 않고, 프로세스가 SIGTERM에 바로 죽는
+        // 흔한 경우에는 이쪽이 먼저다. 로그를 한쪽에만 두었더니 그 경우에
+        // 완료 줄이 아예 없었다 — 테스트가 30초를 기다리다 실패해서 알았다.
         AppState::Stopping {
-            process, waiters, ..
-        } if process.id() == process_id => finish_stop(waiters, ctx),
+            operation_id,
+            process,
+            waiters,
+            since,
+        } if process.id() == process_id => finish_stop(waiters, operation_id, &process, since, ctx),
 
         other => {
             debug!(
@@ -559,7 +550,30 @@ pub(super) fn on_process_exited(
     }
 }
 
-fn finish_stop(waiters: Vec<Waiter>, ctx: &Ctx<'_>) -> Step {
+/// 정지를 마치고 다음 상태로 간다. **완료를 로그에 남기는 유일한 곳이다.**
+///
+/// `StopCompleted`와 `ProcessExited` 둘 다 여기로 온다 (PRD §79). 어느 쪽이
+/// 먼저 올지 정해져 있지 않으므로, 로그를 한쪽 호출부에 두면 다른 쪽으로 끝난
+/// 정지는 기록이 없다.
+///
+/// `operation_id`가 `stopping application` 줄과 짝이 된다. `took_ms`는 정지가
+/// 시작된 때부터다 — 정지 중에 요청이 합류해도 그 시각으로 다시 잡지 않는다.
+fn finish_stop(
+    waiters: Vec<Waiter>,
+    operation_id: OperationId,
+    process: &ProcessHandle,
+    since: Instant,
+    ctx: &Ctx<'_>,
+) -> Step {
+    info!(
+        app = %ctx.spec.name,
+        %operation_id,
+        process = %process.id(),
+        took_ms = ctx.now.saturating_duration_since(since).as_millis(),
+        waiting = waiters.len(),
+        "stopped application",
+    );
+
     // daemon이 내려가는 중이라면 재기동하지 않는다. 기다리던 요청은 실패시킨다.
     if ctx.shutting_down {
         let effects = waiters

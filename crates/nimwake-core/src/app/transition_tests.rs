@@ -997,3 +997,70 @@ fn a_failed_app_is_also_subject_to_admission() {
         "메모리 부족으로 거절해야 한다: {effects:?}",
     );
 }
+
+/// **`StopCompleted`와 `ProcessExited`는 정지를 같은 방식으로 끝낸다.** (PRD §79, §31)
+///
+/// 둘 중 어느 쪽이 먼저 올지 정해져 있지 않다. 프로세스가 `SIGTERM`에 바로 죽는
+/// 흔한 경우에는 `ProcessExited`가 먼저다.
+///
+/// 한쪽에만 처리를 두면 다른 쪽으로 끝난 정지는 그것을 잃는다 — 완료 로그를
+/// `on_stop_completed`에만 두었다가 겪었다. e2e는 경합이라 **3회 중 1회만**
+/// 잡았다.
+///
+/// **정지 중에 요청을 하나 걸어 둔다.** waiter가 없으면 두 경로가 모두
+/// `Sleeping`이 되고 효과도 없어서 차이가 보이지 않는다. waiter가 있으면 한쪽만
+/// 재기동하는 회귀가 상태와 효과로 드러난다 — 로그를 볼 수 없는 단위 테스트에서
+/// 관측 가능한 차이를 만드는 것이 요점이다.
+#[test]
+fn both_stop_events_finish_the_same_way() {
+    /// 정지에 들어가고 waiter 하나를 걸어 둔 harness. (PRD §31)
+    fn stopping_with_a_waiter() -> (Harness, OperationId, ProcessId) {
+        let mut h = Harness::with_spec(test_spec(1, 256));
+        let lease_id = h.start();
+        let effects = h.step(AppCommand::RequestFinished { lease_id });
+        let generation = armed_idle_timers(&effects)[0];
+        h.advance(Duration::from_secs(2));
+        let effects = h.step(AppCommand::IdleTimeout { generation });
+        assert_eq!(h.state(), AppStateName::Stopping);
+        let operation_id = stops(&effects)[0].expect("stop reports back");
+        let process_id = h.process_id().expect("stopping still knows its process");
+
+        // STOPPING 중 도착한 요청은 waiter가 된다. 이것이 두 경로의 차이를
+        // 관측 가능하게 만든다.
+        let (_effects, _response) = h.acquire();
+        assert_eq!(h.pending_waiters(), 1);
+
+        (h, operation_id, process_id)
+    }
+
+    // 경로 A — StopCompleted가 먼저 온다.
+    let (mut a, operation_id, _) = stopping_with_a_waiter();
+    let effects_a = a.step(AppCommand::StopCompleted {
+        operation_id,
+        result: Ok(()),
+    });
+
+    // 경로 B — ProcessExited가 먼저 온다.
+    let (mut b, _, process_id) = stopping_with_a_waiter();
+    let effects_b = b.step(AppCommand::ProcessExited {
+        process_id,
+        // SIGTERM에 죽은 모양. 정지 중이므로 실패로 세지 않는다.
+        status: ExitStatus::unknown(),
+    });
+
+    assert_eq!(
+        a.state(),
+        b.state(),
+        "어느 사건으로 끝나든 같은 상태여야 한다",
+    );
+    assert_eq!(
+        a.pending_waiters(),
+        b.pending_waiters(),
+        "기다리던 요청이 어느 경로에서도 이월되어야 한다",
+    );
+    assert_eq!(
+        only_start(&effects_a),
+        only_start(&effects_b),
+        "어느 경로에서도 재기동을 지시해야 한다",
+    );
+}
