@@ -193,6 +193,70 @@ mod tests {
         assert_eq!(parsed.get("warm_p95_ms"), Some(1.2));
     }
 
+    /// **값을 깎지 않고 왕복한다.**
+    ///
+    /// 위의 테스트는 값이 `1.2` 하나뿐이라 **어떤 정밀도로 적어도 통과한다** —
+    /// `{:.3}`으로 적어도, `{:.1}`로 적어도 `1.2`는 살아 돌아온다.
+    ///
+    /// `render`가 `{value}`를 쓰므로 Rust가 **다시 읽으면 같은 f64가 되는 가장
+    /// 짧은 표기**를 낸다. 그것에 기대고 있으니 그것을 고정한다. 누가 자리수를
+    /// 맞추려고 `{:.3}`을 넣으면 여기서 걸린다.
+    ///
+    /// baseline은 `직전 대비` 비교의 입력이다. 값이 깎이면 그 차이가 **없는
+    /// 회귀로 보이거나 있는 회귀를 가린다.**
+    #[test]
+    fn it_round_trips_without_rounding() {
+        let mut baseline = Baseline::new("v9.9.9");
+
+        // 실제로 나오는 모양들 — 소수 네 자리, 아주 작은 값, RSS처럼 큰 값.
+        let samples = [
+            ("warm_p50_ms", 0.021),
+            ("warm_p95_ms", 1.2345),
+            ("proxy_overhead_p50_ms", 0.0005),
+            ("cold_start_p95_ms", 1234.5678),
+            ("daemon_rss_kb", 8192.0),
+            ("zero_ms", 0.0),
+        ];
+        for (key, value) in samples {
+            baseline.set(key, value);
+        }
+
+        let parsed = Baseline::parse(&baseline.render());
+
+        assert_eq!(parsed.label(), "v9.9.9");
+        for (key, value) in samples {
+            assert_eq!(
+                parsed.get(key),
+                Some(value),
+                "`{key}`가 왕복에서 깎였다: {value} → {:?}",
+                parsed.get(key),
+            );
+        }
+    }
+
+    /// 추적하는 지표 **전부**가 왕복한다.
+    ///
+    /// 표본 몇 개로는 특정 이름만 새는 경우를 보지 못한다. `TRACKED`에 지표를
+    /// 더할 때 이 테스트가 같이 커진다.
+    #[test]
+    fn every_tracked_metric_round_trips() {
+        let mut baseline = Baseline::new("all");
+        // 이름마다 다른 값을 넣는다. 같은 값이면 뒤섞여도 통과한다.
+        for (index, (key, _, _, _)) in TRACKED.iter().enumerate() {
+            baseline.set(key, index as f64 + 0.5);
+        }
+
+        let parsed = Baseline::parse(&baseline.render());
+
+        for (index, (key, _, _, _)) in TRACKED.iter().enumerate() {
+            assert_eq!(
+                parsed.get(key),
+                Some(index as f64 + 0.5),
+                "`{key}`가 왕복에서 사라지거나 뒤섞였다",
+            );
+        }
+    }
+
     #[test]
     fn malformed_lines_are_skipped() {
         let parsed = Baseline::parse("label=old\ngarbage\nwarm_p95_ms=not-a-number\nok_ms=2\n");
