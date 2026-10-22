@@ -431,4 +431,90 @@ apps[]      name · host · state · pid · active · pending · since_ms · idl
 
 ---
 
+## 86. `nimwake` CLI
+
+§85가 창구의 전송 형식을 정했다. 이 절은 **그 창구를 쓰는 명령**의 표면이다.
+
+```bash
+nimwake status          사람이 읽는 표
+nimwake status --json   §85의 응답을 그대로
+```
+
+§56이 명령 목록을 두었고, 그중 `status`가 먼저 들어간다. 왜 읽기부터인지는
+§85에 적었다.
+
+### 왜 별도 바이너리인가
+
+`nimwaked`에 붙이지 않는다. **daemon을 띄우는 바이너리와 daemon에게 묻는
+바이너리는 수명이 다르다.**
+
+```text
+nimwaked    떠 있는다. supervisor가 관리한다
+nimwake     한 번 실행하고 끝난다. 사람이 입력한다
+```
+
+한 바이너리에 두면 `nimwaked status`가 되는데, 그러면 "이것이 daemon을 띄우는
+명령인가 묻는 명령인가"를 인자가 결정한다. 실수로 daemon을 하나 더 띄우는
+길을 만들 이유가 없다.
+
+### socket 경로를 추측하지 않는다
+
+```text
+--socket <PATH>      명시
+NIMWAKE_SOCKET       환경 변수
+둘 다 없으면          설정 오류 (78)
+```
+
+§85가 기본 경로를 두지 않은 것과 같은 이유다 — 쓸 수 있는 경로를 아는 것은
+호스트다. CLI가 `/run/nimwake.sock`을 먼저 들여다보면, 그 경로에 다른 것이
+있는 기계에서 엉뚱한 곳에 묻는다.
+
+**환경 변수를 두는 이유**: 호스트가 한 번 export하면 운영자가 경로를 외우지
+않아도 된다. 플래그가 환경 변수를 이긴다 — 한 번만 다른 곳에 묻고 싶은 경우가
+있다.
+
+### 사람이 먼저, 기계는 `--json`
+
+```text
+APP      STATE      PID     ACTIVE  IDLE
+blog     RUNNING    12971        0  3.1s
+notes    SLEEPING     —          0  —
+```
+
+**기본이 사람인 이유**: 터미널에 치는 사람이 더 많다. 기계는 `--json`을 적으면
+되고, 그쪽은 §85의 응답을 **가공하지 않고 그대로** 낸다 — CLI가 다시 포맷하면
+계약이 두 곳이 된다.
+
+사람이 읽는 표의 열 구성은 **약속하지 않는다.** §79의 로그와 같다. 파싱할 것이
+필요하면 `--json`이 그것이다.
+
+### 종료 코드로 구분한다
+
+```text
+0   답을 받았다
+69  창구에 닿지 못했다        daemon이 꺼졌거나 경로가 틀렸다
+70  daemon이 오류를 돌려줬다  모르는 명령 등
+78  인자가 틀렸다             경로를 주지 않았거나 모르는 플래그
+```
+
+**69와 78을 가른다.** 스크립트가 "아직 안 떴다"(기다린다)와 "설정이 틀렸다"
+(고친다)를 다르게 다뤄야 한다. 둘을 같은 코드로 내면 재시도 루프가 영원히 돈다.
+
+`nimwaked`의 코드와 같은 뜻을 쓴다 — 78은 설정, 69는 쓸 수 없음.
+
+### 하지 않는 것
+
+| | |
+| --- | --- |
+| daemon 띄우기 | `nimwaked`가 한다. CLI는 묻기만 한다 |
+| `deploy` | §57이고 `nimwake-android`가 이미 한다. Core가 다시 만들면 두 곳이 된다 |
+| `logs` | 파일을 읽는 것이다. `tail`이 더 잘 한다 |
+| 상태를 바꾸는 명령 | §85에 적은 대로 "누가 멈출 수 있는가"를 먼저 정해야 한다 |
+
+→ [§85 Control Socket](#85-control-socket) ·
+[§56 CLI](../05-beyond-mvp/02-platform-features.md) ·
+[§74 Host Interface](#74-host-interface)
+
+---
+
 ← [Android Deployment와 검증](02-android.md) · [문서 인덱스](../README.md) · [Resource Management](../05-beyond-mvp/01-resource-management.md) →

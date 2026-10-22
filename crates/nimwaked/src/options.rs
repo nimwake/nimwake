@@ -48,6 +48,7 @@ OPTIONS:
                         기계가 읽는 상태 창구를 그 경로에 연다 (PRD §85)
                         없으면 만들지 않는다. 권한 0600, 같은 uid만 닿는다
                         디렉터리는 호스트가 만든다 — 없으면 기동하지 않는다
+                        묻는 쪽은 `nimwake status --socket <PATH>` (PRD §86)
     --trace-json        구간 계측을 JSON 한 줄씩 출력한다 (benchmark mode, PRD §72)
                         요청 구간은 평소 꺼져 있고 이때만 켜진다
     -V, --version       버전만 출력하고 끝낸다 (daemon을 띄우지 않는다)
