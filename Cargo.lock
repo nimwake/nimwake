@@ -221,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "nimwake-bench"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "nimwake-fixtures",
  "nix",
@@ -229,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "nimwake-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -248,7 +248,7 @@ dependencies = [
 
 [[package]]
 name = "nimwake-fixtures"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "nimwake-core",
  "nimwake-fixtures",
@@ -258,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "nimwaked"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "nimwake-core",
  "nimwake-fixtures",
