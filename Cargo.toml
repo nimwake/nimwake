@@ -14,7 +14,14 @@ members = [
 # 운영 로그만으로 어떤 release가 도는지 알 수 없었다. (이슈 #24)
 version = "0.1.1"
 edition = "2021"
-rust-version = "1.75"
+# 의존성 트리가 요구하는 값이다 — 우리가 고른 하한이 아니다.
+#
+# `toml` 1.x · `tokio` 1.54 · `hashbrown` 0.17이 1.85를 요구한다. 전에는 1.75로
+# 적혀 있었지만 **아무도 그 버전으로 빌드해 보지 않았다** — rust-toolchain.toml이
+# `stable`을 고정하고 CI도 그것을 쓴다. 검증하지 않는 숫자는 조용히 거짓이 된다.
+#
+# 아래 ci.yml의 "Build at the declared MSRV"가 이제 이 값을 지킨다.
+rust-version = "1.85"
 license = "MIT"
 repository = "https://github.com/nimwake/nimwake"
 
