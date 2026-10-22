@@ -119,6 +119,58 @@ regression warning
 
 ---
 
+### 잡음을 재 두었다 — threshold를 정하기 전에
+
+`v0.1.0`부터 `v0.1.3`까지 네 release의 baseline을 비교했다. **그 구간에
+런타임 변경이 거의 없다**(control socket과 CLI는 요청 경로를 지나지 않고,
+§84의 거절은 WebSocket에만 걸린다). 그래서 차이는 거의 전부 runner 편차다.
+
+```text
+지표                              최소        최대      폭
+concurrency_knee                    50       100     100%
+concurrency_knee_p95_ms          4.700     8.742      86%
+concurrency_knee_rps            12,141    20,673      70%
+proxy_overhead_p50_ms            0.323     0.511      58%
+request_proxy_connect_ms         0.021     0.033      57%
+warm_p50_ms                      0.503     0.790      57%
+warm_rps                         7,099    10,884      53%
+cold_start_total_ms              0.891     1.101      24%
+sustained_cpu_pct_of_wall        163.5     187.6      15%
+daemon_rss_mb                    5.934     6.039       2%
+```
+
+### 제안했던 threshold는 잡음보다 작다
+
+위에서 `proxy overhead +30% 이상`을 상대 threshold 후보로 적었다. **그 지표의
+측정 잡음이 58%다** — 그 threshold를 켜면 런타임이 그대로여도 절반쯤의
+release에서 경고가 난다.
+
+경고가 상시로 나면 읽지 않게 되고, 읽지 않는 경고는 없는 것과 같다.
+
+### 비교할 수 있는 것은 RSS뿐이다
+
+```text
+daemon_rss_mb      2%     비교 가능
+그 밖              15~100%  한 번의 측정으로 판단할 수 없다
+```
+
+`concurrency_knee`가 50과 100을 왕복하는 것이 특히 그렇다 — 무릎은 단계
+탐색이라 한 단계만 움직여도 두 배가 된다.
+
+### 그래서 어떻게 하나
+
+| | |
+| --- | --- |
+| 지금 | 경고만 남긴다. 리포트의 `직전 대비` 표는 **읽는 사람이 잡음을 아는 상태에서** 봐야 한다 |
+| threshold를 켤 때 | 한 번의 측정이 아니라 **여러 release의 추세**로 판단한다. 같은 commit을 여러 번 돌려 잡음의 분포를 먼저 재는 편이 낫다 |
+| 지금 쓸 수 있는 것 | `daemon_rss_mb`와 **실패/누수 판정**(spawn 수 · 고아 · 좀비 · FD)이다. 그것들은 숫자가 아니라 불변식이라 잡음이 없다 |
+
+**수치를 인용할 때 범위를 적는다.** 한 release의 값을 정확한 값처럼 쓰면
+안 된다 — 실제로 그렇게 했다가 고쳤다(`request_proxy_connect_ms`를 `0.033ms`로
+인용했는데 측정 범위가 `0.021~0.033`이다).
+
+---
+
 ### Profiling은 gate가 아니라 진단 도구
 
 부하 테스트에서 regression이 발견되면 그때 profiling으로 내려간다.

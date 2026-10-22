@@ -266,6 +266,14 @@ fixture로 잰 배터리 수치를 실사용에 쓰면 안 된다는 뜻이기�
 
 cold start 분해는 표본 1,000개(CI) · 993개(기기)다.
 
+**`배수` 열의 유효 자릿수는 하나다.** CI 쪽 수치가 release 간 15~100% 흔들린다 —
+`proxy overhead p50`은 58%, `concurrency knee`는 50과 100을 왕복한다. 잡음을
+`v0.1.0`~`v0.1.3`의 baseline 네 개로 쟀고 §73에 적었다. 그 구간에 런타임 변경이
+거의 없으므로 차이는 거의 전부 runner 편차다.
+
+안정적인 것은 `daemon RSS`(2%)뿐이다. 그 행의 `0.4×`는 믿을 수 있고, 나머지는
+자릿수만 읽어야 한다.
+
 ### overhead는 농도가 다르다
 
 ```text
@@ -426,7 +434,7 @@ soak CSV에는 **구간 분해가 없다.** `seconds`는 HTTP 응답 시간이�
 | readiness의 의미 | TCP connect는 application readiness가 아니다. Next.js는 port를 열고도 190ms 더 걸린다 |
 | 동시 기동의 자원 한계 | Next.js 앱 8개를 동시에 깨우면 직렬화 없이 전부 0.87초에 뜬다. 앱당 96MB로 합계 768MB. **입장 제어(§78)와 유휴 eviction(§80)이 생겼다** — 부족하면 가장 오래 유휴인 것을 내리고, 그래도 부족하면 거절한다. **동시에 깨어나는 경우는 막지 못한다**: app의 메모리 비용을 기동 전에 알 수 없다. `priority`·`always_on`은 §54 Post-MVP |
 | 장시간 운용 | CI에서의 최장 측정은 105초(stress) / 120초(sustained)다. **실기기에서 72.0시간을 완주했다** — daemon 재시작 0회, 요청 실패 0/862, RSS 2104→1308KB(감소), 최대 표본 간격 302초(주기 300초). 그 뒤 **`v0.1.0`으로 55.1시간**(표본 656)을 돌려 §80의 ticker(약 19,800회)와 §83의 timer까지 덮었다 — 비200 0, 재기동 0, daemon RSS 2192→1364KB. 72시간을 못 채운 이유는 Core가 아니라 배터리다(1.8 %/h, 100%→1%) |
-| backend 연결 비용 | **요청마다 새 TCP 연결을 연다**(pool 없음, 의도적 — scale-to-zero가 backend를 죽이므로 pool의 keep-alive가 다음 요청에서 실패한다). 지연은 무시할 만하다 — **0.033ms, ttfb 1.296ms의 2.5%**. **포트는 문제가 아니다**: TIME_WAIT를 쥐는 쪽은 backend이고(요청 2,000개 → backend 쪽 1,999개 · gateway의 ephemeral 쪽 4개) gateway의 ephemeral은 즉시 풀린다. 관련 한계는 `tcp_max_tw_buckets`(기본 65,536)이고 넘기면 커널이 재활용하며 경고를 남길 뿐 연결이 실패하지 않는다. bench가 30초간 7,098 rps를 버티는 것이 증거다. **처음에 "470 req/s에서 고갈된다"고 적었던 것은 틀렸다** — TIME_WAIT를 어느 쪽이 쥐는지 구분하지 않고 세었다 |
+| backend 연결 비용 | **요청마다 새 TCP 연결을 연다**(pool 없음, 의도적 — scale-to-zero가 backend를 죽이므로 pool의 keep-alive가 다음 요청에서 실패한다). 지연은 무시할 만하다 — **0.021~0.033ms, ttfb의 2~3%**(baseline 네 개의 범위. CI runner 편차가 그 지표에서 57%라 한 값으로 적을 수 없다 — §73). **포트는 문제가 아니다**: TIME_WAIT를 쥐는 쪽은 backend이고(요청 2,000개 → backend 쪽 1,999개 · gateway의 ephemeral 쪽 4개) gateway의 ephemeral은 즉시 풀린다. 관련 한계는 `tcp_max_tw_buckets`(기본 65,536)이고 넘기면 커널이 재활용하며 경고를 남길 뿐 연결이 실패하지 않는다. bench가 30초간 7,098 rps를 버티는 것이 증거다. **처음에 "470 req/s에서 고갈된다"고 적었던 것은 틀렸다** — TIME_WAIT를 어느 쪽이 쥐는지 구분하지 않고 세었다 |
 | crash-loop | backoff가 있다 (PRD §77). 같은 기계에서 before/after를 쟀다 — 20초 부하에 **기동 시도 3,653·4,728회 → 14·14회**(초당 183~236 → 0.7). 14는 설계가 예측한 값과 같다(앱당 즉시 3회 + 1·2·4·8·16초 지연 = 7회, 앱 2개). 누수는 전부터 없었다 — 동시 자식 ≤ app 수, 정착 후 zombie 0, FD 증가 없음 |
 | manifest 재적재 | `SIGHUP`으로 된다 (PRD §76). 바뀌지 않은 application은 건드리지 않는다. 검증 실패와 빈 집합은 거부하고 기존 상태를 유지한다 |
 | 운영 도구 | **`nimwake status`가 생겼다** (PRD §85 · §86) — unix socket으로 묻고 `--json`이 기계가 읽는 형식을 준다. `--control-socket`은 기본 꺼짐이다. `SIGUSR1`(§79)도 그대로 둔다 — socket을 켜지 않은 배포에서도 상태를 볼 길이 있어야 한다. 상태를 **바꾸는** 명령은 아직 없다 |
