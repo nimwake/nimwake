@@ -262,4 +262,173 @@ signal 등록  →  "listening on ..." 출력  →  serve
 
 ---
 
+## 85. Control Socket
+
+`nimwaked`는 **unix domain socket**으로 상태를 묻고 조작할 창구를 둔다. §56이
+"Unix Domain Socket을 우선 고려한다"고 둔 것의 구체적 계약이다.
+
+```text
+nimwake CLI  ──→  nimwake.sock  ──→  nimwaked
+```
+
+### 무엇이 문제였나
+
+§79는 `SIGUSR1`로 상태를 **로그에 쓴다.** 사람이 읽기에는 충분하지만, 프로그램이
+읽으려면 신호를 보내고 로그를 거슬러 찾아야 한다.
+
+`nimwake-android`가 실제로 그렇게 하고 있다.
+
+```text
+scripts/apps.sh:203        kill -USR1 "$daemon"  →  nimwaked.log를 grep
+scripts/device-status.sh   grep -o 'nimwaked [0-9][0-9a-z.-]*' … | tail -n 1
+tests/device/app.sh        "app의 pid는 Core에게 묻는다 — SIGUSR1 상태 스냅샷"
+```
+
+**이 방식은 세 가지로 깨진다.**
+
+```text
+경합        신호를 보낸 뒤 로그가 쓰이기까지 기다려야 하고, 얼마를 기다릴지 모른다
+구분 불가    같은 app의 옛 스냅샷과 새 스냅샷을 섞어 읽는다
+형식 변경    §79는 "사람이 읽는다. 기계가 읽는 형식을 약속하지 않는다"고 적혀 있다
+```
+
+마지막 것이 핵심이다. §79는 **의도적으로** 형식을 약속하지 않았다. 그것을
+파싱하는 쪽이 생겼다면, 약속할 창구를 따로 주는 것이 맞다.
+
+### 신호를 없애지 않는다
+
+`SIGUSR1`은 그대로 둔다. **socket이 없을 때도 상태를 볼 길이 있어야 한다** —
+운영자가 로그만 들고 있는 상황, socket을 켜지 않은 배포가 그것이다.
+
+둘은 같은 사실을 다른 독자에게 준다.
+
+```text
+SIGUSR1        사람이 읽는다. 형식을 약속하지 않는다 (§79)
+control socket 기계가 읽는다. 형식을 약속한다 (이 절)
+```
+
+### 켜야 생긴다
+
+```text
+--control-socket <PATH>    없으면 socket을 만들지 않는다
+```
+
+**기본이 꺼짐이다.** 두 가지 이유다.
+
+파일을 만드는 것은 부수효과다. 아무도 요구하지 않은 socket을 어딘가에 만들면,
+그 경로를 고르는 순간 Core가 파일 배치를 정하는 셈이 된다. 그것은 §58
+Filesystem의 주제이고 아직 정하지 않았다.
+
+그리고 **쓸 수 있는 경로를 Core가 추측할 수 없다.** `$XDG_RUNTIME_DIR`은 Android
+proot에 없고, `/run`은 쓸 수 없고, `/tmp`는 다른 사용자가 보는 곳이다. 경로를
+아는 것은 호스트다.
+
+### 같은 uid만 닿는다
+
+```text
+socket 파일 권한    0600
+디렉터리            호스트가 만든다. Core는 만들지 않는다
+```
+
+§79가 신호를 고른 이유와 같다 — **인증을 만들지 않는다.** 신호는 같은 uid를
+요구하고, 0600 socket도 같은 uid를 요구한다. 새 공격면이 없다.
+
+경로의 디렉터리가 없으면 **기동을 거부한다**(`78`). 만들어 주지 않는다 — 그
+디렉터리의 권한을 Core가 정하게 되고, 그것이 socket의 권한보다 느슨하면 0600이
+의미를 잃는다.
+
+### 남은 socket 파일
+
+`bind`는 경로가 이미 있으면 실패한다. daemon이 비정상 종료하면 파일이 남는다.
+
+```text
+경로에 연결해 본다
+  ├── 연결됨    다른 daemon이 살아 있다 → 기동 거부 (78)
+  └── 실패      남은 파일이다 → 지우고 bind
+```
+
+**연결해 보고 판단한다.** 무조건 지우면 돌고 있는 daemon의 socket을 빼앗아, 두
+daemon이 같은 app을 관리하는 상태로 간다. Invariant 1이 금지하는 것이다.
+
+종료할 때도 지운다. 정상 종료에서 파일을 남기지 않는다.
+
+### 주고받는 형식
+
+**연결 하나에 요청 하나, 응답 하나, 그리고 닫는다.**
+
+```text
+클라이언트 → {"command":"status"}\n
+서버      → {"contract":1,"version":"0.1.1","apps":[…]}\n
+            연결 닫음
+```
+
+framing을 두지 않는다. 연결이 닫히는 것이 메시지의 끝이다. 지속 연결과 요청
+식별자를 두면 상태를 들고 있어야 하고, CLI 한 번 실행에 그것이 필요하지 않다.
+
+JSON인 이유: 파싱하는 쪽이 이미 `jq`를 쓴다. 줄 단위 `key=value`는 중첩을
+표현할 수 없고, app 목록은 중첩이다.
+
+### 계약 번호를 함께 보낸다
+
+```text
+"contract": 1
+```
+
+**이 창구는 다른 저장소가 의존한다.** 형식을 바꿀 때 읽는 쪽이 알아야 한다.
+번호가 올라가면 읽는 쪽이 자기가 아는 번호인지 보고 판단한다.
+
+모르는 필드를 더하는 것은 번호를 올리지 않는다. 필드를 **없애거나 뜻을 바꾸는
+것**이 올린다.
+
+### 모르는 명령
+
+```text
+{"command":"nonsense"}  →  {"contract":1,"error":"unknown command: nonsense"}
+```
+
+연결을 끊지 않고 오류를 돌려준다. 끊으면 읽는 쪽이 "daemon이 죽었나"와
+"명령을 모르나"를 구분할 수 없다.
+
+JSON이 아닌 입력, 너무 긴 입력도 같다 — 오류를 돌려주고 닫는다. 요청 한 줄의
+상한을 두어 긴 입력이 메모리를 먹지 않게 한다.
+
+### `status`가 먼저다
+
+§56의 명령 목록 중 **읽기만 하는 것**을 먼저 넣는다.
+
+```text
+status      지금 무엇이 어떤 상태인가        이 절
+list        app 목록                        status가 포함한다
+wake/sleep  상태를 바꾼다                    나중에
+deploy      §57의 주제. 호스트가 이미 한다    Core가 하지 않는다
+logs        파일을 읽는 것. socket이 필요 없다
+```
+
+**읽기부터 넣는 이유**: 지금 깨져 있는 것이 읽기다(로그 파싱). 그리고 쓰기
+명령은 "누가 이 app을 멈출 수 있는가"를 정해야 하는데, 그것은 0600보다 섬세한
+질문이고 지금 사례가 없다.
+
+`deploy`는 Core가 하지 않는다. `nimwake-android`가 배포 계약을 가지고 있고
+([§57](../05-beyond-mvp/02-platform-features.md)), 그것을 Core가 다시 만들면 두 곳이 된다.
+
+### `status`가 주는 것
+
+§79가 로그에 쓰는 것과 **같은 사실**이다. 출처를 둘로 두지 않는다.
+
+```text
+contract    이 형식의 번호
+version     돌고 있는 daemon의 버전 — 디스크의 바이너리와 다를 수 있다 (§74)
+apps[]      name · host · state · pid · active · pending · since_ms · idle_ms · error
+```
+
+`pid`는 OS pid다. 내부 식별자가 아니라 `ps`와 맞출 수 있는 값이어야 한다 —
+§79에서 한 번 틀렸던 것이다.
+
+→ [§56 CLI](../05-beyond-mvp/02-platform-features.md) ·
+[§79 Status Snapshot](#79-status-snapshot) ·
+[§74 Host Interface](#74-host-interface) ·
+[§58 Filesystem](../05-beyond-mvp/02-platform-features.md)
+
+---
+
 ← [Android Deployment와 검증](02-android.md) · [문서 인덱스](../README.md) · [Resource Management](../05-beyond-mvp/01-resource-management.md) →
