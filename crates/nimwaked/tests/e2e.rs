@@ -2214,6 +2214,11 @@ fn the_socket_file_is_removed_on_shutdown() {
     );
 }
 
+/// JSON과 TOML을 다루는 테스트가 쓰는 문자. 소스에 직접 적으면 escape가
+/// 겹쳐 읽기 어렵다.
+const QUOTE: &str = "\"";
+const BACKSLASH: &str = "\\";
+
 /// `nimwake` CLI를 돌린다. (PRD §86)
 fn cli(args: &[&str], socket_env: Option<&std::path::Path>) -> (i32, String, String) {
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_nimwake"));
@@ -2481,4 +2486,171 @@ fn a_shutdown_signal_right_after_startup_still_runs_the_shutdown_sequence() {
                 .collect::<Vec<_>>())
             .unwrap_or_default(),
     );
+}
+
+/// **escape와 unescape가 서로의 역임을 끝까지 확인한다.** (PRD §85, §86)
+///
+/// `control.rs`가 app 이름 · host · state · 오류 메시지를 JSON 문자열에 넣으며
+/// escape하고, `nimwake`가 그것을 되돌린다. 둘은 짝이지만 **다른 crate에 있고
+/// 각자의 단위 테스트만 있었다** — 짝이 맞는지는 아무도 보지 않았다.
+///
+/// 이름에 문자 제한이 없다. manifest의 `name`은 그냥 문자열이고, TOML의 literal
+/// string(`'...'`)은 따옴표를 그대로 담는다.
+#[test]
+fn a_name_needing_escapes_survives_the_round_trip() {
+    let apps = Apps::new();
+    let port = free_port();
+    let command = fixture("echo-server").display().to_string();
+
+    // TOML literal string이라 escape가 필요 없다. 따옴표와 한글을 함께 넣는다.
+    apps.manifest(
+        "tricky",
+        &format!(
+            "name = 'say @hi@ 정상'NL             NL             [server]NL             host = @tricky.localhost@NL             port = {port}NL             NL             [runtime]NL             command = [{command:?}, @{port}@]NL             working_dir = @.@NL",
+        )
+        .replace('@', QUOTE)
+        .replace("NL", "\n"),
+    );
+
+    let socket = apps.path().join("control.sock");
+    let daemon = Daemon::start_with(&apps, &["--control-socket", &socket.display().to_string()]);
+
+    // `--json`은 가공하지 않은 응답이다. 유효한 JSON이어야 한다.
+    let (code, raw, err) = cli(&["status", "--json"], Some(&socket));
+    assert_eq!(code, 0, "{err}");
+
+    // 따옴표가 escape되지 않았다면 개수가 홀수가 된다.
+    assert_eq!(
+        raw.matches(QUOTE).count() % 2,
+        0,
+        "따옴표 개수가 홀수다 — escape되지 않은 값이 섞였다: {raw}",
+    );
+    assert!(
+        raw.contains(&format!("say {BACKSLASH}{QUOTE}hi{BACKSLASH}{QUOTE}")),
+        "따옴표가 escape된 채로 와야 한다: {raw}",
+    );
+
+    // 사람이 읽는 표에서는 되돌아와 있어야 한다.
+    let (code, table, err) = cli(&["status"], Some(&socket));
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        table.contains(&format!("say {QUOTE}hi{QUOTE}")),
+        "표에서는 escape가 풀려 있어야 한다:\n{table}",
+    );
+    assert!(table.contains("정상"), "한글이 그대로 와야 한다:\n{table}");
+    assert!(
+        !table.contains(&format!("{BACKSLASH}{QUOTE}")),
+        "표에 escape가 남아 있다 — 되돌리지 않았다:\n{table}",
+    );
+
+    drop(daemon);
+}
+
+/// 오류 메시지도 같은 경로를 지난다. (PRD §85)
+///
+/// `last_error`는 OS 메시지를 품을 수 있고 그것에 무엇이 들어올지 모른다.
+#[test]
+fn a_failed_app_reports_its_error_through_the_socket() {
+    let apps = Apps::new();
+    let port = free_port();
+    // 없는 명령 → 기동 실패 → last_error가 채워진다.
+    apps.manifest(
+        "broken",
+        &format!(
+            "name = \"broken\"\n\
+             \n\
+             [server]\n\
+             host = \"broken.localhost\"\n\
+             port = {port}\n\
+             \n\
+             [runtime]\n\
+             command = [\"/nonexistent/binary/for/this/test\"]\n\
+             working_dir = \".\"\n\
+             \n\
+             [lifecycle]\n\
+             startup_timeout_seconds = 2\n",
+        ),
+    );
+
+    let socket = apps.path().join("control.sock");
+    let daemon = Daemon::start_with(&apps, &["--control-socket", &socket.display().to_string()]);
+
+    // 깨우면 실패한다.
+    let response = daemon.get("broken.localhost");
+    assert_ne!(response.status, 200, "없는 명령은 기동할 수 없다");
+
+    let (code, raw, err) = cli(&["status", "--json"], Some(&socket));
+    assert_eq!(code, 0, "{err}");
+
+    let quotes = raw.matches('"').count();
+    assert_eq!(quotes % 2, 0, "오류 메시지가 JSON을 깨뜨렸다: {raw}",);
+    assert!(
+        raw.contains(r#""state":"FAILED""#),
+        "실패한 app은 FAILED다: {raw}",
+    );
+    assert!(
+        !raw.contains(r#""error":null"#),
+        "실패했으면 오류가 있어야 한다: {raw}",
+    );
+
+    // **사람이 읽는 표도 실패해서는 안 된다.** app의 `error` 필드를 daemon
+    // 오류로 오인하면 상태를 가장 보고 싶을 때 CLI가 70으로 끝난다 — 실제로
+    // 그랬고 이 테스트가 잡았다.
+    let (code, table, err) = cli(&["status"], Some(&socket));
+    assert_eq!(
+        code, 0,
+        "FAILED인 app이 있어도 status는 0이어야 한다. stderr: {err}",
+    );
+    assert!(
+        table.contains("FAILED"),
+        "표에 FAILED가 보여야 한다:\n{table}",
+    );
+    assert!(table.contains("broken"), "app 이름이 보여야 한다:\n{table}",);
+
+    drop(daemon);
+}
+
+/// **daemon이 오류를 돌려주면 `70`이다.** (PRD §86)
+///
+/// 실제 daemon은 `status`에 늘 성공하므로 이 경로를 만들 수 없다. 그래서
+/// 가짜 창구를 띄운다 — 버전이 어긋나 명령을 모르는 daemon의 모양이다.
+///
+/// 이 코드가 없어도 다른 테스트는 모두 통과했다. §86이 `70`을 약속하는데
+/// 그것을 지키는 것이 없었다.
+#[test]
+fn a_daemon_error_is_exit_seventy() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    let apps = Apps::new();
+    let socket = apps.path().join("fake.sock");
+    let listener = UnixListener::bind(&socket).expect("fake socket binds");
+
+    // 요청 한 줄을 읽고 오류 객체로 답하는 창구. §85의 형식 그대로다.
+    let server = std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            let mut line = String::new();
+            let mut reader = BufReader::new(&stream);
+            let _ = reader.read_line(&mut line);
+            let mut writer = &stream;
+            let _ = writeln!(
+                writer,
+                r#"{{"contract":1,"error":"unknown command: status"}}"#
+            );
+            let _ = writer.flush();
+        }
+    });
+
+    let (code, out, err) = cli(&["status"], Some(&socket));
+    server.join().expect("fake server finished");
+
+    assert_eq!(
+        code, 70,
+        "daemon이 오류를 돌려주면 70이다 (69는 닿지 못한 것, 78은 인자 문제).          stdout: {out} stderr: {err}",
+    );
+    assert!(
+        err.contains("unknown command"),
+        "daemon이 말한 이유를 전해야 한다: {err}",
+    );
+    assert!(out.trim().is_empty(), "오류일 때 표를 내면 안 된다: {out}",);
 }

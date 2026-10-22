@@ -139,9 +139,18 @@ fn report(reply: &str, json: bool) -> ExitCode {
     let reply = reply.trim();
 
     // daemon이 오류를 돌려준 경우. 닿기는 했으므로 69가 아니다.
-    if let Some(message) = field(reply, "error") {
-        eprintln!("nimwake: {message}");
-        return ExitCode::from(EX_SOFTWARE);
+    //
+    // **`apps`가 있으면 상태 응답이다.** app 객체마다 자기 `error` 필드가 있어서
+    // 응답 전체에서 `"error"`를 찾으면 app 하나가 FAILED일 때 daemon 오류로
+    // 오인한다 — 운영자가 상태를 가장 보고 싶을 때 CLI가 실패했다.
+    //
+    // 오류 응답은 `{"contract":1,"error":"…"}`이고 `apps`가 없다 (PRD §85).
+    let is_status = reply.contains(r#""apps":["#);
+    if !is_status {
+        if let Some(message) = field(reply, "error") {
+            eprintln!("nimwake: {message}");
+            return ExitCode::from(EX_SOFTWARE);
+        }
     }
 
     if json {
