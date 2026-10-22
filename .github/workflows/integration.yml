@@ -33,11 +33,11 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 예제(`examples/hello-node`)를 실제로 띄우는 E2E가 있다.
       # node가 없으면 그 테스트는 조용히 건너뛰므로, 여기서 반드시 깔아 둔다.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -47,7 +47,7 @@ jobs:
           cargo --version
 
       - name: Cache cargo registry and build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -82,7 +82,7 @@ jobs:
 
       - name: Upload the report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: performance-report-${{ github.sha }}
           path: performance-report.md
