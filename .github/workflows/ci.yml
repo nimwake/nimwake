@@ -77,6 +77,13 @@ jobs:
       - name: Build at the declared MSRV
         run: |
           msrv="$(grep -m1 '^rust-version' Cargo.toml | tr -d '"' | awk '{print $3}')"
+          # **두 곳이 같아야 한다.** 어긋나면 clippy가 clippy.toml을 쓰고,
+          # 그러면 lint가 실제보다 낮은 기준으로 돈다. 실제로 어긋나 있었다.
+          lint="$(grep -m1 '^msrv' clippy.toml | tr -d '"' | awk '{print $3}')"
+          if [ "${msrv}" != "${lint}" ]; then
+            echo "::error::Cargo.toml says ${msrv} but clippy.toml says ${lint}"
+            exit 1
+          fi
           echo "declared MSRV: ${msrv}"
           rustup toolchain install "${msrv}" --profile minimal --no-self-update
           cargo "+${msrv}" check --workspace --all-features --locked

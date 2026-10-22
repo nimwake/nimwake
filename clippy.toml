@@ -1,1 +1,3 @@
-msrv = "1.75"
+# Cargo.toml의 rust-version과 같은 값을 유지한다. 어긋나면 clippy가
+# 이쪽을 쓰고, 그러면 lint가 실제보다 낮은 기준으로 돈다.
+msrv = "1.85"
