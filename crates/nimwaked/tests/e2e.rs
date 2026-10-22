@@ -2186,3 +2186,189 @@ fn the_socket_file_is_removed_on_shutdown() {
         || !socket.exists(),
     );
 }
+
+/// `nimwake` CLI를 돌린다. (PRD §86)
+fn cli(args: &[&str], socket_env: Option<&std::path::Path>) -> (i32, String, String) {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_nimwake"));
+    command.args(args);
+    match socket_env {
+        Some(path) => {
+            command.env("NIMWAKE_SOCKET", path);
+        }
+        // 환경이 새어 들어오면 "경로를 주지 않았다"를 볼 수 없다.
+        None => {
+            command.env_remove("NIMWAKE_SOCKET");
+        }
+    }
+    let out = command.output().expect("nimwake runs");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// `nimwake status`가 사람이 읽는 표를 낸다. (PRD §86)
+#[test]
+fn the_cli_prints_a_table_of_applications() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "listed", port, Lifecycle::default());
+
+    let socket = apps.path().join("control.sock");
+    let daemon = Daemon::start_with(&apps, &["--control-socket", &socket.display().to_string()]);
+
+    let (code, out, err) = cli(&["status"], Some(&socket));
+    assert_eq!(code, 0, "답을 받으면 0이다: {err}");
+    assert!(
+        out.contains(&format!("nimwaked {}", env!("CARGO_PKG_VERSION"))),
+        "돌고 있는 daemon의 버전을 낸다: {out}",
+    );
+    assert!(out.contains("APP"), "표 머리: {out}");
+    assert!(out.contains("listed"), "app 이름: {out}");
+    assert!(out.contains("SLEEPING"), "깨우지 않은 app의 상태: {out}");
+
+    // 상태를 묻는 것이 app을 깨우지 않는다.
+    assert!(!is_listening(port), "status가 application을 깨우면 안 된다");
+
+    drop(daemon);
+}
+
+/// `--json`은 daemon의 응답을 **가공하지 않고** 낸다. (PRD §86)
+///
+/// CLI가 다시 포맷하면 계약이 두 곳이 된다.
+#[test]
+fn the_cli_passes_json_through_unchanged() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "raw", port, Lifecycle::default());
+
+    let socket = apps.path().join("control.sock");
+    let daemon = Daemon::start_with(&apps, &["--control-socket", &socket.display().to_string()]);
+
+    let (code, out, err) = cli(&["status", "--json"], Some(&socket));
+    assert_eq!(code, 0, "{err}");
+
+    let line = out.trim();
+    assert!(
+        line.starts_with('{') && line.ends_with('}'),
+        "JSON 한 줄: {out}"
+    );
+    assert!(line.contains(r#""contract":1"#), "{out}");
+    assert!(line.contains(r#""name":"raw""#), "{out}");
+    // 사람이 읽는 표가 섞이면 안 된다.
+    assert!(!out.contains("APP"), "표가 섞였다: {out}");
+
+    drop(daemon);
+}
+
+/// 깨운 뒤에는 pid가 표에 들어온다. (PRD §86)
+#[test]
+fn the_cli_shows_the_pid_of_a_running_app() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "busy", port, Lifecycle::default());
+
+    let socket = apps.path().join("control.sock");
+    let daemon = Daemon::start_with(&apps, &["--control-socket", &socket.display().to_string()]);
+
+    let served = daemon.get("busy.localhost");
+    assert_eq!(served.status, 200);
+
+    let (code, out, err) = cli(&["status"], Some(&socket));
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("RUNNING"), "{out}");
+    assert!(
+        out.contains(&served.pid().to_string()),
+        "backend가 말한 pid가 표에 있어야 한다: {out}",
+    );
+
+    drop(daemon);
+}
+
+/// 플래그가 환경 변수를 이긴다. (PRD §86)
+#[test]
+fn the_socket_flag_wins_over_the_environment() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "flagged", port, Lifecycle::default());
+
+    let socket = apps.path().join("control.sock");
+    let daemon = Daemon::start_with(&apps, &["--control-socket", &socket.display().to_string()]);
+
+    // 환경은 엉뚱한 곳을 가리키고, 플래그가 맞는 곳을 가리킨다.
+    let wrong = apps.path().join("not-a-socket.sock");
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_nimwake"));
+    let out = command
+        .args(["status", "--socket", &socket.display().to_string()])
+        .env("NIMWAKE_SOCKET", &wrong)
+        .output()
+        .expect("nimwake runs");
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "플래그를 따라야 한다: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    drop(daemon);
+}
+
+/// 경로를 주지 않으면 **설정 오류(78)**다. 추측하지 않는다. (PRD §86)
+#[test]
+fn a_missing_socket_path_is_a_config_error() {
+    let (code, _out, err) = cli(&["status"], None);
+    assert_eq!(code, 78, "경로가 없으면 설정 오류다: {err}");
+    assert!(
+        err.contains("NIMWAKE_SOCKET") || err.contains("--socket"),
+        "무엇을 주어야 하는지 말해야 한다: {err}",
+    );
+}
+
+/// **닿지 못한 것(69)과 설정이 틀린 것(78)을 가른다.** (PRD §86)
+///
+/// 스크립트가 "아직 안 떴다"(기다린다)와 "설정이 틀렸다"(고친다)를 다르게
+/// 다뤄야 한다. 둘을 같은 코드로 내면 재시도 루프가 영원히 돈다.
+#[test]
+fn an_unreachable_socket_is_distinct_from_a_config_error() {
+    let apps = Apps::new();
+    let missing = apps.path().join("nobody-is-here.sock");
+
+    let (code, _out, err) = cli(&["status"], Some(&missing));
+    assert_eq!(code, 69, "닿지 못하면 69다: {err}");
+    assert!(err.contains("cannot reach"), "{err}");
+
+    // 같은 상황에서 78이 나오면 스크립트가 영원히 재시도한다.
+    assert_ne!(code, 78, "설정 오류와 구분되어야 한다");
+}
+
+/// 모르는 명령과 모르는 플래그는 78이다. (PRD §86)
+#[test]
+fn unknown_arguments_are_config_errors() {
+    let apps = Apps::new();
+    let socket = apps.path().join("control.sock");
+
+    for args in [
+        vec!["nonsense"],
+        vec!["status", "--nope"],
+        vec!["status", "extra"],
+        vec!["status", "--socket"],
+    ] {
+        let (code, _out, err) = cli(&args, Some(&socket));
+        assert_eq!(code, 78, "`{args:?}` → 78이어야 한다: {err}");
+    }
+}
+
+/// `--help`과 `--version`은 socket 없이도 답한다. (PRD §86)
+#[test]
+fn help_and_version_need_no_socket() {
+    let (code, out, _err) = cli(&["--help"], None);
+    assert_eq!(code, 0);
+    assert!(out.contains("nimwake"), "{out}");
+    assert!(out.contains("EXIT CODES"), "종료 코드를 적어야 한다: {out}");
+
+    let (code, out, _err) = cli(&["--version"], None);
+    assert_eq!(code, 0);
+    assert_eq!(out.trim(), format!("nimwake {}", env!("CARGO_PKG_VERSION")));
+}
