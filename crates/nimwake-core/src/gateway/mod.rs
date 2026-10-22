@@ -166,6 +166,22 @@ impl Gateway {
     }
 }
 
+/// WebSocket 핸드셰이크인가. (PRD §84)
+///
+/// `Upgrade: websocket`만 본다. 대소문자를 구분하지 않는다 — header 값의
+/// 토큰은 대소문자를 가리지 않고, 실제로 `WebSocket`으로 보내는 클라이언트가 있다.
+///
+/// 값이 여럿일 수 있다(`Upgrade: websocket, h2c`). 하나라도 websocket이면 맞다.
+fn requests_websocket(request: &Request<Incoming>) -> bool {
+    request
+        .headers()
+        .get_all(http::header::UPGRADE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|token| token.trim().eq_ignore_ascii_case("websocket"))
+}
+
 /// `Content-Length`가 선언한 본문 크기. 없거나 읽을 수 없으면 `None`.
 ///
 /// 값이 여럿이거나 숫자가 아니면 `None`을 돌려준다 — 그런 요청은 hyper가
@@ -211,6 +227,28 @@ async fn handle(
             ),
         ));
     };
+
+    // **WebSocket upgrade는 여기서 거절한다.** (PRD §84)
+    //
+    // 지우고 넘기면 backend가 평범한 GET으로 보고 200이나 400을 돌려준다.
+    // 클라이언트는 "handshake failed"만 보고 왜인지 알 수 없다 — 앱을 의심하고,
+    // 프레임워크를 의심하고, 터널을 의심한 다음에야 gateway에 닿는다.
+    //
+    // `websocket`만 본다. `h2c` 같은 다른 토큰은 지금처럼 지우고 넘긴다.
+    if requests_websocket(&request) {
+        warn!(
+            app = app.name(),
+            "refusing a websocket upgrade; this gateway does not implement it (PRD §24)",
+        );
+        return Ok(finish(
+            &mut trace,
+            app.name(),
+            router::text(
+                StatusCode::NOT_IMPLEMENTED,
+                "this gateway does not implement websocket upgrades",
+            ),
+        ));
+    }
 
     // **깨우기 전에 판단한다.** (PRD §82)
     //

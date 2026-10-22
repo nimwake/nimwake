@@ -1917,3 +1917,64 @@ fn a_request_joining_a_stop_does_not_shorten_the_reported_duration() {
          합류 지점부터 재고 있다: {completion}",
     );
 }
+
+/// WebSocket upgrade는 `501`이고 **app을 깨우지 않는다.** (PRD §84)
+///
+/// 전에는 `Upgrade`를 hop-by-hop으로 지우고 평범한 GET으로 넘겼다. backend가
+/// 200을 돌려주면 클라이언트는 "handshake failed"만 보고 원인을 알 수 없다.
+#[test]
+fn a_websocket_upgrade_is_refused_without_waking_the_app() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "realtime", port, Lifecycle::default());
+    let daemon = Daemon::start(&apps);
+
+    assert!(!is_listening(port), "application starts asleep");
+
+    for value in ["websocket", "WebSocket", "websocket, h2c"] {
+        let response = daemon
+            .get_with_headers(
+                "realtime.localhost",
+                &[("Upgrade", value), ("Connection", "Upgrade")],
+            )
+            .expect("gateway responds");
+        assert_eq!(
+            response.status, 501,
+            "`Upgrade: {value}`는 501이어야 한다 — 200이면 조용히 내려간 것이다",
+        );
+    }
+
+    assert!(
+        !is_listening(port),
+        "거절할 요청이 application을 깨우면 안 된다",
+    );
+    assert!(
+        daemon
+            .output()
+            .iter()
+            .any(|line| line.contains("refusing a websocket upgrade")),
+        "왜 거절했는지 로그에 남아야 한다",
+    );
+}
+
+/// `websocket`이 아닌 upgrade 토큰은 지금처럼 통과한다. (PRD §84)
+///
+/// `Upgrade: h2c`를 덧붙이는 클라이언트가 있고 RFC는 서버가 무시해도 된다고 한다.
+/// 지금 정상 처리되는 요청을 깨뜨리지 않는다.
+#[test]
+fn other_upgrade_tokens_still_pass_through() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo(&apps, "plain", port, Lifecycle::default());
+    let daemon = Daemon::start(&apps);
+
+    for value in ["h2c", "TLS/1.2"] {
+        let response = daemon
+            .get_with_headers("plain.localhost", &[("Upgrade", value)])
+            .expect("gateway responds");
+        assert_eq!(
+            response.status, 200,
+            "`Upgrade: {value}`는 거절 대상이 아니다",
+        );
+    }
+}
