@@ -92,6 +92,12 @@ pub struct Change {
     pub unit: &'static str,
     pub previous: f64,
     pub current: f64,
+    /// 이 지표에서 **관측한** runner 편차(%). (PRD §73)
+    ///
+    /// 경고를 띄울 문턱이다. 모든 지표에 같은 30%를 쓰면 12개 중 7개에서
+    /// 잡음이 그것을 넘어 `(!)`가 상시로 뜬다 — 상시로 뜨는 경고는 읽지 않게
+    /// 되고, 읽지 않는 경고는 없는 것과 같다.
+    pub noise_pct: f64,
 }
 
 impl Change {
@@ -103,14 +109,16 @@ impl Change {
 
     /// 눈에 띄는 악화인가. 경고 표시에만 쓴다.
     ///
-    /// 여기 걸린다고 release를 막지 않는다. runner 편차가 30%를 넘는 일도 흔하다.
+    /// **지표마다 문턱이 다르다.** `v0.1.0`~`v0.1.3`의 baseline 네 개에서 관측한
+    /// 편차를 쓴다 — 그 구간에 런타임 변경이 거의 없으므로 차이는 거의 전부
+    /// runner 편차다 (PRD §73).
+    ///
+    /// 여기 걸린다고 release를 막지 않는다. 표시만 한다.
     pub fn is_regression(&self) -> bool {
-        self.percent().is_some_and(|percent| percent > WARN_PERCENT)
+        self.percent()
+            .is_some_and(|percent| percent > self.noise_pct)
     }
 }
-
-/// 경고를 띄우는 악화 폭.
-const WARN_PERCENT: f64 = 30.0;
 
 /// 이전 baseline과 지금 값을 맞춰 비교 목록을 만든다.
 ///
@@ -118,35 +126,56 @@ const WARN_PERCENT: f64 = 30.0;
 pub fn compare(
     previous: &Baseline,
     current: &Baseline,
-    metrics: &[(&'static str, &'static str, &'static str)],
+    metrics: &[(&'static str, &'static str, &'static str, f64)],
 ) -> Vec<Change> {
     metrics
         .iter()
-        .filter_map(|(key, metric, unit)| {
+        .filter_map(|(key, metric, unit, noise_pct)| {
             Some(Change {
                 metric,
                 unit,
                 previous: previous.get(key)?,
                 current: current.get(key)?,
+                noise_pct: *noise_pct,
             })
         })
         .collect()
 }
 
-/// 리포트에 싣는 지표. `(baseline key, 표시 이름, 단위)`
-pub const TRACKED: &[(&str, &str, &str)] = &[
-    ("warm_p50_ms", "warm p50", "ms"),
-    ("warm_p95_ms", "warm p95", "ms"),
-    ("proxy_overhead_p50_ms", "proxy overhead p50", "ms"),
-    ("proxy_overhead_p95_ms", "proxy overhead p95", "ms"),
-    ("daemon_rss_mb", "daemon RSS", "MB"),
-    ("cold_start_total_ms", "cold start", "ms"),
-    ("cold_start_queue_ms", "actor queue", "ms"),
-    ("cold_start_spawn_ms", "cold start spawn", "ms"),
-    ("cold_start_readiness_ms", "cold start readiness", "ms"),
-    ("concurrency_knee", "concurrency knee", ""),
-    ("concurrency_knee_p95_ms", "p95 at the knee", "ms"),
-    ("sustained_cpu_pct_of_wall", "sustained CPU", "% of wall"),
+/// 리포트에 싣는 지표. `(baseline key, 표시 이름, 단위, 관측한 runner 편차 %)`
+///
+/// 마지막 값은 `v0.1.0`~`v0.1.3`의 baseline 네 개에서 **관측한** 폭이다. 그
+/// 구간에 런타임 변경이 거의 없으므로(control socket과 CLI는 요청 경로를 지나지
+/// 않는다) 차이는 거의 전부 runner 편차다. (PRD §73)
+///
+/// **표본 네 개로 잰 폭이고 분포가 아니다.** 통계적 한계가 아니라 "적어도 이만큼
+/// 흔들린다"는 하한으로 쓴다. 더 좁히려면 같은 commit을 여러 번 돌려야 한다.
+///
+/// `daemon RSS`만 2%다. 그 행의 변화는 읽을 만하고, 나머지는 이 폭을 넘을 때만
+/// 눈여겨볼 값이다.
+pub const TRACKED: &[(&str, &str, &str, f64)] = &[
+    ("warm_p50_ms", "warm p50", "ms", 57.0),
+    ("warm_p95_ms", "warm p95", "ms", 57.0),
+    ("proxy_overhead_p50_ms", "proxy overhead p50", "ms", 58.0),
+    ("proxy_overhead_p95_ms", "proxy overhead p95", "ms", 51.0),
+    ("daemon_rss_mb", "daemon RSS", "MB", 2.0),
+    ("cold_start_total_ms", "cold start", "ms", 24.0),
+    ("cold_start_queue_ms", "actor queue", "ms", 36.0),
+    ("cold_start_spawn_ms", "cold start spawn", "ms", 28.0),
+    (
+        "cold_start_readiness_ms",
+        "cold start readiness",
+        "ms",
+        29.0,
+    ),
+    ("concurrency_knee", "concurrency knee", "", 100.0),
+    ("concurrency_knee_p95_ms", "p95 at the knee", "ms", 86.0),
+    (
+        "sustained_cpu_pct_of_wall",
+        "sustained CPU",
+        "% of wall",
+        15.0,
+    ),
 ];
 
 #[cfg(test)]
@@ -189,6 +218,8 @@ mod tests {
             unit: "ms",
             previous: 1.20,
             current: 0.91,
+            // 전의 공통 문턱과 같은 값. 이 테스트들의 뜻을 바꾸지 않는다.
+            noise_pct: 30.0,
         };
 
         assert!(change.percent().expect("comparable") < 0.0);
@@ -202,6 +233,8 @@ mod tests {
             unit: "ms",
             previous: 0.45,
             current: 0.70,
+            // 전의 공통 문턱과 같은 값. 이 테스트들의 뜻을 바꾸지 않는다.
+            noise_pct: 30.0,
         };
 
         assert!(change.is_regression());
@@ -214,9 +247,66 @@ mod tests {
             unit: "ms",
             previous: 1.00,
             current: 1.10,
+            // 전의 공통 문턱과 같은 값. 이 테스트들의 뜻을 바꾸지 않는다.
+            noise_pct: 30.0,
         };
 
         assert!(!change.is_regression());
+    }
+
+    /// **지표마다 문턱이 다르다.** (PRD §73)
+    ///
+    /// 같은 +10%가 `daemon RSS`(잡음 2%)에서는 눈여겨볼 값이고
+    /// `proxy overhead`(잡음 58%)에서는 잡음이다. 공통 30%를 쓰면 12개 중
+    /// 7개에서 `(!)`가 상시로 뜬다.
+    #[test]
+    fn the_warning_threshold_follows_each_metrics_noise() {
+        let rss = Change {
+            metric: "daemon RSS",
+            unit: "MB",
+            previous: 6.00,
+            current: 6.60, // +10%
+            noise_pct: 2.0,
+        };
+        let overhead = Change {
+            metric: "proxy overhead p50",
+            unit: "ms",
+            previous: 0.40,
+            current: 0.44, // 같은 +10%
+            noise_pct: 58.0,
+        };
+
+        assert!(
+            rss.is_regression(),
+            "RSS는 2%만 흔들린다 — +10%는 눈여겨볼 값이다",
+        );
+        assert!(
+            !overhead.is_regression(),
+            "proxy overhead는 58% 흔들린다 — +10%는 잡음이다",
+        );
+    }
+
+    /// `TRACKED`의 잡음 값이 비어 있지 않다. (PRD §73)
+    ///
+    /// 0으로 두면 모든 변화가 경고가 되고, 너무 크게 두면 아무것도 경고가
+    /// 되지 않는다. 관측한 값을 적었는지 본다.
+    #[test]
+    fn every_tracked_metric_declares_its_noise() {
+        for (key, _, _, noise) in TRACKED {
+            assert!(
+                *noise > 0.0 && *noise <= 100.0,
+                "`{key}`의 잡음이 {noise}%다 — 관측한 값을 적어야 한다",
+            );
+        }
+        let rss = TRACKED
+            .iter()
+            .find(|(key, ..)| *key == "daemon_rss_mb")
+            .expect("RSS는 추적한다");
+        assert!(
+            rss.3 < 10.0,
+            "RSS는 유일하게 안정적인 지표다 — 잡음이 {}%로 적혀 있다",
+            rss.3,
+        );
     }
 
     #[test]
@@ -226,6 +316,8 @@ mod tests {
             unit: "ms",
             previous: 0.0,
             current: 1.0,
+            // 전의 공통 문턱과 같은 값. 이 테스트들의 뜻을 바꾸지 않는다.
+            noise_pct: 30.0,
         };
 
         assert_eq!(change.percent(), None);
