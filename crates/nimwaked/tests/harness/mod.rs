@@ -23,6 +23,13 @@ pub use nimwake_fixtures::testing::{
 /// daemon이 listen 주소를 알려줄 때까지 기다리는 시간.
 const STARTUP_DEADLINE: Duration = Duration::from_secs(20);
 
+/// daemon이 `SIGTERM`에 끝나기를 기다리는 상한.
+///
+/// 가장 긴 `shutdown_timeout_seconds`(테스트에서 5초)보다 넉넉해야 한다 —
+/// graceful shutdown이 진행 중인 daemon을 성급히 죽이면 잔존 프로세스를
+/// 보는 테스트가 거짓 실패한다.
+const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(30);
+
 static NEXT_DIR: AtomicU32 = AtomicU32::new(0);
 
 /// workspace 바이너리가 놓이는 디렉터리.
@@ -365,18 +372,46 @@ impl Daemon {
     }
 
     /// `SIGTERM`을 보내고 종료를 기다린다. 걸린 시간을 돌려준다.
+    /// `SIGTERM`을 보내고 종료를 기다린다. 걸린 시간을 돌려준다.
+    ///
+    /// 상한을 넘기면 `SIGKILL`로 끝낸다 — 측정값은 그때 상한보다 커진다.
+    /// 멈추지 않는 것이 먼저다.
     pub fn stop(&mut self) -> Duration {
         let started = std::time::Instant::now();
         terminate(&mut self.child);
-        let _ = self.child.wait();
+        if reap(&mut self.child, SHUTDOWN_DEADLINE).is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
         started.elapsed()
     }
 }
 
 impl Drop for Daemon {
     fn drop(&mut self) {
+        // **기다림에 상한을 둔다.**
+        //
+        // `wait()`를 그냥 부르면 SIGTERM에 죽지 않는 daemon이 **스위트 전체를
+        // 붙잡는다** — 테스트 하나가 실패하는 대신 CI가 15분 타임아웃으로
+        // 끝난다. 실제로 겪었다. 멈춤은 실패보다 나쁘다: 어느 테스트가
+        // 문제인지도 알려 주지 않는다.
         terminate(&mut self.child);
-        let _ = self.child.wait();
+        if reap(&mut self.child, SHUTDOWN_DEADLINE).is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+/// 상한 안에 끝나면 종료 코드를, 아니면 `None`을 돌려준다.
+fn reap(child: &mut Child, limit: Duration) -> Option<std::process::ExitStatus> {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match child.try_wait().ok()? {
+            Some(status) => return Some(status),
+            None if std::time::Instant::now() >= deadline => return None,
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
     }
 }
 

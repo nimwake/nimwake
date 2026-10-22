@@ -11,6 +11,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -26,6 +27,13 @@ pub const CONTRACT: u32 = 1;
 
 /// 요청 한 줄의 상한. 긴 입력이 메모리를 먹지 않게 한다. (PRD §85)
 const MAX_REQUEST_BYTES: u64 = 8 * 1024;
+
+/// 요청 한 줄을 받기까지의 상한. (PRD §85)
+///
+/// **크기 상한만으로는 모자라다.** 연결해 놓고 아무것도 보내지 않거나 한 글자씩
+/// 보내는 쪽이 있으면 그 task가 영원히 매달린다 — §83이 gateway에서 막은 것과
+/// 같은 모양이다. 창구에도 같은 상한이 필요하다.
+const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// socket을 열고 닫을 때까지 들고 있는다.
 ///
@@ -145,10 +153,32 @@ fn restrict_permissions(path: &Path) -> io::Result<()> {
 async fn handle(stream: UnixStream, registry: &AppRegistry) -> io::Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut line = String::new();
-    // 상한을 reader에 건다. 긴 입력이 메모리를 먹지 않는다. (PRD §85)
-    BufReader::new(reader.take(MAX_REQUEST_BYTES))
-        .read_line(&mut line)
-        .await?;
+    // 크기와 시간에 모두 상한을 건다. (PRD §85)
+    //
+    // 시간 상한이 없으면 연결해 놓고 보내지 않는 쪽이 task를 영원히 붙잡는다.
+    let read = tokio::time::timeout(
+        REQUEST_READ_TIMEOUT,
+        BufReader::new(reader.take(MAX_REQUEST_BYTES)).read_line(&mut line),
+    )
+    .await;
+
+    match read {
+        Ok(result) => {
+            result?;
+        }
+        // 상한을 넘겼다. 오류를 돌려주고 닫는다 — 끊기만 하면 왜인지 알 수 없다.
+        Err(_) => {
+            let response = error_response(&format!("no request within {REQUEST_READ_TIMEOUT:?}"));
+            writer.write_all(response.as_bytes()).await?;
+            writer
+                .write_all(
+                    b"
+",
+                )
+                .await?;
+            return writer.flush().await;
+        }
+    }
 
     let response = respond(&line, registry).await;
     writer.write_all(response.as_bytes()).await?;
