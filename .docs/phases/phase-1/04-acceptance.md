@@ -202,54 +202,47 @@ DoD 목록(아래)은 §12의 불변식과 1:1이 아니다. 어느 불변식이
 | ✓ | 24h soak | 표본 288 · non-200 0 · 잔존 app 0 · daemon 재기동 0 · RSS 2028 → 1132 KB | rc5 |
 | ✓ | 72h soak | 표본 862 · non-200 0 · 잔존 app 0 · **같은 pid 72시간** ([11](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/11-soak-d7c5590-72h.md)) | `d7c5590` |
 
-### soak 둘은 `v0.1.0`을 돌린 것이 아니다 — 알고 태깅했다
+### `v0.1.0`으로 55시간 — 알고 남긴 빚을 갚았다
 
-여섯 항목은 rc7에서 다시 얻었지만 **soak 둘은 그보다 앞선 바이너리의 근거다.**
-`nimwake-android`가 세운 기준을 그대로 적용하면 걸리는 것이 있다.
-
-> §77 · §78이 매 `acquire` 경로를 지나므로 `d7c5590`의 증거를 돌려 쓸 수 없다
-> — [09](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/09-android-acceptance.md)
-
-rc5 → `v0.1.0` 사이에 **정상 상태에 새로 생긴 연속 동작이 둘** 있다.
+`v0.1.0`을 태깅할 때 soak 둘이 더 앞선 바이너리의 근거라고 적었다. 그 뒤 기기가
+`v0.1.0`으로 soak을 돌렸다.
 
 ```text
-§80 eviction ticker   10초마다. 기기가 --min-free-memory-mb 512로 떠 있어 활성이고
-                      72h면 약 25,900회, 매번 모든 app의 status()를 읽는다.
-                      rc5 soak은 임계값 0이라 이 루프가 아예 돌지 않았다
-§83 header timer      연결마다 타이머 하나
+samples          656  (2026-10-15 21:07 → 10-18 04:15, 55.1h)
+non-200          0
+daemon restarts  0
+apps left awake  0
+daemon RSS       2192 → 1364 KB (max 2588)     줄었다 — 누수 없음
+cold start       p50 1.619s  p95 1.653s  max 2.342s   (Next.js 블로그)
+MemAvailable     min 2395 · p50 2757 MB
 ```
 
-**긴 실행이 한 번도 덮지 않았다.** 느린 누수는 24h 미만에서 보이지 않는다.
+**걱정하던 것이 확인됐다.** §80의 eviction ticker가 10초마다 도는 상태로
+55시간 — 약 19,800회다. 매번 모든 app의 `status()`를 읽는데 **daemon RSS가
+오히려 줄었다.** §83의 header timer도 연결마다 만들어졌다.
 
-그래서 `v0.1.0`을 끊으면서 기기에서 **rc7 블로그 72h soak을 돌리고 있다**
-(2026-10-15 19:32 → 10-18 19:32). 결함이 나오면 `v0.1.1`로 고친다.
+72시간을 채우지 못한 이유는 Core와 무관하다 — **배터리가 떨어져 폰이 죽었다.**
 
-이것을 기다리지 않고 태깅한 것은 **의식적인 선택**이다 — #59의 넷이 모두 끝나
-바로 쓸 수 있는 릴리스가 필요했고, §82 · §83이 정식 번호를 가져야 했다.
-나중에 이 표를 보는 사람이 "8/8이었다"로 읽지 않도록 여기 적어 둔다.
+### 폰을 서버로 쓰려면 상시 충전이 전제다
 
----
+```text
+10-15 21:07   100%
+10-17 23:58    10%
+10-18 04:15     1%   → 죽음
+
+drain 약 1.8 %/h      실제 앱(Next.js 블로그)을 5분마다 깨우는 부하
+```
+
+[`d7c5590`의 72h](https://github.com/nimwake/nimwake-android/blob/main/.docs/validation/11-soak-d7c5590-72h.md)는
+`0.29 %/h`였다. **6배다.** 그때는 2MB `echo` fixture였고 지금은 Node 프로세스를
+띄웠다 내리기를 반복한다.
+
+fixture로 잰 배터리 수치를 실사용에 쓰면 안 된다는 뜻이기도 하다.
 
 ## 남은 것
 
-```text
-rc7 72h soak    2026-10-15 19:32 → 10-18 19:32    진행 중
-                §80 ticker · §83 timer를 긴 실행에서 처음 본다
-```
-
-**그 밖에는 없다.** PRD §1~§83 구현, release gate, Android 8항목이 모두 끝났다.
-soak 결과는 `v0.1.0`의 판정을 바꾸지 않고, 결함이 나오면 `v0.1.1`로 고친다.
-
-### 출시 뒤 고칠 것 (기기 쪽에서 적어 온 것)
-
-```text
-host.conf가 초기화에서 살아남지 않는다        개발 머신에 사본을 두는 쪽으로
-Android가 메모리 압박에 Termux를 통째로 내린다  재부팅이 아니어서 Termux:Boot가
-                                              돌지 않는다 — nimwake-android#60이
-                                              heartbeat로 알아채게 했다
-```
-
-둘 다 Host Layer의 일이다. Core가 고칠 것은 없다.
+**없다.** PRD §1~§84 구현, release gate, Android 8항목, 그리고 `v0.1.0` 바이너리로
+55시간 soak까지 끝났다.
 
 ---
 
