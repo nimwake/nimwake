@@ -97,7 +97,12 @@ pub struct Change {
     /// 경고를 띄울 문턱이다. 모든 지표에 같은 30%를 쓰면 12개 중 7개에서
     /// 잡음이 그것을 넘어 `(!)`가 상시로 뜬다 — 상시로 뜨는 경고는 읽지 않게
     /// 되고, 읽지 않는 경고는 없는 것과 같다.
-    pub noise_pct: f64,
+    /// 관측한 runner 편차. `None`은 **비교할 수 없다**는 뜻이다.
+    ///
+    /// 전에는 `f64`였고 비교 불가를 큰 숫자(100% 이상)로 적었다. 그러면 표에
+    /// 문턱이 있는 것처럼 보이는데 실제로는 아무것도 경보하지 않는다 —
+    /// 있는 척하는 guard는 없는 것보다 나쁘다.
+    pub noise_pct: Option<f64>,
 }
 
 impl Change {
@@ -115,8 +120,12 @@ impl Change {
     ///
     /// 여기 걸린다고 release를 막지 않는다. 표시만 한다.
     pub fn is_regression(&self) -> bool {
-        self.percent()
-            .is_some_and(|percent| percent > self.noise_pct)
+        // 문턱이 없으면 경보하지 않는다. 그 지표는 한 번의 측정으로 판단할 수
+        // 없다고 적어 둔 것이다.
+        match self.noise_pct {
+            Some(noise) => self.percent().is_some_and(|percent| percent > noise),
+            None => false,
+        }
     }
 }
 
@@ -126,7 +135,7 @@ impl Change {
 pub fn compare(
     previous: &Baseline,
     current: &Baseline,
-    metrics: &[(&'static str, &'static str, &'static str, f64)],
+    metrics: &[(&'static str, &'static str, &'static str, Option<f64>)],
 ) -> Vec<Change> {
     metrics
         .iter()
@@ -164,34 +173,69 @@ pub fn metric_source(key: &str) -> &'static str {
         "sustained_cpu_pct_of_wall" => "/proc/<pid>/stat 의 utime·stime",
         key if key.starts_with("cold_start_") => "nimwake::startup trace (--trace-json)",
         key if key.starts_with("request_") => "nimwake::request trace (--trace-json)",
+        key if key.ends_with("_over_direct") => "warm load의 direct 경로로 나눈 비율",
         key if key.starts_with("concurrency_") => "concurrency sweep",
         _ => "warm load",
     }
 }
 
-pub const TRACKED: &[(&str, &str, &str, f64)] = &[
-    ("warm_p50_ms", "warm p50", "ms", 57.0),
-    ("warm_p95_ms", "warm p95", "ms", 57.0),
-    ("proxy_overhead_p50_ms", "proxy overhead p50", "ms", 58.0),
-    ("proxy_overhead_p95_ms", "proxy overhead p95", "ms", 51.0),
-    ("daemon_rss_mb", "daemon RSS", "MB", 2.0),
-    ("cold_start_total_ms", "cold start", "ms", 24.0),
-    ("cold_start_queue_ms", "actor queue", "ms", 36.0),
-    ("cold_start_spawn_ms", "cold start spawn", "ms", 28.0),
+pub const TRACKED: &[(&str, &str, &str, Option<f64>)] = &[
+    // ---- direct 경로로 나눈 비율. **문턱을 걸 수 있는 것들이다** ----
+    //
+    // 기계가 느려지면 절대값은 전부 움직이지만 비율은 붙어 있다. release
+    // baseline 다섯 개(v0.1.0~v0.1.4)에서:
+    //
+    //                          폭    최대 상승 전이   문턱
+    //   warm p50 / direct      15%        15%        25%
+    //   warm p95 / direct      30%        30%        45%
+    //   proxy connect / direct 10%        10%        20%
+    //
+    // **문턱은 폭이 아니라 관측한 최대 전이의 1.5배다.** 처음에 폭을 그대로
+    // 문턱으로 썼더니 과거 전이를 재생했을 때 경계에서 정확히 터졌다 — 전이가
+    // 폭만큼 움직일 수 있으므로 당연하다. 표본 네 전이로는 분포를 모르니
+    // 여유를 둔다.
+    ("warm_p50_over_direct", "warm p50 / direct", "x", Some(25.0)),
+    ("warm_p95_over_direct", "warm p95 / direct", "x", Some(45.0)),
     (
-        "cold_start_readiness_ms",
-        "cold start readiness",
-        "ms",
-        29.0,
+        "proxy_connect_over_direct",
+        "proxy connect / direct p50",
+        "x",
+        Some(20.0),
     ),
-    ("concurrency_knee", "concurrency knee", "", 100.0),
-    ("concurrency_knee_p95_ms", "p95 at the knee", "ms", 86.0),
+    // ---- 기계 속도에 덜 묶이는 것 ----
+    //
+    // RSS가 가장 좁다. 네 전이에서 상승이 1%뿐이었다.
+    ("daemon_rss_mb", "daemon RSS", "MB", Some(5.0)),
     (
         "sustained_cpu_pct_of_wall",
         "sustained CPU",
         "% of wall",
-        15.0,
+        Some(20.0),
     ),
+    ("cold_start_total_ms", "cold start", "ms", Some(40.0)),
+    ("cold_start_spawn_ms", "cold start spawn", "ms", Some(35.0)),
+    (
+        "cold_start_readiness_ms",
+        "cold start readiness",
+        "ms",
+        Some(30.0),
+    ),
+    // ---- 한 번의 측정으로 판단할 수 없는 것 ----
+    //
+    // 같은 코드로 돌린 다섯 release에서 폭이 100%를 넘었다. 문턱을 적어 두면
+    // 있는 척하는 guard가 된다. 위의 비율이 같은 것을 기계 없이 본다.
+    ("warm_p50_ms", "warm p50", "ms", None),
+    ("warm_p95_ms", "warm p95", "ms", None),
+    ("proxy_overhead_p50_ms", "proxy overhead p50", "ms", None),
+    ("proxy_overhead_p95_ms", "proxy overhead p95", "ms", None),
+    ("concurrency_knee_p95_ms", "p95 at the knee", "ms", None),
+    // 무릎은 단계 탐색이라 한 단계만 움직여도 두 배다.
+    ("concurrency_knee", "concurrency knee", "", None),
+    // 25~53 µs다. 다섯 표본의 폭이 112%이고 측정 단위에 가깝다.
+    ("cold_start_queue_ms", "actor queue", "ms", None),
+    // `knee_rps / direct_rps`는 넣지 않는다. 폭이 14%로 좁은데도 그렇다 —
+    // **처리량은 내려갈 때가 회귀인데 `is_regression`은 상승만 본다.**
+    // 터질 수 없는 방향의 guard는 없는 것보다 나쁘다. 방향을 다루게 되면 넣는다.
 ];
 
 #[cfg(test)]
@@ -299,7 +343,7 @@ mod tests {
             previous: 1.20,
             current: 0.91,
             // 전의 공통 문턱과 같은 값. 이 테스트들의 뜻을 바꾸지 않는다.
-            noise_pct: 30.0,
+            noise_pct: Some(30.0),
         };
 
         assert!(change.percent().expect("comparable") < 0.0);
@@ -314,7 +358,7 @@ mod tests {
             previous: 0.45,
             current: 0.70,
             // 전의 공통 문턱과 같은 값. 이 테스트들의 뜻을 바꾸지 않는다.
-            noise_pct: 30.0,
+            noise_pct: Some(30.0),
         };
 
         assert!(change.is_regression());
@@ -328,7 +372,7 @@ mod tests {
             previous: 1.00,
             current: 1.10,
             // 전의 공통 문턱과 같은 값. 이 테스트들의 뜻을 바꾸지 않는다.
-            noise_pct: 30.0,
+            noise_pct: Some(30.0),
         };
 
         assert!(!change.is_regression());
@@ -346,14 +390,14 @@ mod tests {
             unit: "MB",
             previous: 6.00,
             current: 6.60, // +10%
-            noise_pct: 2.0,
+            noise_pct: Some(2.0),
         };
         let overhead = Change {
             metric: "proxy overhead p50",
             unit: "ms",
             previous: 0.40,
             current: 0.44, // 같은 +10%
-            noise_pct: 58.0,
+            noise_pct: Some(58.0),
         };
 
         assert!(
@@ -366,25 +410,33 @@ mod tests {
         );
     }
 
-    /// `TRACKED`의 잡음 값이 비어 있지 않다. (PRD §73)
+    /// 적어 둔 문턱은 **경보가 될 수 있는 값**이어야 한다. (PRD §51)
     ///
-    /// 0으로 두면 모든 변화가 경고가 되고, 너무 크게 두면 아무것도 경고가
-    /// 되지 않는다. 관측한 값을 적었는지 본다.
+    /// 0으로 두면 모든 변화가 경고가 되고, 100%를 넘게 두면 아무것도 경고가
+    /// 되지 않는다. 후자를 `Some(114.0)`처럼 적으면 표에 문턱이 있는 것처럼
+    /// 보이는데 실제로는 없다 — 그런 지표는 `None`으로 적는다.
     #[test]
-    fn every_tracked_metric_declares_its_noise() {
+    fn every_declared_threshold_can_actually_fire() {
         for (key, _, _, noise) in TRACKED {
-            assert!(
-                *noise > 0.0 && *noise <= 100.0,
-                "`{key}`의 잡음이 {noise}%다 — 관측한 값을 적어야 한다",
-            );
+            if let Some(noise) = noise {
+                assert!(
+                    *noise > 0.0 && *noise <= 100.0,
+                    "`{key}`의 문턱이 {noise}%다 — 경보가 될 수 없으면 None으로 적는다",
+                );
+            }
         }
+
+        // **문턱이 있는 것이 하나는 있어야 한다.** 전부 `None`이면 비교 표가
+        // 아무것도 지키지 않는다.
+        let gated = TRACKED.iter().filter(|(.., noise)| noise.is_some()).count();
+        assert!(gated >= 4, "문턱이 있는 지표가 {gated}개뿐이다");
         let rss = TRACKED
             .iter()
             .find(|(key, ..)| *key == "daemon_rss_mb")
             .expect("RSS는 추적한다");
         assert!(
-            rss.3 < 10.0,
-            "RSS는 유일하게 안정적인 지표다 — 잡음이 {}%로 적혀 있다",
+            rss.3.is_some_and(|noise| noise < 10.0),
+            "RSS는 가장 안정적인 지표다 — 문턱이 {:?}로 적혀 있다",
             rss.3,
         );
     }
@@ -397,7 +449,7 @@ mod tests {
             previous: 0.0,
             current: 1.0,
             // 전의 공통 문턱과 같은 값. 이 테스트들의 뜻을 바꾸지 않는다.
-            noise_pct: 30.0,
+            noise_pct: Some(30.0),
         };
 
         assert_eq!(change.percent(), None);

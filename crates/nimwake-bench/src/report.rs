@@ -85,8 +85,14 @@ impl Report {
             if let Some(ns) = warm.paired.overhead_p95_ns {
                 baseline.set("proxy_overhead_p95_ms", ns as f64 / 1_000_000.0);
             }
-            // direct 쪽과 양쪽 rps를 함께 남긴다. overhead가 음수로 나왔을 때
+            // direct 쪽 백분위를 함께 남긴다. overhead가 음수로 나왔을 때
             // **왜 그런지 재구성할 수 있어야 한다.** 기기에서 그럴 일이 있었다.
+            //
+            // **`warm_rps`와 `warm_direct_rps`는 늘 같은 값이다.** 쌍마다 두
+            // 경로에 하나씩 보내므로 count와 경과 시간이 양쪽 모두 같다 —
+            // 구조적으로 같아지는 것이고 측정이 두 개인 것이 아니다. release
+            // baseline 다섯 개에서 소수점까지 일치했다. 처리량은 이 부하의
+            // 비교축이 아니다(무릎 탐색이 그것을 본다).
             baseline.set("warm_direct_p50_ms", millis(direct.p50));
             baseline.set("warm_direct_p95_ms", millis(direct.p95));
             baseline.set("warm_direct_rps", direct.rps);
@@ -170,7 +176,50 @@ impl Report {
             }
         }
 
+        Self::set_ratios(&mut baseline);
+
         baseline
+    }
+
+    /// direct 경로로 나눈 비율을 담는다. (PRD §51)
+    ///
+    /// **기계가 느려지면 절대값은 전부 움직인다.** v0.1.4의 baseline에서 절대
+    /// 지표 셋이 문턱을 넘었고 **셋 다 오경보였다** — Core를 지나지 않는
+    /// `warm_direct_*`가 같은 방향으로 같은 크기로 움직였다. runner가 느렸다.
+    ///
+    /// 비율은 그것을 지워 준다. release baseline 다섯 개에서:
+    ///
+    /// ```text
+    /// warm_p50 / direct_p50     2.82 3.25 3.16 3.04 3.07    폭  15%   (절대값 114%)
+    /// warm_p95 / direct_p95     1.83 2.37 2.33 2.30 2.15    폭  30%   (절대값 117%)
+    /// proxy_connect / direct    0.12 0.14 0.13 0.13 0.13    폭  10%   (절대값 114%)
+    /// ```
+    ///
+    /// **문턱을 걸 수 있는 쪽은 비율이다.** 절대값은 표에 남기지만 폭이 100%를
+    /// 넘으므로 경보가 되지 않는다.
+    ///
+    /// `warm_rps / warm_direct_rps`는 넣지 않는다 — 구조적으로 늘 `1.0`이다.
+    fn set_ratios(baseline: &mut Baseline) {
+        const RATIOS: &[(&str, &str, &str)] = &[
+            ("warm_p50_over_direct", "warm_p50_ms", "warm_direct_p50_ms"),
+            ("warm_p95_over_direct", "warm_p95_ms", "warm_direct_p95_ms"),
+            (
+                "proxy_connect_over_direct",
+                "request_proxy_connect_ms",
+                "warm_direct_p50_ms",
+            ),
+        ];
+
+        for (key, numerator, denominator) in RATIOS {
+            // 분모가 0이면 비율이 뜻을 갖지 않는다. 담지 않으면 빠진 지표를
+            // 알리는 경고가 그것을 이름으로 말한다.
+            let Some(bottom) = baseline.get(denominator).filter(|value| *value > 0.0) else {
+                continue;
+            };
+            if let Some(top) = baseline.get(numerator) {
+                baseline.set(key, top / bottom);
+            }
+        }
     }
 
     /// 돌린 시나리오가 내놓아야 하는데 **없는** 지표들.
@@ -206,6 +255,11 @@ impl Report {
         }
         if key.starts_with("concurrency_") {
             return !self.sweep.is_empty();
+        }
+        // proxy connect는 요청 trace에서 온다. `--trace-json`을 켜고 stress를
+        // 돌려야 생긴다.
+        if key == "proxy_connect_over_direct" {
+            return self.stress.is_some();
         }
         // warm 측정은 늘 돈다.
         true
@@ -486,6 +540,28 @@ impl Report {
             return;
         }
 
+        // **문턱이 있는데 비교되지 않은 것을 말한다.**
+        //
+        // 비교는 양쪽 baseline에 다 있어야 성립한다. 이전 것이 옛 코드로
+        // 만들어졌으면 비율 행이 통째로 빠지는데, 표만 보면 그 사실이 보이지
+        // 않는다 — 아래 설명문은 비율 행이 있다고 말하므로 더 헷갈린다.
+        let ungated: Vec<&str> = baseline::TRACKED
+            .iter()
+            .filter(|(.., noise)| noise.is_some())
+            .filter(|(key, metric, ..)| {
+                current.get(key).is_some() && !changes.iter().any(|c| c.metric == *metric)
+            })
+            .map(|(_, metric, ..)| *metric)
+            .collect();
+        if !ungated.is_empty() {
+            let _ = writeln!(
+                out,
+                "> 이번에 잰 지표 중 **{}개가 비교되지 않았다** — 이전 baseline에 그 값이 없다: {}.\n>\n> 지표를 새로 더한 다음 release에서 한 번 나타나는 상태다. 다음 비교부터 보인다.\n",
+                ungated.len(),
+                ungated.join(" · "),
+            );
+        }
+
         // **잡음 폭을 함께 낸다.** (PRD §73)
         //
         // Δ만 보면 거의 모든 행이 ±50%다 — 12개 지표 중 11개가 그만큼 흔들린다.
@@ -507,20 +583,24 @@ impl Report {
             );
             let _ = writeln!(
                 out,
-                "| {} | {:.2} {} | {:.2} {} | {delta} | ±{:.0}% |",
+                "| {} | {:.2} {} | {:.2} {} | {delta} | {} |",
                 change.metric,
                 change.previous,
                 change.unit,
                 change.current,
                 change.unit,
-                change.noise_pct,
+                // 문턱이 없으면 그렇게 적는다. 숫자를 적으면 있는 척하는 guard가 된다.
+                match change.noise_pct {
+                    Some(noise) => format!("±{noise:.0}%"),
+                    None => "비교 불가".to_owned(),
+                },
             );
         }
 
         // `(!)`의 뜻이 바뀌었다 — 공통 30%가 아니라 **그 지표의 관측 편차**다.
         let _ = writeln!(
             out,
-            "\n`(!)`는 그 지표의 관측 편차를 넘은 것이고 경고일 뿐이다 — release를 막지 않는다. `runner 편차`는 v0.1.0~v0.1.3의 baseline 네 개에서 관측한 폭이다(런타임 변경이 거의 없는 구간이라 거의 전부 runner 탓이다). 표본 네 개로 잰 하한이고 분포가 아니다. `daemon RSS`(±2%)만 작은 변화를 읽을 만하다. **다른 기계에서 돌린 baseline과 비교하면 이 폭이 뜻을 갖지 않는다** — 같은 종류의 runner끼리만 비교한다. (PRD §73)\n"
+            "\n`(!)`는 그 지표의 문턱을 넘은 것이고 경고일 뿐이다 — release를 막지 않는다.\n\n`/ direct`가 붙은 행이 **문턱을 걸 수 있는 것들이다.** 기계가 느려지면 절대 지표는 전부 움직이지만 그 비율은 붙어 있다 — `warm_direct_*`는 Core를 지나지 않으므로 같은 기계 효과를 함께 받고, 나누면 지워진다. 문턱은 v0.1.0~v0.1.4의 baseline 다섯 개에서 관측한 **최대 전이의 1.5배**다.\n\n`비교 불가`로 적힌 행은 표에 남기지만 경보하지 않는다. 같은 다섯 baseline에서 폭이 100%를 넘었다 — 문턱을 적으면 있는 척하는 guard가 된다. 그 행이 크게 움직였으면 **같은 행의 `/ direct` 비율을 먼저 본다.** 비율이 조용하면 기계가 느렸던 것이다.\n\n**다른 기계에서 돌린 baseline과 비교하면 절대 지표는 뜻을 갖지 않는다** — 비율은 그래도 비교할 수 있다. (PRD §51)\n"
         );
     }
 
@@ -864,5 +944,146 @@ mod tests {
     fn a_report_without_measurements_still_renders() {
         let text = Report::new("abc123").render();
         assert!(text.contains("abc123"));
+    }
+
+    /// 비율이 분자 ÷ 분모로 담긴다. (PRD §51)
+    #[test]
+    fn ratios_divide_by_the_direct_path() {
+        let mut baseline = Baseline::new("t");
+        baseline.set("warm_p50_ms", 1.076);
+        baseline.set("warm_direct_p50_ms", 0.351);
+        baseline.set("warm_p95_ms", 1.811);
+        baseline.set("warm_direct_p95_ms", 0.844);
+
+        Report::set_ratios(&mut baseline);
+
+        // v0.1.4의 실제 값이다. 3.07과 2.15가 나와야 한다.
+        let p50 = baseline.get("warm_p50_over_direct").expect("p50 비율");
+        let p95 = baseline.get("warm_p95_over_direct").expect("p95 비율");
+        assert!((p50 - 1.076 / 0.351).abs() < 1e-9, "{p50}");
+        assert!((p95 - 1.811 / 0.844).abs() < 1e-9, "{p95}");
+    }
+
+    /// **분모가 없거나 0이면 담지 않는다.**
+    ///
+    /// 0으로 나눈 `inf`를 담으면 비교 표에 `inf`가 찍히고, 그보다 나쁘게는
+    /// 그 지표가 "있다"고 세어져 빠진 지표 경고가 침묵한다.
+    #[test]
+    fn a_ratio_without_a_denominator_is_not_recorded() {
+        for direct in [None, Some(0.0)] {
+            let mut baseline = Baseline::new("t");
+            baseline.set("warm_p50_ms", 1.0);
+            if let Some(value) = direct {
+                baseline.set("warm_direct_p50_ms", value);
+            }
+
+            Report::set_ratios(&mut baseline);
+
+            assert_eq!(
+                baseline.get("warm_p50_over_direct"),
+                None,
+                "분모가 {direct:?}일 때 비율을 담으면 안 된다",
+            );
+        }
+    }
+
+    /// **느린 기계는 비율을 움직이지 않는다.** (PRD §51)
+    ///
+    /// v0.1.3과 v0.1.4의 실제 baseline이다. 두 run 사이에 요청 경로의 코드는
+    /// 바뀌지 않았고(v0.1.4가 고친 것은 CLI의 오류 판별이다) **절대값은 40%
+    /// 넘게 움직였다.** direct 경로도 같이 움직였으므로 원인은 기계다.
+    ///
+    /// 절대값 문턱으로는 경보가 나고 비율로는 나지 않아야 한다.
+    #[test]
+    fn a_slower_runner_moves_the_absolute_values_but_not_the_ratio() {
+        let mut before = Baseline::new("v0.1.3");
+        before.set("warm_p50_ms", 0.769);
+        before.set("warm_direct_p50_ms", 0.253);
+        let mut after = Baseline::new("v0.1.4");
+        after.set("warm_p50_ms", 1.076);
+        after.set("warm_direct_p50_ms", 0.351);
+        Report::set_ratios(&mut before);
+        Report::set_ratios(&mut after);
+
+        let absolute = (after.get("warm_p50_ms").unwrap() - before.get("warm_p50_ms").unwrap())
+            / before.get("warm_p50_ms").unwrap()
+            * 100.0;
+        let ratio = (after.get("warm_p50_over_direct").unwrap()
+            - before.get("warm_p50_over_direct").unwrap())
+            / before.get("warm_p50_over_direct").unwrap()
+            * 100.0;
+
+        assert!(absolute > 35.0, "절대값은 크게 움직였다: {absolute:.0}%");
+        assert!(
+            ratio.abs() < 5.0,
+            "비율은 거의 그대로여야 한다: {ratio:.0}%"
+        );
+
+        // 문턱과 함께 보면: 절대값은 자기 폭(114%) 안이고 비율도 자기 폭(15%)
+        // 안이다. 중요한 것은 **비율의 폭이 훨씬 좁은데도 들어온다**는 것이다.
+        let ratio_noise = noise_of("warm_p50_over_direct");
+        assert!(ratio.abs() < ratio_noise, "{ratio:.0}% < {ratio_noise}%");
+
+        // **문턱이 절대값 이동폭보다 좁은데도 비율은 그 안에 든다.** 그것이
+        // 비율로 가는 이유다 — 같은 문턱을 절대값에 걸면 울렸을 변화다.
+        assert!(
+            ratio_noise < absolute,
+            "문턱 {ratio_noise}%를 절대값에 걸면 {absolute:.0}% 변화가 울린다 —              비율은 {ratio:.0}%로 그 안에 든다",
+        );
+    }
+
+    /// **진짜 회귀는 잡는다.** (PRD §51)
+    ///
+    /// 위 테스트가 "느린 기계는 울리지 않는다"를 본다. 그것만으로는 아무것도
+    /// 울리지 않는 문턱도 통과한다. 이쪽이 반대 방향이다 — **기계는 그대로인데
+    /// gateway만 느려진 경우.**
+    ///
+    /// 그런 회귀는 `direct`를 움직이지 않으므로 비율에 그대로 나타난다.
+    #[test]
+    fn a_real_regression_still_fires() {
+        let direct = 0.253;
+        let mut before = Baseline::new("before");
+        before.set("warm_p50_ms", 0.769);
+        before.set("warm_direct_p50_ms", direct);
+
+        // gateway만 30% 느려졌다. 기계는 그대로다.
+        let mut after = Baseline::new("after");
+        after.set("warm_p50_ms", 0.769 * 1.30);
+        after.set("warm_direct_p50_ms", direct);
+
+        Report::set_ratios(&mut before);
+        Report::set_ratios(&mut after);
+
+        let changes = baseline::compare(&before, &after, baseline::TRACKED);
+        let ratio = changes
+            .iter()
+            .find(|change| change.metric == "warm p50 / direct")
+            .expect("비율이 비교 목록에 있어야 한다");
+
+        assert!(
+            ratio.is_regression(),
+            "gateway만 30% 느려진 것은 잡아야 한다: {:?} vs 문턱 {:?}",
+            ratio.percent(),
+            ratio.noise_pct,
+        );
+
+        // 절대값 쪽은 **문턱이 없으므로** 울리지 않는다. 그것이 설계다 —
+        // 같은 사실을 비율이 말한다.
+        let absolute = changes
+            .iter()
+            .find(|change| change.metric == "warm p50")
+            .expect("절대값도 표에는 있어야 한다");
+        assert_eq!(absolute.noise_pct, None, "절대값은 비교 불가로 적는다");
+        assert!(!absolute.is_regression(), "문턱이 없으면 울리지 않는다");
+    }
+
+    /// 그 지표의 문턱. 없으면 테스트를 실패시킨다 — 비율은 문턱이 있어야 한다.
+    fn noise_of(key: &str) -> f64 {
+        baseline::TRACKED
+            .iter()
+            .find(|(name, ..)| *name == key)
+            .unwrap_or_else(|| panic!("{key}가 TRACKED에 없다"))
+            .3
+            .unwrap_or_else(|| panic!("{key}에 문턱이 없다 — 비율은 경보할 수 있어야 한다"))
     }
 }
