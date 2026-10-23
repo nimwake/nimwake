@@ -104,6 +104,17 @@ pub enum ValidationError {
     #[error("app `{app}`: host must not be empty")]
     EmptyHost { app: String },
 
+    #[error("app `{app}`: an alias must not be empty")]
+    EmptyAlias { app: String },
+
+    #[error(
+        "app `{app}`: alias `{alias}` is the same as its own host — one of the two says nothing"
+    )]
+    AliasMatchesOwnHost { app: String, alias: String },
+
+    #[error("app `{app}`: alias `{alias}` contains `*` — wildcards are not accepted (PRD §87)")]
+    WildcardAlias { app: String, alias: String },
+
     #[error("app `{app}`: command must not be empty")]
     EmptyCommand { app: String },
 

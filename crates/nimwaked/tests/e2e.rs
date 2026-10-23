@@ -856,6 +856,72 @@ fn a_reload_adds_an_app_without_touching_the_running_ones() {
     );
 }
 
+/// **재적재 양쪽 경로에서 alias가 살아남는다.** (PRD §87, §76)
+///
+/// 재적재는 집합을 **두 경로로** 만든다.
+///
+/// ```text
+/// 새로 들어온 app   Inner::from_specs   기동 때와 같은 경로
+/// 유지되는 app      Inner::insert       이쪽만 쓰는 경로
+/// ```
+///
+/// 처음에는 새 app만 확인했더니 **`insert`에서 alias를 통째로 빼는 뮤테이션이
+/// 잡히지 않았다.** 돌고 있던 app의 alias가 재적재 뒤에 사라져도 아무도 모른다.
+#[test]
+fn a_reloaded_app_resolves_by_its_aliases() {
+    let apps = Apps::new();
+    let first = free_port();
+    let added = free_port();
+    // blog는 재적재를 **건너서 유지된다** — `insert` 경로를 지난다.
+    //
+    // alias를 **대문자와 port suffix로** 적는다. 그 경로의 정규화까지 함께 본다.
+    echo_with_aliases(&apps, "blog", first, &["WWW.Blog.LocalHost:9999"]);
+
+    let daemon = Daemon::start(&apps);
+    let blog_before = daemon.get("blog.localhost");
+    assert_eq!(blog_before.status, 200);
+    assert_eq!(daemon.get("www.blog.localhost").status, 200);
+
+    // manifest를 더한다. alias를 **대문자와 port suffix로** 적는다.
+    echo_with_aliases(&apps, "api", added, &["WWW.Api.LocalHost:9999"]);
+    daemon.reload();
+
+    wait_for("the reload to report", Duration::from_secs(10), || {
+        daemon
+            .output()
+            .iter()
+            .any(|line| line.contains("reloaded:"))
+    });
+
+    let primary = daemon.get("api.localhost");
+    assert_eq!(primary.status, 200, "새 app이 서빙해야 한다");
+
+    let alias = daemon.get("www.api.localhost");
+    assert_eq!(
+        alias.status, 200,
+        "재적재로 들어온 alias도 찾아져야 한다 — 색인을 정규화하지 않으면 못 찾는다",
+    );
+    assert_eq!(
+        alias.pid(),
+        primary.pid(),
+        "alias는 같은 process가 받아야 한다",
+    );
+
+    // **유지된 app의 alias도 살아 있어야 한다.** 이쪽이 `insert` 경로다.
+    let kept = daemon.get("www.blog.localhost");
+    assert_eq!(
+        kept.status, 200,
+        "재적재를 건너서 유지된 app의 alias가 사라지면 안 된다",
+    );
+    assert_eq!(
+        kept.pid(),
+        blog_before.pid(),
+        "유지된 app은 같은 process여야 한다",
+    );
+
+    drop(daemon);
+}
+
 /// manifest에서 빼고 재적재하면 정지되고 routing에서 빠진다. (PRD §76)
 #[test]
 fn a_reload_stops_an_app_that_left_the_manifest() {
@@ -2653,4 +2719,125 @@ fn a_daemon_error_is_exit_seventy() {
         "daemon이 말한 이유를 전해야 한다: {err}",
     );
     assert!(out.trim().is_empty(), "오류일 때 표를 내면 안 된다: {out}",);
+}
+
+/// alias를 가진 app. (PRD §87)
+fn echo_with_aliases(apps: &Apps, name: &str, port: u16, aliases: &[&str]) {
+    let command = fixture("echo-server").display().to_string();
+    let list = aliases
+        .iter()
+        .map(|alias| format!("{alias:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    apps.manifest(
+        name,
+        &format!(
+            "name = \"{name}\"\n\
+\
+             \n\
+\
+             [server]\n\
+\
+             host = \"{name}.localhost\"\n\
+\
+             aliases = [{list}]\n\
+\
+             port = {port}\n\
+\
+             \n\
+\
+             [runtime]\n\
+\
+             command = [{command:?}, \"{port}\"]\n\
+\
+             working_dir = \".\"\n\
+\
+             \n\
+\
+             [lifecycle]\n\
+\
+             idle_timeout_seconds = 60\n\
+\
+             startup_timeout_seconds = 10\n\
+\
+             shutdown_timeout_seconds = 5\n\
+\
+             max_pending_requests = 100\n\
+",
+        ),
+    );
+}
+
+/// **alias로 와도 같은 process가 응답한다.** (PRD §87)
+///
+/// 이것이 §87의 전부다. alias가 없으면 두 호스트명을 서빙하려고 manifest를 둘로
+/// 나눠야 하고, `port` 중복이 거부되므로 **같은 application이 두 번 뜬다** —
+/// 메모리도 cold start도 두 배다.
+///
+/// pid를 비교한다. 같은 handle을 가리키는 것만으로는 "같은 process가 응답했다"가
+/// 되지 않는다.
+#[test]
+fn an_alias_reaches_the_same_process() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo_with_aliases(
+        &apps,
+        "blog",
+        port,
+        &["www.blog.localhost", "blog.tunnel.localhost"],
+    );
+    let daemon = Daemon::start(&apps);
+
+    let primary = daemon.get("blog.localhost");
+    assert_eq!(primary.status, 200);
+
+    for alias in [
+        "www.blog.localhost",
+        "blog.tunnel.localhost",
+        // port suffix와 대소문자를 무시한다.
+        "WWW.Blog.LocalHost:8080",
+    ] {
+        let served = daemon.get(alias);
+        assert_eq!(served.status, 200, "`{alias}`가 200이어야 한다");
+        assert_eq!(
+            served.pid(),
+            primary.pid(),
+            "`{alias}`는 같은 process가 받아야 한다 — 다르면 app이 두 번 뜬 것이다",
+        );
+    }
+
+    // **모르는 host는 그대로 모른다.** §74의 health probe가 여기 걸려 있다.
+    let probe = daemon.get("nimwake-health.invalid");
+    assert_eq!(probe.status, 404, "alias를 더해도 probe는 404여야 한다");
+
+    drop(daemon);
+}
+
+/// alias가 겹치면 **daemon이 뜨지 않는다.** (PRD §87, §21)
+///
+/// 조용히 덮으면 manifest 둘을 둔 사람이 한쪽이 사라진 것을 모른다.
+#[test]
+fn a_colliding_alias_refuses_to_start() {
+    let apps = Apps::new();
+    let first = free_port();
+    let second = free_port();
+    echo_with_aliases(&apps, "one", first, &["two.localhost"]);
+    echo(&apps, "two", second, Lifecycle::default());
+
+    let (code, output) = Daemon::run_expecting_failure(&apps);
+    assert_eq!(code, 78, "겹치는 alias는 기동을 막는다: {output}");
+}
+
+/// 뜻이 없거나 너무 넓은 alias도 기동을 막는다. (PRD §87)
+#[test]
+fn a_meaningless_alias_refuses_to_start() {
+    // 자기 host와 같은 것 · 와일드카드 · 빈 값.
+    for bad in ["blog.localhost", "BLOG.LocalHost:8080", "*.localhost", "  "] {
+        let apps = Apps::new();
+        let port = free_port();
+        echo_with_aliases(&apps, "blog", port, &[bad]);
+
+        let (code, output) = Daemon::run_expecting_failure(&apps);
+        assert_eq!(code, 78, "`aliases = [{bad:?}]`는 기동을 막는다: {output}");
+    }
 }

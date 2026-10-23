@@ -191,6 +191,35 @@ fn registry_rejects_conflicting_manifests() {
 
 // 재적재. (PRD §76)
 
+/// **manifest에 대문자나 port로 적힌 alias도 찾아진다.** (PRD §87)
+///
+/// 색인에 넣을 때 정규화해야 한다. `resolve`가 들어오는 `Host`만 정규화하고
+/// 색인은 날것으로 두면, manifest를 `WWW.Example.COM`으로 적은 사람의 alias가
+/// 영영 맞지 않는다 — **뮤테이션으로 이 구멍을 찾았다.**
+#[tokio::test]
+async fn an_alias_written_oddly_is_still_found() {
+    let runtime = Arc::new(FakeRuntime::default());
+    let mut blog = app_spec("blog", 3101);
+    blog.server.aliases = vec![
+        "WWW.Blog.LocalHost:9999".to_owned(),
+        "  tunnel.localhost  ".to_owned(),
+    ];
+
+    let registry = registry_of(&runtime, vec![blog]);
+
+    for host in ["www.blog.localhost", "tunnel.localhost"] {
+        assert!(
+            registry.resolve(host).is_some(),
+            "`{host}`가 찾아져야 한다 — 색인을 정규화하지 않으면 못 찾는다",
+        );
+    }
+
+    // 들어오는 쪽도 정규화되므로 어느 형태로 와도 같다.
+    assert!(registry.resolve("WWW.BLOG.localhost:1234").is_some());
+
+    registry.shutdown().await;
+}
+
 /// 이름·host·port를 바꾼 spec을 만든다.
 fn app_spec(name: &str, port: u16) -> nimwake_core::app::AppSpec {
     let mut spec = common::spec(60, 64);

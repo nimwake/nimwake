@@ -17,6 +17,7 @@ name = "hello"
 
 [server]
 host = "hello.localhost"
+aliases = ["www.hello.localhost"]   # 선택. 같은 app에 닿는 추가 host (§87)
 port = 3101
 
 [runtime]
@@ -251,3 +252,90 @@ ProcessExited(process_id)      → process_id 불일치 시 무시
 ---
 
 ← [Runtime Abstraction과 Process Ownership](../02-architecture/04-runtime.md) · [문서 인덱스](../README.md) · [Gateway Routing과 Request Lease](../02-architecture/06-gateway-and-requests.md) →
+
+---
+
+## 87. Host Aliases
+
+한 application이 **여러 `Host`로 닿을 수 있어야 한다.**
+
+```toml
+[server]
+host = "blog.example.com"
+aliases = ["www.blog.example.com", "blog.trycloudflare.com"]
+port = 3101
+```
+
+### 없을 때 치르는 값
+
+`host`는 하나뿐이고 `port` 중복은 거부된다(§21의 전체 검증). 그래서 두 호스트명을
+서빙하려면 **manifest를 둘로 나눠야 하고, 그러면 같은 application이 두 번 뜬다.**
+
+```text
+blog.example.com      → app "blog"   :3101   process 1
+www.blog.example.com  → app "blog2"  :3102   process 2   ← 같은 코드, 두 번째 사본
+```
+
+치르는 값:
+
+| | |
+| --- | --- |
+| 메모리 | application이 두 벌 뜬다. Next.js 한 벌이 ~96 MB였다 |
+| cold start | 호스트명마다 따로 깨어난다. 한쪽을 깨워도 다른 쪽은 잠들어 있다 |
+| idle timer | 둘이 독립이다. 번갈아 들어오면 **둘 다 깨어 있는다** |
+| 배포 | 같은 artifact를 두 디렉터리에 둬야 한다 |
+
+작은 기계를 겨냥하는 엔진에서 **apex와 `www`를 쓰는 것만으로 비용이 두 배가 되는
+것은 전제와 어긋난다.**
+
+### 왜 `host`를 목록으로 바꾸지 않는가
+
+```toml
+host = ["a", "b"]       # 이렇게 하지 않는다
+aliases = ["b"]         # 이렇게 한다
+```
+
+두 가지 이유다.
+
+**기존 manifest가 그대로 동작해야 한다.** `host`를 "문자열 또는 목록"으로 받으면
+deserializer를 직접 써야 하고, `deny_unknown_fields`와 함께 쓸 때 오류 메시지가
+나빠진다. `aliases`는 `#[serde(default)]`로 끝난다.
+
+**대표 host가 하나 있어야 한다.** §79의 상태 보고와 §86의 표가 app마다 host 하나를
+보여 준다. 목록이면 "무엇을 보여 줄까"를 또 정해야 한다. `host`가 대표이고
+`aliases`는 추가다.
+
+### 검증
+
+§21의 전체 검증에 들어간다. **하나라도 틀리면 daemon이 뜨지 않는다.**
+
+```text
+alias가 다른 app의 host와 겹친다      거부. 어느 app으로 갈지 정해지지 않는다
+alias가 다른 app의 alias와 겹친다      거부. 같은 이유
+alias가 자기 host와 같다              거부. 적어도 하나는 뜻이 없다
+alias가 비어 있다                     거부
+```
+
+`host`와 같은 규칙으로 정규화한다 — 앞뒤 공백, port suffix, 대소문자를 무시한다.
+`Blog.Example.COM:8080`과 `blog.example.com`은 같은 것이다.
+
+중복을 **조용히 덮지 않는다.** 나중에 읽은 것이 앞의 것을 밀어내면 manifest 두
+개를 둔 사람은 한쪽이 사라진 것을 모른다.
+
+### 바꾸지 않는 것
+
+| | |
+| --- | --- |
+| §82의 `allow` | app의 성질이므로 **모든 host에 같이 걸린다**. host마다 다른 대역을 두려면 app을 나눠야 한다 |
+| §79 로그 · §86 표 | 대표 `host`만 보여 준다. alias는 manifest에 있다 |
+| `X-Forwarded-For` | §81 그대로. 받은 `Host`를 고쳐 보내지 않는다 |
+| 와일드카드 | **하지 않는다.** `*.example.com`은 "어느 app인가"를 모호하게 만들고, 모르는 호스트명이 app을 깨우는 길이 된다(§74의 health probe가 깨진다) |
+
+와일드카드를 하지 않는 이유가 특히 중요하다. §74는 **등록되지 않은 `Host`가 `404`를
+받고 아무것도 깨우지 않는다**는 계약으로 supervisor의 probe를 받는다. 와일드카드가
+있으면 그 계약이 "등록되지 않은"의 뜻을 잃는다.
+
+→ [§21 Application Manifest](#21-application-manifest) ·
+[§23 Gateway Routing](06-gateway-and-requests.md#23-gateway-routing) ·
+[§74 Host Interface](../04-platform/03-host-interface.md#74-host-interface) ·
+[§82 Peer Allowlist](06-gateway-and-requests.md#82-per-application-peer-allowlist)
