@@ -173,6 +173,7 @@ pub fn metric_source(key: &str) -> &'static str {
         "sustained_cpu_pct_of_wall" => "/proc/<pid>/stat 의 utime·stime",
         key if key.starts_with("cold_start_") => "nimwake::startup trace (--trace-json)",
         key if key.starts_with("request_") => "nimwake::request trace (--trace-json)",
+        key if key.starts_with("sleeping_") => "잠든 app만 있는 daemon의 /proc",
         key if key.ends_with("_over_direct") => "warm load의 direct 경로로 나눈 비율",
         key if key.starts_with("concurrency_") => "concurrency sweep",
         _ => "warm load",
@@ -212,6 +213,21 @@ pub const TRACKED: &[(&str, &str, &str, Option<f64>)] = &[
     // **`ttfb`는 이 집합에서 사용자에게 가장 가까운 지연인데 문턱이 없었다.**
     ("request_ttfb_ms", "request ttfb", "ms", Some(40.0)),
     ("request_acquire_ms", "request acquire", "ms", Some(40.0)),
+    // ---- 잠든 발자국. **scale-to-zero의 정상 상태 비용** ----
+    //
+    // app 100개가 전부 잠든 daemon을 세 번 쟀고 5,596~5,624 KB였다 —
+    // **흔들림 0.5%로 이 모음에서 가장 좁다.** 기계 속도와 무관하다.
+    //
+    // app 하나당 5~6 KB다. 누가 app마다 할당을 더하면 100배로 보인다.
+    (
+        "sleeping_rss_mb",
+        "sleeping RSS (100 apps)",
+        "MB",
+        Some(5.0),
+    ),
+    // **app 수와 무관하게 10개였다**(1·10·50·200개에서 모두). app마다 fd를
+    // 쥐기 시작하면 바로 보인다.
+    ("sleeping_open_fds", "sleeping open fds", "", Some(5.0)),
     // ---- 기계 속도에 덜 묶이는 것 ----
     //
     // RSS가 가장 좁다. 네 전이에서 상승이 1%뿐이었다.

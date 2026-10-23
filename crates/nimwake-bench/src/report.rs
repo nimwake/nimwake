@@ -17,6 +17,7 @@ pub struct Report {
     warm: Option<WarmResult>,
     storm: Option<StormResult>,
     sweep: Vec<SweepRow>,
+    sleeping: Option<crate::SleepingResult>,
     stress: Option<StressResult>,
     sustained: Option<SustainedResult>,
     crash_loop: Option<CrashLoopResult>,
@@ -30,6 +31,7 @@ impl Report {
             warm: None,
             storm: None,
             sweep: Vec::new(),
+            sleeping: None,
             stress: None,
             sustained: None,
             crash_loop: None,
@@ -39,6 +41,10 @@ impl Report {
 
     pub fn warm_path(&mut self, warm: WarmResult) {
         self.warm = Some(warm);
+    }
+
+    pub fn sleeping(&mut self, sleeping: crate::SleepingResult) {
+        self.sleeping = Some(sleeping);
     }
 
     pub fn cold_start(&mut self, storm: StormResult) {
@@ -176,6 +182,17 @@ impl Report {
             }
         }
 
+        // 잠든 발자국. **scale-to-zero의 정상 상태 비용이다.**
+        if let Some(sleeping) = &self.sleeping {
+            baseline.set("sleeping_apps", sleeping.apps as f64);
+            if let Some(rss) = sleeping.rss {
+                baseline.set("sleeping_rss_mb", rss as f64 / (1024.0 * 1024.0));
+            }
+            if let Some(fds) = sleeping.fds {
+                baseline.set("sleeping_open_fds", fds as f64);
+            }
+        }
+
         Self::set_ratios(&mut baseline);
 
         baseline
@@ -250,6 +267,9 @@ impl Report {
         if key.starts_with("cold_start_") {
             return self.stress.is_some();
         }
+        if key.starts_with("sleeping_") {
+            return self.sleeping.is_some();
+        }
         if key.starts_with("sustained_") {
             return self.sustained.is_some();
         }
@@ -307,6 +327,7 @@ impl Report {
             "수치는 기록만 한다. merge와 release를 막지 않는다. (PRD §73)\n"
         );
 
+        self.render_sleeping(&mut out);
         self.render_warm(&mut out);
         self.render_cold_start(&mut out);
         self.render_sweep(&mut out);
@@ -684,6 +705,30 @@ impl Report {
         let _ = writeln!(out, "| --- | ---: |");
         let _ = writeln!(out, "| RSS | {} |", megabytes(warm.rss));
         let _ = writeln!(out, "| open fds | {} |\n", optional(warm.fds));
+    }
+
+    /// 잠든 app만 있을 때의 발자국. (PRD §50)
+    fn render_sleeping(&self, out: &mut String) {
+        let Some(sleeping) = &self.sleeping else {
+            return;
+        };
+
+        let _ = writeln!(out, "## 잠든 발자국\n");
+        let _ = writeln!(
+            out,
+            "app {}개가 **전부 잠든** 상태의 daemon이다. 요청을 보내지 않았다 — scale-to-zero의 정상 상태 비용이다.\n",
+            sleeping.apps,
+        );
+        let _ = writeln!(out, "| | |");
+        let _ = writeln!(out, "| --- | ---: |");
+        let _ = writeln!(out, "| RSS | {} |", megabytes(sleeping.rss));
+        let _ = writeln!(out, "| open fds | {} |", optional(sleeping.fds));
+        // **총 RSS를 app 수로 나누지 않는다.** 5 MB쯤의 고정 비용이 섞여
+        // "app당 56 KB"처럼 보인다. 두 점의 기울기가 실제 한계 비용이다.
+        if let Some(per_app) = sleeping.marginal_kb_per_app() {
+            let _ = writeln!(out, "| app당 (기울기) | {per_app:.1} KB |");
+        }
+        let _ = writeln!(out);
     }
 
     fn render_cold_start(&self, out: &mut String) {

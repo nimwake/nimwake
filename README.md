@@ -35,6 +35,20 @@ tunnel. Cold start is 1.6 seconds, of which Nimwake's own share is about 30 ms;
 warm requests take 27–52 ms. Across 72-hour and 24-hour soak runs it logged zero
 non-200 responses, zero daemon restarts and zero orphaned processes.
 
+Core's own footprint, with 100 applications declared and all of them asleep:
+
+```text
+RSS             5.5 MB      (5.48 - 5.59 across three runs)
+open fds        11          unchanged from 1 to 200 applications
+threads         9           likewise
+per application 6 KB        the slope, not the average
+idle wakeups    0 per hour  measured over 60s with every application asleep
+```
+
+That is the state scale-to-zero is designed to reach, so it is the number that
+matters: 100 sleeping applications cost about what one empty daemon costs. The
+benchmark measures it on every run and the release gate watches it.
+
 What works today:
 
 - HTTP gateway with host-based routing and reverse proxy
