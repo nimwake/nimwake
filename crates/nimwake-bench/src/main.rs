@@ -51,6 +51,13 @@ const WARM_CONNECTIONS: usize = 8;
 const STRESS_CYCLES: usize = 1000;
 const STRESS_APPS: usize = 10;
 
+/// 잠든 발자국을 잴 때 쓰는 app 수. (PRD §50)
+///
+/// 100개에서 app당 비용이 또렷하게 보이고, 세 번 재어 5,596~5,624 KB였다
+/// (흔들림 0.5% — 이 모음에서 가장 좁다). 더 늘려도 기울기는 같고 manifest를
+/// 쓰는 시간만 늘어난다.
+const SLEEPING_APPS: usize = 100;
+
 /// sustained warm load 기본값.
 const SUSTAINED_SECONDS: u64 = 30;
 const SUSTAINED_CONNECTIONS: usize = 8;
@@ -78,6 +85,11 @@ fn main() -> std::process::ExitCode {
 fn run() -> Result<String, String> {
     let options = Options::from_args()?;
     let mut report = Report::new(&options.commit);
+
+    // **잠든 발자국을 먼저 잰다.** 다른 시나리오가 app을 깨우고 나면 할당이
+    // 섞인다. 요청을 보내지 않으므로 빠르다.
+    let sleeping = measure_sleeping(&options)?;
+    report.sleeping(sleeping);
 
     let warm = measure_warm(&options)?;
     report.warm_path(warm);
@@ -200,6 +212,7 @@ struct Options {
     stress: bool,
     stress_cycles: usize,
     stress_apps: usize,
+    sleeping_apps: usize,
     sustained_seconds: u64,
 }
 
@@ -224,6 +237,7 @@ impl Options {
             stress: false,
             stress_cycles: STRESS_CYCLES,
             stress_apps: STRESS_APPS,
+            sleeping_apps: SLEEPING_APPS,
             sustained_seconds: SUSTAINED_SECONDS,
         };
 
@@ -247,6 +261,11 @@ impl Options {
                     options.sustained_seconds = value()?
                         .parse()
                         .map_err(|_| "`--sustained-seconds` expects a number".to_owned())?;
+                }
+                "--sleeping-apps" => {
+                    options.sleeping_apps = value()?
+                        .parse()
+                        .map_err(|_| "`--sleeping-apps` expects a number".to_owned())?;
                 }
                 "--stress-apps" => {
                     options.stress_apps = value()?
@@ -289,6 +308,47 @@ impl Options {
 ///
 /// 두 경로를 한 번에 잰다. 따로 재면 각자 최대 rps로 밀어 부하가 달라지고,
 /// 그 상태로 백분위를 빼면 overhead가 아니다. (`load_paired` 참고)
+/// 잠든 app `N`개와 함께 daemon을 띄우고 자원을 읽는다. (PRD §50)
+///
+/// 요청을 보내지 않는다 — 전부 `SLEEPING`인 상태를 본다.
+fn measure_sleeping(options: &Options) -> Result<SleepingResult, String> {
+    // **두 점을 잰다.** 한 점으로는 고정 비용과 app당 비용을 가를 수 없다.
+    let one_app_rss = sleeping_rss(options, 1)?.0;
+    let (rss, fds) = sleeping_rss(options, options.sleeping_apps)?;
+
+    Ok(SleepingResult {
+        apps: options.sleeping_apps,
+        rss,
+        fds,
+        one_app_rss,
+    })
+}
+
+/// 잠든 app `count`개와 함께 daemon을 띄우고 `(RSS, fd)`를 읽는다.
+fn sleeping_rss(options: &Options, count: usize) -> Result<(Option<u64>, Option<usize>), String> {
+    let apps = Apps::new(&format!("sleeping{count}")).map_err(|error| error.to_string())?;
+    for index in 0..count {
+        let port = free_port();
+        apps.app(
+            &format!("sleeping{index}"),
+            port,
+            &[options.echo_server.display().to_string(), port.to_string()],
+        )
+        .map_err(|error| format!("failed to write a manifest: {error}"))?;
+    }
+
+    let daemon = Daemon::start(&options.nimwaked, apps.path())?;
+
+    // **기동 직후의 할당이 가라앉을 시간을 준다.** 바로 읽으면 manifest를 읽는
+    // 중의 임시 할당이 섞인다.
+    std::thread::sleep(Duration::from_secs(2));
+
+    Ok((
+        daemon::resident_memory(daemon.pid()),
+        daemon::open_descriptors(daemon.pid()),
+    ))
+}
+
 fn measure_warm(options: &Options) -> Result<WarmResult, String> {
     let direct_port = free_port();
     let mut backend = Backend::start(&options.echo_server, direct_port)?;
@@ -473,6 +533,38 @@ pub struct PairedLoad {
     pub inverted: usize,
 }
 
+/// 잠든 app이 많을 때 daemon이 쓰는 자원. (PRD §50)
+///
+/// **scale-to-zero의 정상 상태가 이것이다.** README가 "작은 기계에 앱 여러 개"를
+/// 약속하는데, 그 약속의 핵심 수치는 app 하나당 Core가 얼마를 쓰는가다 —
+/// 재어 둔 적이 없었다.
+///
+/// 깨어 있는 app의 메모리는 app의 것이고 Core의 비용이 아니다. 그래서 **아무것도
+/// 깨우지 않고** 잰다.
+pub struct SleepingResult {
+    pub apps: usize,
+    pub rss: Option<u64>,
+    pub fds: Option<usize>,
+    /// app 하나만 있을 때의 RSS. **한계 비용을 내려면 두 점이 필요하다.**
+    ///
+    /// 총 RSS를 app 수로 나누면 안 된다 — 5 MB쯤의 고정 비용이 섞여 "app당
+    /// 56 KB"처럼 보인다. 실제로는 기울기가 5~6 KB다. 처음 그렇게 적었다.
+    pub one_app_rss: Option<u64>,
+}
+
+impl SleepingResult {
+    /// app 하나를 더할 때 늘어나는 RSS(KB). 두 점의 기울기다.
+    #[must_use]
+    pub fn marginal_kb_per_app(&self) -> Option<f64> {
+        let (many, one) = (self.rss?, self.one_app_rss?);
+        if self.apps <= 1 {
+            return None;
+        }
+        let added = many.checked_sub(one)? as f64;
+        Some(added / (self.apps - 1) as f64 / 1024.0)
+    }
+}
+
 pub struct WarmResult {
     pub paired: PairedLoad,
     /// 이 측정에 쓴 동시 연결 수. 무릎과 비교해야 뜻이 있다. (PRD §50)
@@ -648,5 +740,70 @@ impl Backend {
 impl Drop for Backend {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod sleeping_tests {
+    use super::SleepingResult;
+
+    fn result(apps: usize, many_kb: u64, one_kb: u64) -> SleepingResult {
+        SleepingResult {
+            apps,
+            rss: Some(many_kb * 1024),
+            fds: Some(11),
+            one_app_rss: Some(one_kb * 1024),
+        }
+    }
+
+    /// **총 RSS를 app 수로 나누지 않는다.** 기울기를 낸다. (PRD §50)
+    ///
+    /// 처음에 총 RSS ÷ app 수로 적었더니 "app당 56 KB"가 나왔다. 5 MB쯤의 고정
+    /// 비용이 섞인 값이다 — 실제 한계 비용은 그 열 분의 일이다. 그 차이가
+    /// "이 기계에 app 100개를 올릴 수 있나"의 답을 바꾼다.
+    #[test]
+    fn the_per_app_cost_is_a_slope_not_an_average() {
+        // 실제로 잰 값이다. 1개에서 4,960 KB, 100개에서 5,584 KB.
+        let measured = result(100, 5_584, 4_960);
+
+        let slope = measured
+            .marginal_kb_per_app()
+            .expect("두 점이 있으면 기울기가 나온다");
+
+        // (5584 - 4960) / 99 = 6.3 KB
+        assert!((slope - 6.3).abs() < 0.1, "{slope}");
+
+        // 평균으로 내면 열 배 가까이 크게 보인다. 그것을 적으면 안 된다.
+        let average = 5_584.0 / 100.0;
+        assert!(average > slope * 8.0, "평균 {average} vs 기울기 {slope}");
+    }
+
+    /// 두 점이 안 되면 기울기를 내지 않는다.
+    #[test]
+    fn one_point_yields_no_slope() {
+        assert_eq!(result(1, 4_960, 4_960).marginal_kb_per_app(), None);
+
+        let missing = SleepingResult {
+            apps: 100,
+            rss: Some(5_584 * 1024),
+            fds: None,
+            one_app_rss: None,
+        };
+        assert_eq!(missing.marginal_kb_per_app(), None);
+    }
+
+    /// **RSS가 줄어도 깨지지 않는다.**
+    ///
+    /// 100개 쪽이 1개 쪽보다 적게 나올 수 있다 — 할당기 때문에 실제로 봤다
+    /// (1개 5,056 KB, 10개 5,004 KB). `checked_sub`가 없으면 u64가 되돌아
+    /// 감싸서 터무니없는 기울기가 나온다.
+    #[test]
+    fn a_smaller_many_app_rss_does_not_wrap() {
+        let shrunk = result(100, 5_004, 5_056);
+        assert_eq!(
+            shrunk.marginal_kb_per_app(),
+            None,
+            "줄어든 경우는 기울기를 내지 않는다",
+        );
     }
 }
