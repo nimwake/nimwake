@@ -139,11 +139,11 @@ impl RequestTrace {
             target: "nimwake::request",
             app,
             status,
-            routing_us = micros(self.routing_latency()),
-            acquire_us = micros(self.acquire_latency()),
-            proxy_connect_us = micros(self.proxy_connect_latency()),
-            backend_us = micros(self.backend_latency()),
-            ttfb_us = micros(self.time_to_first_byte()),
+            routing_ns = nanos(self.routing_latency()),
+            acquire_ns = nanos(self.acquire_latency()),
+            proxy_connect_ns = nanos(self.proxy_connect_latency()),
+            backend_ns = nanos(self.backend_latency()),
+            ttfb_ns = nanos(self.time_to_first_byte()),
             "request completed",
         );
     }
@@ -225,10 +225,10 @@ impl StartupTrace {
         tracing::info!(
             target: "nimwake::startup",
             app,
-            queue_us = micros_of(self.queue_latency()),
-            spawn_us = micros_of(self.spawn_latency()),
-            readiness_us = micros_of(self.readiness_latency()),
-            total_us = micros_of(self.total()),
+            queue_ns = nanos_of(self.queue_latency()),
+            spawn_ns = nanos_of(self.spawn_latency()),
+            readiness_ns = nanos_of(self.readiness_latency()),
+            total_ns = nanos_of(self.total()),
             "application started",
         );
     }
@@ -238,16 +238,22 @@ fn span(from: Option<Instant>, to: Option<Instant>) -> Option<Duration> {
     Some(to?.saturating_duration_since(from?))
 }
 
-/// 마이크로초. `u128`로 내보내면 `tracing`이 JSON에 **문자열**로 적는다.
+/// 나노초. `u128`로 내보내면 `tracing`이 JSON에 **문자열**로 적는다.
 /// 소비하는 쪽이 숫자로 읽을 수 있어야 하므로 `i64`로 맞춘다.
-/// 마이크로초 단위의 `i64`는 29만 년을 담는다.
-fn micros(span: Option<Duration>) -> i64 {
+/// 나노초 단위의 `i64`는 292년을 담는다.
+///
+/// **마이크로초였고 그래서 routing을 재지 못했다.** `as_micros()`가 버리므로
+/// 1 µs 아래인 구간은 `0`으로 나간다. routing은 host header를 보고 app을 찾는
+/// 것뿐이어서 개발 기계에서 2~5 µs, CI에서는 그 아래였다 — release baseline
+/// 다섯 개에서 `request_routing_ms`가 **모두 정확히 0이었다.** §50이 비교
+/// 항목으로 적은 구간인데 아무것도 재지 않고 있었다.
+fn nanos(span: Option<Duration>) -> i64 {
     // 아직 지나지 않은 구간은 -1로 남긴다. 0과 구분되어야 한다.
     span.map_or(-1, |span| {
-        i64::try_from(span.as_micros()).unwrap_or(i64::MAX)
+        i64::try_from(span.as_nanos()).unwrap_or(i64::MAX)
     })
 }
 
-fn micros_of(span: Duration) -> u64 {
-    u64::try_from(span.as_micros()).unwrap_or(u64::MAX)
+fn nanos_of(span: Duration) -> u64 {
+    u64::try_from(span.as_nanos()).unwrap_or(u64::MAX)
 }

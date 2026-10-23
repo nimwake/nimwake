@@ -399,7 +399,7 @@ fn benchmark_mode_emits_span_measurements() {
         .expect("a startup trace is emitted");
 
     // cold start는 단일 숫자가 아니라 구간으로 나와야 한다. (PRD §42)
-    for field in ["queue_us", "spawn_us", "readiness_us", "total_us"] {
+    for field in ["queue_ns", "spawn_ns", "readiness_ns", "total_ns"] {
         assert!(startup.contains(field), "`{field}` missing from: {startup}");
     }
 
@@ -415,35 +415,35 @@ fn benchmark_mode_emits_span_measurements() {
     let spans = numeric_fields(
         request,
         &[
-            "routing_us",
-            "acquire_us",
-            "proxy_connect_us",
-            "backend_us",
-            "ttfb_us",
+            "routing_ns",
+            "acquire_ns",
+            "proxy_connect_ns",
+            "backend_ns",
+            "ttfb_ns",
         ],
     );
 
     // proxy connect와 backend는 나뉘어 있어야 한다. (PRD §72)
     //
-    // 한동안 `proxy_connect_us`가 backend 왕복 전체를 담고 있었다. 둘을 합쳐
+    // 한동안 proxy connect 구간이 backend 왕복 전체를 담고 있었다. 둘을 합쳐
     // 두면 "연결이 느린가 / application이 느린가"를 구분할 수 없다.
-    let connect = spans["proxy_connect_us"];
-    let backend = spans["backend_us"];
-    let ttfb = spans["ttfb_us"];
+    let connect = spans["proxy_connect_ns"];
+    let backend = spans["backend_ns"];
+    let ttfb = spans["ttfb_ns"];
 
     assert!(
         connect + backend <= ttfb,
         "connect({connect}) + backend({backend}) must fit in ttfb({ttfb}): {request}",
     );
     assert!(
-        spans["routing_us"] + spans["acquire_us"] + connect + backend <= ttfb,
+        spans["routing_ns"] + spans["acquire_ns"] + connect + backend <= ttfb,
         "the spans must be consecutive sub-intervals of ttfb: {request}",
     );
 }
 
 /// JSON 한 줄에서 숫자 필드를 뽑는다. 문자열로 적혔으면 panic한다.
 ///
-/// `"queue_us":142`는 통과하고 `"queue_us":"142"`는 실패한다. 후자는 실제로
+/// `"queue_ns":142`는 통과하고 `"queue_ns":"142"`는 실패한다. 후자는 실제로
 /// 겪은 일이다. 계측값을 `u128`로 두면 tracing이 그렇게 적는다. (D29)
 fn numeric_fields<'a>(line: &str, names: &[&'a str]) -> std::collections::BTreeMap<&'a str, u64> {
     names

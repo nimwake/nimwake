@@ -202,6 +202,16 @@ pub const TRACKED: &[(&str, &str, &str, Option<f64>)] = &[
         "x",
         Some(20.0),
     ),
+    // ---- 요청 구간. **전에는 재기만 하고 비교하지 않았다** ----
+    //
+    // 다섯 baseline에서 폭이 23~26%이고, v0.1.4의 느린 runner에서도 움직이지
+    // 않았다(ttfb 1.407 → 1.266, acquire 1.147 → 1.074 — 둘 다 내려갔다).
+    // lifecycle stress의 표본이라 per-request 네트워크 지연보다 기동 작업이
+    // 지배하기 때문이다.
+    //
+    // **`ttfb`는 이 집합에서 사용자에게 가장 가까운 지연인데 문턱이 없었다.**
+    ("request_ttfb_ms", "request ttfb", "ms", Some(40.0)),
+    ("request_acquire_ms", "request acquire", "ms", Some(40.0)),
     // ---- 기계 속도에 덜 묶이는 것 ----
     //
     // RSS가 가장 좁다. 네 전이에서 상승이 1%뿐이었다.
@@ -233,6 +243,10 @@ pub const TRACKED: &[(&str, &str, &str, Option<f64>)] = &[
     ("concurrency_knee", "concurrency knee", "", None),
     // 25~53 µs다. 다섯 표본의 폭이 112%이고 측정 단위에 가깝다.
     ("cold_start_queue_ms", "actor queue", "ms", None),
+    // **이제 0이 아니다.** trace가 마이크로초였을 때는 1 µs 아래로 떨어져
+    // 다섯 baseline 모두 정확히 0이었다. 나노초로 올려 재기 시작했으니
+    // 문턱은 데이터가 쌓인 뒤에 정한다 — 지금 정하면 표본이 하나다.
+    ("request_routing_ms", "request routing", "ms", None),
     // `knee_rps / direct_rps`는 넣지 않는다. 폭이 14%로 좁은데도 그렇다 —
     // **처리량은 내려갈 때가 회귀인데 `is_regression`은 상승만 본다.**
     // 터질 수 없는 방향의 guard는 없는 것보다 나쁘다. 방향을 다루게 되면 넣는다.
