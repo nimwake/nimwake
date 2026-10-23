@@ -56,6 +56,32 @@ time_to_first_byte       received          → response_started
 request_total_latency    received          → 응답 완료
 ```
 
+### 단위는 나노초다 — 마이크로초로는 routing을 재지 못했다
+
+trace의 각 구간은 `<이름>_ns` 필드로 나간다.
+
+```text
+{"routing_ns":1078,"acquire_ns":1127283,"proxy_connect_ns":17517, …}
+```
+
+처음에는 마이크로초(`_us`)였고 `as_micros()`가 버리므로 **1 µs 아래인 구간은
+`0`으로 나갔다.** routing은 host header를 보고 app을 찾는 것뿐이어서 개발
+기계에서 2~5 µs, CI에서는 그 아래였다 — release baseline **다섯 개에서
+`request_routing_ms`가 모두 정확히 0이었다.** 위의 파생 지표 목록에 올려 두고
+아무것도 재지 않고 있었다.
+
+나노초의 `i64`는 292년을 담는다. `u128`로 내보내면 `tracing`이 JSON에 **문자열**로
+적으므로 `i64`로 맞춘다 — 소비하는 쪽이 숫자로 읽어야 한다.
+
+**아직 지나지 않은 구간은 `-1`이다.** `0`과 구분되어야 한다. 나노초로 올린 뒤에는
+`0`이 "너무 짧아서 못 쟀다"가 아니라 실제로 거의 0인 경우뿐이다.
+
+내보내는 쪽(`nimwake-core/src/trace.rs`)과 읽는 쪽(`nimwake-bench/src/daemon.rs`)은
+**짝인데 컴파일러가 묶어 주지 않는다** — 한쪽은 `tracing` 매크로의 식별자이고
+다른 쪽은 문자열이다. 이름이 어긋나면 bench가 멈추고 그렇게 말한다.
+
+---
+
 게이지:
 
 ```text

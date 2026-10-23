@@ -230,7 +230,7 @@ fn listen_port(line: &str) -> Option<u16> {
     authority.rsplit(':').next()?.parse().ok()
 }
 
-/// JSON 한 줄에서 `..._us` 값을 뽑는다.
+/// JSON 한 줄에서 `..._ns` 값을 뽑는다.
 ///
 /// serde를 들이지 않는다. 우리가 직접 내보낸 형식이고, 필요한 것은 정수 네 개뿐이다.
 /// `nimwake::request` 한 줄에서 구간을 뽑는다.
@@ -239,24 +239,24 @@ fn listen_port(line: &str) -> Option<u16> {
 /// (예: 404, acquire 실패) 구간 비교에 쓸 수 없다.
 fn parse_request(line: &str) -> Option<RequestSpans> {
     Some(RequestSpans {
-        routing: micros(line, "routing_us")?,
-        acquire: micros(line, "acquire_us")?,
-        proxy_connect: micros(line, "proxy_connect_us")?,
-        backend: micros(line, "backend_us")?,
-        ttfb: micros(line, "ttfb_us")?,
+        routing: nanos(line, "routing_ns")?,
+        acquire: nanos(line, "acquire_ns")?,
+        proxy_connect: nanos(line, "proxy_connect_ns")?,
+        backend: nanos(line, "backend_ns")?,
+        ttfb: nanos(line, "ttfb_ns")?,
     })
 }
 
 fn parse_startup(line: &str) -> Option<StartupSpans> {
     Some(StartupSpans {
-        queue: micros(line, "queue_us")?,
-        spawn: micros(line, "spawn_us")?,
-        readiness: micros(line, "readiness_us")?,
-        total: micros(line, "total_us")?,
+        queue: nanos(line, "queue_ns")?,
+        spawn: nanos(line, "spawn_ns")?,
+        readiness: nanos(line, "readiness_ns")?,
+        total: nanos(line, "total_ns")?,
     })
 }
 
-fn micros(line: &str, field: &str) -> Option<Duration> {
+fn nanos(line: &str, field: &str) -> Option<Duration> {
     let needle = format!("\"{field}\":");
     let rest = line.split(&needle).nth(1)?;
     // 숫자로 나오는 것이 정상이지만, 따옴표에 싸여 있어도 읽는다.
@@ -266,7 +266,7 @@ fn micros(line: &str, field: &str) -> Option<Duration> {
         .chars()
         .take_while(char::is_ascii_digit)
         .collect();
-    Some(Duration::from_micros(digits.parse().ok()?))
+    Some(Duration::from_nanos(digits.parse().ok()?))
 }
 
 /// daemon의 메모리 사용량. Linux에서만 읽는다. (PRD §42)
