@@ -60,6 +60,10 @@ impl Inner {
             let name = spec.name.clone();
             let handle = app::spawn_with_limits(Arc::new(spec), Arc::clone(runtime), limits);
             by_host.insert(host, handle.clone());
+            // alias도 같은 handle을 가리킨다. (PRD §87)
+            for alias in &handle.spec().server.aliases {
+                by_host.insert(normalize_host(alias), handle.clone());
+            }
             by_name.insert(name, handle);
         }
 
@@ -69,6 +73,10 @@ impl Inner {
     fn insert(&mut self, name: String, handle: AppHandle) {
         self.by_host
             .insert(normalize_host(&handle.spec().server.host), handle.clone());
+        // alias도 같은 handle을 가리킨다. (PRD §87)
+        for alias in &handle.spec().server.aliases {
+            self.by_host.insert(normalize_host(alias), handle.clone());
+        }
         self.by_name.insert(name, handle);
     }
 }
@@ -273,7 +281,7 @@ impl AppRegistry {
 ///
 /// ```text
 /// unique name
-/// unique host
+/// unique host (alias를 포함한다 — PRD §87)
 /// unique port
 /// port != gateway port
 /// ```
@@ -301,6 +309,21 @@ pub fn validate(specs: &[AppSpec], gateway_port: u16) -> Result<(), ValidationEr
                 first: first.to_owned(),
                 second: spec.name.clone(),
             });
+        }
+
+        // **alias를 같은 맵에 넣는다.** 다른 app의 host와 겹치는 것도, 다른
+        // app의 alias와 겹치는 것도 같은 검사로 걸린다. (PRD §87)
+        //
+        // 조용히 덮으면 manifest 둘을 둔 사람이 한쪽이 사라진 것을 모른다.
+        for alias in &spec.server.aliases {
+            let alias = normalize_host(alias);
+            if let Some(first) = hosts.insert(alias.clone(), spec.name.as_str()) {
+                return Err(ValidationError::DuplicateHost {
+                    host: alias,
+                    first: first.to_owned(),
+                    second: spec.name.clone(),
+                });
+            }
         }
 
         if spec.server.port == gateway_port {
@@ -356,7 +379,7 @@ pub fn load_dir(dir: impl AsRef<Path>) -> Result<Vec<AppSpec>, ManifestError> {
     paths.iter().map(AppSpec::load).collect()
 }
 
-fn normalize_host(host: &str) -> String {
+pub(crate) fn normalize_host(host: &str) -> String {
     let host = host.trim();
     let host = host.split(':').next().unwrap_or(host);
     host.to_ascii_lowercase()
@@ -381,6 +404,101 @@ working_dir = "."
 "#
         ))
         .expect("manifest parses")
+    }
+
+    /// alias를 가진 spec. (PRD §87)
+    fn spec_with_aliases(name: &str, host: &str, port: u16, aliases: &[&str]) -> AppSpec {
+        let list = aliases
+            .iter()
+            .map(|alias| format!("\"{alias}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        AppSpec::from_toml(&format!(
+            r#"
+name = "{name}"
+
+[server]
+host = "{host}"
+aliases = [{list}]
+port = {port}
+
+[runtime]
+command = ["true"]
+working_dir = "."
+"#
+        ))
+        .expect("manifest parses")
+    }
+
+    /// **alias가 없으면 기존 manifest가 그대로 동작한다.** (PRD §87)
+    #[test]
+    fn a_manifest_without_aliases_still_parses() {
+        let parsed = spec("blog", "blog.localhost", 3101);
+        assert!(parsed.server.aliases.is_empty());
+        assert_eq!(validate(&[parsed], DEFAULT_GATEWAY_PORT), Ok(()));
+    }
+
+    /// alias가 다른 app의 host와 겹치면 거부한다. (PRD §87)
+    ///
+    /// **조용히 덮으면** manifest 둘을 둔 사람이 한쪽이 사라진 것을 모른다.
+    #[test]
+    fn rejects_an_alias_that_collides_with_another_host() {
+        let specs = vec![
+            spec_with_aliases("one", "one.localhost", 3101, &["two.localhost"]),
+            spec("two", "two.localhost", 3102),
+        ];
+        assert!(matches!(
+            validate(&specs, DEFAULT_GATEWAY_PORT),
+            Err(ValidationError::DuplicateHost { .. })
+        ));
+    }
+
+    /// 두 app이 같은 alias를 주장하는 것도 거부한다. (PRD §87)
+    #[test]
+    fn rejects_two_apps_claiming_the_same_alias() {
+        let specs = vec![
+            spec_with_aliases("one", "one.localhost", 3101, &["shared.localhost"]),
+            spec_with_aliases("two", "two.localhost", 3102, &["shared.localhost"]),
+        ];
+        assert!(matches!(
+            validate(&specs, DEFAULT_GATEWAY_PORT),
+            Err(ValidationError::DuplicateHost { .. })
+        ));
+    }
+
+    /// 자기 host와 같은 alias, 와일드카드, 빈 값은 거부한다. (PRD §87)
+    #[test]
+    fn rejects_aliases_that_say_nothing_or_too_much() {
+        // 대소문자와 port suffix를 무시하고 비교한다.
+        for alias in ["blog.localhost", "BLOG.LocalHost", "blog.localhost:8080"] {
+            let specs = vec![spec_with_aliases("blog", "blog.localhost", 3101, &[alias])];
+            assert!(
+                matches!(
+                    validate(&specs, DEFAULT_GATEWAY_PORT),
+                    Err(ValidationError::AliasMatchesOwnHost { .. })
+                ),
+                "`{alias}`는 자기 host와 같다",
+            );
+        }
+
+        // **와일드카드를 받지 않는다.** §74의 "등록되지 않은 Host는 404"가
+        // 뜻을 잃는다 — supervisor의 probe가 app을 깨우게 된다.
+        let specs = vec![spec_with_aliases(
+            "blog",
+            "blog.localhost",
+            3101,
+            &["*.localhost"],
+        )];
+        assert!(matches!(
+            validate(&specs, DEFAULT_GATEWAY_PORT),
+            Err(ValidationError::WildcardAlias { .. })
+        ));
+
+        let specs = vec![spec_with_aliases("blog", "blog.localhost", 3101, &["  "])];
+        assert!(matches!(
+            validate(&specs, DEFAULT_GATEWAY_PORT),
+            Err(ValidationError::EmptyAlias { .. })
+        ));
     }
 
     #[test]

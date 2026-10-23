@@ -24,6 +24,8 @@ pub fn spec(name: &str, port: u16, command: Vec<String>) -> AppSpec {
         name: name.to_owned(),
         server: ServerSpec {
             host: format!("{name}.localhost"),
+            // §87의 alias. 이 fixture는 쓰지 않는다.
+            aliases: Vec::new(),
             port,
             // 기본은 모두 허용. peer 제한을 보는 테스트가 직접 채운다. (PRD §82)
             allow: Vec::new(),

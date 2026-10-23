@@ -42,8 +42,21 @@ pub struct AppSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerSpec {
-    /// routing에 사용하는 `Host` header 값.
+    /// routing에 사용하는 `Host` header 값. **대표 host다.**
     pub host: String,
+    /// 같은 application에 닿는 추가 `Host` 값들. (PRD §87)
+    ///
+    /// **비어 있는 것이 기본이다.** 기존 manifest는 그대로 동작한다.
+    ///
+    /// 없으면 두 호스트명을 서빙하려고 manifest를 둘로 나눠야 하고, `port`
+    /// 중복이 거부되므로 **같은 application이 두 번 뜬다** — 메모리도 cold
+    /// start도 두 배다.
+    ///
+    /// 와일드카드는 받지 않는다. §74가 "등록되지 않은 `Host`는 `404`이고
+    /// 아무것도 깨우지 않는다"로 supervisor의 probe를 받는데, 와일드카드가
+    /// 있으면 "등록되지 않은"의 뜻이 사라진다.
+    #[serde(default)]
+    pub aliases: Vec<String>,
     /// application이 listen하는 loopback port.
     pub port: u16,
     /// 이 application에 닿아도 되는 peer 대역. (PRD §82)
@@ -173,6 +186,30 @@ impl AppSpec {
         if self.server.host.trim().is_empty() {
             return Err(ValidationError::EmptyHost { app: app() });
         }
+        // alias 하나하나의 검사. (PRD §87) 다른 app과 겹치는지는 registry의
+        // 전체 검증이 본다 — 여기서는 이 manifest 안에서 알 수 있는 것만 본다.
+        for alias in &self.server.aliases {
+            if alias.trim().is_empty() {
+                return Err(ValidationError::EmptyAlias { app: app() });
+            }
+            if alias.contains('*') {
+                return Err(ValidationError::WildcardAlias {
+                    app: app(),
+                    alias: alias.clone(),
+                });
+            }
+            // 대표 host와 같으면 둘 중 하나는 뜻이 없다. port suffix와 대소문자를
+            // 무시하고 비교해야 `Blog.COM:8080`과 `blog.com`을 같게 본다.
+            if crate::registry::normalize_host(alias)
+                == crate::registry::normalize_host(&self.server.host)
+            {
+                return Err(ValidationError::AliasMatchesOwnHost {
+                    app: app(),
+                    alias: alias.clone(),
+                });
+            }
+        }
+
         if self.runtime.command.is_empty() || self.runtime.command[0].trim().is_empty() {
             return Err(ValidationError::EmptyCommand { app: app() });
         }

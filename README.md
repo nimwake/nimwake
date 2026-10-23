@@ -59,6 +59,7 @@ What works today:
 - manifest reload on `SIGHUP`, status snapshot on `SIGUSR1`
 - `nimwake status` over a unix socket, with `--json` for scripts
 - per-application peer allowlists — `allow = ["192.168.0.0/16"]`
+- host aliases — one process answers several hostnames, apex and `www` included
 - `X-Forwarded-For`, request-span instrumentation, a benchmark harness
 
 ```text
