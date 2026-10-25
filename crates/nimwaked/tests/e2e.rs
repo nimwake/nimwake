@@ -2938,3 +2938,94 @@ fn find_header_end(bytes: &[u8]) -> Option<usize> {
         .position(|window| window == b"\r\n\r\n")
         .map(|at| at + 4)
 }
+
+/// **재적재 중에 SIGTERM이 와도 제거된 app이 살아남지 않는다.** (Invariant 10, PRD §71 §76)
+///
+/// 의심한 구멍은 이렇다.
+///
+/// ```text
+/// SIGHUP   → reload 시작. 제거된 app의 정지를 `tokio::spawn`으로 떼어 놓는다
+/// SIGTERM  → gateway drain → reloader.abort() → registry.shutdown()
+/// ```
+///
+/// 제거된 handle은 **이미 registry에서 빠졌으므로** `registry.shutdown()`이
+/// 건드리지 않는다. 떼어 놓은 정지 작업이 끝나기 전에 런타임이 내려가면 그
+/// process는 아무도 죽이지 않는다 — v0.1.2와 같은 부류다.
+///
+/// `stubborn-server`는 **SIGTERM을 무시한다.** 그래서 정지가 shutdown timeout을
+/// 다 쓰고, 그 창이 넓어져 경쟁을 재현할 수 있다.
+#[test]
+fn a_reload_racing_shutdown_leaves_no_process() {
+    let apps = Apps::new();
+    let keep_port = free_port();
+    let gone_port = free_port();
+
+    // 남을 app.
+    echo(
+        &apps,
+        "keep",
+        keep_port,
+        Lifecycle {
+            idle: 300,
+            ..Lifecycle::default()
+        },
+    );
+
+    // 제거될 app. SIGTERM을 무시하므로 정지에 shutdown timeout이 다 걸린다.
+    let stubborn = fixture("stubborn-server").display().to_string();
+    apps.manifest(
+        "gone",
+        &format!(
+            "name = \"gone\"\n\
+             \n\
+             [server]\n\
+             host = \"gone.localhost\"\n\
+             port = {gone_port}\n\
+             \n\
+             [runtime]\n\
+             command = [{stubborn:?}, \"{gone_port}\"]\n\
+             working_dir = \".\"\n\
+             \n\
+             [lifecycle]\n\
+             idle_timeout_seconds = 300\n\
+             startup_timeout_seconds = 10\n\
+             shutdown_timeout_seconds = 5\n\
+             max_pending_requests = 100\n",
+        ),
+    );
+
+    let mut daemon = Daemon::start(&apps);
+
+    // 둘 다 깨워 둔다. 깨어 있지 않으면 정지할 process가 없어 아무것도 재지 않는다.
+    assert_eq!(daemon.get("keep.localhost").status, 200);
+    assert_eq!(daemon.get("gone.localhost").status, 200);
+    assert!(is_listening(gone_port), "gone이 떠 있어야 한다");
+    assert!(is_listening(keep_port), "keep이 떠 있어야 한다");
+
+    // manifest를 지우고 재적재를 **시작만** 시킨다.
+    std::fs::remove_dir_all(apps.path().join("gone")).expect("the manifest is removed");
+    daemon.reload();
+
+    // reload가 정지 단계에 들어갈 틈을 준다. 끝나기를 기다리지 않는다 —
+    // 기다리면 경쟁이 사라진다.
+    std::thread::sleep(Duration::from_millis(300));
+
+    // 그 와중에 종료시킨다.
+    daemon.stop();
+
+    // **둘 다 죽어 있어야 한다.** child의 수명은 daemon의 수명을 넘지 않는다.
+    for (name, port) in [("keep", keep_port), ("gone", gone_port)] {
+        // stubborn은 SIGTERM을 무시하므로 shutdown timeout(5초) 뒤 SIGKILL을
+        // 받는다. 넉넉히 기다린다 — 안 죽는 것이 문제이고 느린 것은 아니다.
+        let stopped = (0..100).any(|attempt| {
+            if attempt > 0 {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            !is_listening(port)
+        });
+        assert!(
+            stopped,
+            "`{name}`의 process가 daemon보다 오래 살아남았다 (port {port}) — Invariant 10",
+        );
+    }
+}
