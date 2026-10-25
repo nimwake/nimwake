@@ -18,9 +18,6 @@ pub enum AppError {
 
     #[error("application process exited unexpectedly ({0})")]
     ProcessExited(String),
-
-    #[error("application manager is shutting down")]
-    ShuttingDown,
 }
 
 /// `AppHandle::acquire` 실패 이유.
@@ -88,8 +85,23 @@ pub enum ManifestError {
         source: Box<toml::de::Error>,
     },
 
-    #[error(transparent)]
-    Invalid(#[from] ValidationError),
+    /// 단일 app 검증 실패. **경로를 함께 담는다.**
+    ///
+    /// 전에는 `#[error(transparent)]`여서 경로가 사라졌다. `name = ""`인 manifest
+    /// 하나가 있으면 운영자가 보는 것이 이것뿐이었다.
+    ///
+    /// ```text
+    /// failed to load manifests from `/srv/apps`: app ``: name must not be empty
+    /// ```
+    ///
+    /// **어느 파일인지 말하지 않는다.** app이 스무 개면 스무 개를 열어 봐야 한다.
+    /// 이름이 비어 있을 때는 `app \`\``까지 비므로 단서가 아예 없다.
+    #[error("invalid manifest `{path}`: {source}")]
+    Invalid {
+        path: PathBuf,
+        #[source]
+        source: ValidationError,
+    },
 }
 
 /// manifest / registry 검증 실패.
