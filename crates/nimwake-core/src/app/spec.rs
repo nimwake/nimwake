@@ -170,7 +170,12 @@ impl AppSpec {
             }
         }
 
-        spec.validate()?;
+        // **경로를 붙여서 올린다.** `?`만 쓰면 `#[from]`이 경로 없는 변종을
+        // 만들고, 이름이 비어 있을 때 운영자에게 단서가 하나도 남지 않는다.
+        spec.validate().map_err(|source| ManifestError::Invalid {
+            path: path.to_path_buf(),
+            source,
+        })?;
         Ok(spec)
     }
 
@@ -373,5 +378,109 @@ working_dir = "."
                 "`{field} = 0` must be rejected",
             );
         }
+    }
+
+    /// 손으로 manifest를 쓸 때 가장 먼저 부딪히는 세 가지.
+    ///
+    /// **오류 변종을 전수 대조하다 이 셋에 테스트가 없는 것을 찾았다.**
+    /// `EmptyName` · `EmptyHost` · `Parse` 중 어느 것도 아무 테스트가 만들지
+    /// 않고 있었다 — manifest를 처음 쓰는 사람이 가장 먼저 만나는 셋이다.
+    fn write(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        let path = dir.join("nimwake.toml");
+        std::fs::write(&path, body).expect("manifest가 쓰인다");
+        path
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("nimwake-spec-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("디렉터리가 만들어진다");
+        dir
+    }
+
+    /// **이름이 비면 어느 파일인지 말해야 한다.** (PRD §21)
+    ///
+    /// 전에는 `app \`\`: name must not be empty`만 나왔다. 이름이 비었으니
+    /// `app \`\``까지 비고, **단서가 하나도 없다** — app이 스무 개면 스무 개를
+    /// 열어 봐야 한다.
+    #[test]
+    fn an_empty_name_names_the_file() {
+        let dir = scratch("empty-name");
+        let path = write(
+            &dir,
+            concat!(
+                "name = \"\"\n\n[server]\nhost = \"a.localhost\"\nport = 3101\n\n",
+                "[runtime]\ncommand = [\"true\"]\nworking_dir = \".\"\n",
+            ),
+        );
+
+        let error = AppSpec::load(&path).expect_err("빈 이름은 거부된다");
+        let message = error.to_string();
+
+        assert!(
+            matches!(
+                error,
+                ManifestError::Invalid {
+                    source: ValidationError::EmptyName { .. },
+                    ..
+                }
+            ),
+            "{message}",
+        );
+        assert!(
+            message.contains("nimwake.toml"),
+            "메시지가 파일을 가리켜야 한다: {message}",
+        );
+    }
+
+    /// host가 비어도 같다. (PRD §21)
+    #[test]
+    fn an_empty_host_names_the_file() {
+        let dir = scratch("empty-host");
+        let path = write(
+            &dir,
+            concat!(
+                "name = \"a\"\n\n[server]\nhost = \"\"\nport = 3101\n\n",
+                "[runtime]\ncommand = [\"true\"]\nworking_dir = \".\"\n",
+            ),
+        );
+
+        let error = AppSpec::load(&path).expect_err("빈 host는 거부된다");
+        let message = error.to_string();
+
+        assert!(
+            matches!(
+                error,
+                ManifestError::Invalid {
+                    source: ValidationError::EmptyHost { .. },
+                    ..
+                }
+            ),
+            "{message}",
+        );
+        assert!(message.contains("nimwake.toml"), "{message}");
+    }
+
+    /// **TOML이 깨지면 파일과 위치를 함께 보여 준다.** (PRD §21)
+    ///
+    /// 가장 흔한 실패다. 메시지가 쓸 만해야 한다.
+    #[test]
+    fn broken_toml_names_the_file_and_the_spot() {
+        let dir = scratch("broken-toml");
+        // `[server`로 닫지 않았다.
+        let path = write(&dir, "name = \"a\"\n[server\nhost = 1\n");
+
+        let error = AppSpec::load(&path).expect_err("깨진 TOML은 거부된다");
+        let message = error.to_string();
+
+        assert!(matches!(error, ManifestError::Parse { .. }), "{message}",);
+        assert!(
+            message.contains("nimwake.toml"),
+            "파일을 가리켜야 한다: {message}",
+        );
+        // toml 크레이트가 위치를 담아 준다. 그것을 버리지 않는지 본다.
+        assert!(
+            message.contains("expected") || message.contains("unclosed"),
+            "무엇이 틀렸는지 말해야 한다: {message}",
+        );
     }
 }
