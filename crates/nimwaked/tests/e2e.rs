@@ -2841,3 +2841,100 @@ fn a_meaningless_alias_refuses_to_start() {
         assert_eq!(code, 78, "`aliases = [{bad:?}]`는 기동을 막는다: {output}");
     }
 }
+
+/// **응답 본문은 흘려보낸다. 모아 두지 않는다.** (PRD §25)
+///
+/// `GatewayBody`가 `BoxBody`이므로 구조적으로 스트리밍이지만 **그것을 확인하는
+/// 것이 없었다.** 누가 응답을 들여다보려고 `.collect().await`를 한 줄 넣으면:
+///
+/// ```text
+/// 자원    큰 파일 하나가 그만큼 daemon의 메모리에 들어온다.
+///         정적 프론트엔드는 수 MB의 번들을 내보낸다
+/// 지연    첫 바이트가 마지막 바이트와 같이 도착한다. TTFB가 전송 시간이 된다
+/// ```
+///
+/// bench의 `echo-server`는 응답이 수십 바이트라 그 변화가 보이지 않는다.
+///
+/// `slow-body-server`는 header를 즉시 보내고 body를 20조각 x 100ms로 흘린다.
+/// 흘려보내면 첫 조각이 바로 오고, 모아 두면 2초 뒤에 전부 함께 온다.
+#[test]
+fn a_response_body_is_streamed_not_buffered() {
+    use std::io::{Read, Write};
+
+    let apps = Apps::new();
+    let port = free_port();
+    let command = [
+        fixture("slow-body-server").display().to_string(),
+        port.to_string(),
+    ];
+    apps.app("stream", port, &command, Lifecycle::default());
+    let daemon = Daemon::start(&apps);
+
+    // 깨워 둔다. cold start가 TTFB에 섞이면 재는 것이 달라진다.
+    assert_eq!(daemon.get("stream.localhost").status, 200);
+
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", daemon.port()))
+        .expect("gateway accepts the connection");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .expect("read timeout is set");
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: stream.localhost\r\nConnection: close\r\n\r\n")
+        .expect("the request is written");
+    stream.flush().expect("flushed");
+
+    let started = std::time::Instant::now();
+    let mut seen = Vec::new();
+    let mut first_body_byte_at = None;
+    let mut buffer = [0_u8; 256];
+
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                seen.extend_from_slice(&buffer[..read]);
+                // header가 끝난 뒤 한 바이트라도 왔으면 그때를 기록한다.
+                if first_body_byte_at.is_none() {
+                    if let Some(end) = find_header_end(&seen) {
+                        if seen.len() > end {
+                            first_body_byte_at = Some(started.elapsed());
+                        }
+                    }
+                }
+            }
+            Err(error) => panic!("read failed after {seen:?} bytes: {error}"),
+        }
+    }
+
+    let total = started.elapsed();
+    let first = first_body_byte_at.expect("본문의 첫 바이트가 와야 한다");
+
+    // fixture가 2초에 걸쳐 흘린다. 전송이 실제로 그만큼 걸렸는지 먼저 본다 —
+    // 안 걸렸으면 fixture가 한 번에 보낸 것이고 이 테스트는 아무것도 재지 않는다.
+    assert!(
+        total >= Duration::from_millis(1_500),
+        "fixture가 2초에 걸쳐 보내야 한다. {total:?}는 너무 빠르다",
+    );
+
+    // **첫 바이트가 전송의 절반도 지나기 전에 와야 한다.**
+    //
+    // 모아 두면 둘이 같아진다. 흘려보내면 첫 조각이 ~100ms에 온다.
+    assert!(
+        first * 2 < total,
+        "흘려보내면 첫 바이트가 일찍 온다. 첫 {first:?} 대 전체 {total:?} — \
+         둘이 비슷하면 응답을 모아 두고 있다",
+    );
+
+    let body_len = seen.len() - find_header_end(&seen).expect("header가 끝나야 한다");
+    assert_eq!(body_len, 200, "본문 200바이트가 모두 와야 한다");
+
+    drop(daemon);
+}
+
+/// `\r\n\r\n` 다음 위치. header가 아직 안 끝났으면 `None`.
+fn find_header_end(bytes: &[u8]) -> Option<usize> {
+    bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|at| at + 4)
+}
