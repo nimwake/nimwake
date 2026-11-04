@@ -35,6 +35,8 @@ pub fn spec(name: &str, port: u16, command: Vec<String>) -> AppSpec {
             working_dir: PathBuf::from("."),
             env: BTreeMap::new(),
         },
+        // §89의 일정. 이 fixture는 쓰지 않는다.
+        schedule: None,
         lifecycle: LifecycleSpec::default(),
     }
 }

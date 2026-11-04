@@ -35,6 +35,9 @@ pub struct AppSpec {
     pub name: String,
     pub server: ServerSpec,
     pub runtime: RuntimeSpec,
+    /// 정해진 시각에 깨운다. 없으면 깨우지 않는다. (PRD §89)
+    #[serde(default)]
+    pub schedule: Option<ScheduleSpec>,
     #[serde(default)]
     pub lifecycle: LifecycleSpec,
 }
@@ -78,6 +81,32 @@ impl ServerSpec {
     pub fn allows(&self, peer: IpAddr) -> bool {
         self.allow.is_empty() || self.allow.iter().any(|range| range.contains(peer))
     }
+}
+
+/// 예정된 깨움. (PRD §89)
+///
+/// **Core는 깨우기만 한다.** 작업은 application이 한다 — `[job]` 같은 새 app
+/// 종류를 만들지 않는다. port도 readiness도 없는 one-shot process를 받으면 상태
+/// 기계·readiness·idle timeout·§24가 모두 그 종류를 비켜 가야 한다.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleSpec {
+    /// 다섯 칸의 cron 표현식. **UTC로 읽는다.** (PRD §89)
+    pub wake: super::cron::Cron,
+
+    /// 깨운 뒤 lease를 쥐고 있을 시간. `0`이면 쥐지 않는다.
+    ///
+    /// lease가 있으면 idle timeout이 돌지 않고(§25–§26) §80 eviction이 고르지
+    /// 않는다 — 둘 다 이미 있는 기제이고 예정된 깨움은 그것을 쓸 뿐이다.
+    #[serde(default)]
+    pub keep_awake_seconds: u64,
+
+    /// 깨운 뒤 한 번 요청할 경로. 없으면 깨우기만 한다.
+    ///
+    /// **웹 서버 모양의 app을 그냥 깨우면 아무 일도 일어나지 않는다** — 서버가
+    /// 뜨기만 한다. 경로를 적으면 평범한 HTTP 핸들러로 작업을 받을 수 있다.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
