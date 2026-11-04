@@ -231,12 +231,30 @@ jobs:
         timeout-minutes: 10
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-user-static
+
+          # **`qemu-user-static`이 사라졌다.** runner 이미지가 Ubuntu 26.04
+          # (resolute)로 올라가면서 설치 후보가 없는 가상 패키지가 됐고,
+          # `qemu-user-binfmt`가 그것을 제공한다. v0.1.5 릴리스가 여기서
+          # 멈췄다 — 코드가 아니라 이미지가 움직인 것이다.
+          #
+          # 어느 쪽이 있든 받는다.
+          sudo apt-get install -y qemu-user-static || sudo apt-get install -y qemu-user-binfmt
+
+          # **실행기를 이름으로 찾는다.** 패키지 이름이 또 바뀌어도 이쪽은
+          # 버틴다. 없으면 **크게 실패한다** — smoke가 조용히 건너뛰면
+          # aarch64에서 한 번도 실행되지 않은 바이너리를 기기에 보낸다.
+          QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+          if [ -z "${QEMU}" ]; then
+            echo "::error::no aarch64 qemu runner was found after installing the qemu packages"
+            exit 1
+          fi
+          echo "qemu runner: ${QEMU}"
+
           mkdir -p empty-apps
 
           set +e
           # nimwaked는 로그를 stdout에 쓴다. stderr만 받으면 smoke.log가 비어 아래 grep이 실패한다.
-          qemu-aarch64-static "${OUT_DIR}/nimwaked" --apps empty-apps >smoke.log 2>&1
+          "${QEMU}" "${OUT_DIR}/nimwaked" --apps empty-apps >smoke.log 2>&1
           code=$?
           set -e
 
@@ -258,7 +276,7 @@ jobs:
           # 인자 없이 부르면 bench는 옆 바이너리를 찾아 **전체 벤치를 돌린다.**
           # 그래서 없는 경로를 주어 경로 검사에서 끝나게 한다.
           set +e
-          qemu-aarch64-static "${OUT_DIR}/nimwake-bench" --nimwaked /nonexistent >bench-smoke.log 2>&1
+          "${QEMU}" "${OUT_DIR}/nimwake-bench" --nimwaked /nonexistent >bench-smoke.log 2>&1
           code=$?
           set -e
 
@@ -274,7 +292,7 @@ jobs:
           # crash-server는 인자를 쓰지 않고 일부러 1로 끝난다.
           for binary in echo-server group-server slow-start-server; do
             set +e
-            qemu-aarch64-static "${OUT_DIR}/${binary}" >/dev/null 2>&1
+            "${QEMU}" "${OUT_DIR}/${binary}" >/dev/null 2>&1
             code=$?
             set -e
             if [ "${code}" != "101" ]; then
@@ -284,7 +302,7 @@ jobs:
           done
 
           set +e
-          qemu-aarch64-static "${OUT_DIR}/crash-server" >/dev/null 2>&1
+          "${QEMU}" "${OUT_DIR}/crash-server" >/dev/null 2>&1
           code=$?
           set -e
           if [ "${code}" != "1" ]; then
