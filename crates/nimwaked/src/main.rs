@@ -268,10 +268,30 @@ fn serve(specs: Vec<AppSpec>, options: &Options) -> Result<(), Failure> {
             limits,
         ));
 
+        // 정해진 시각에 app을 깨운다. (PRD §89)
+        //
+        // **일정이 하나도 없으면 띄우지 않는다.** §80이 꺼져 있을 때 ticker를
+        // 띄우지 않는 것과 같은 모양이다 — 전부 잠든 60초 동안 자발적 깨어남이
+        // 0회로 측정되어 있고(§51), 그것을 지킨다.
+        // 일정이 있는 app이 하나라도 있나. 없으면 스케줄러를 띄우지 않는다.
+        let has_schedule = registry
+            .apps()
+            .iter()
+            .any(|handle| handle.spec().schedule.is_some());
+        let scheduler = has_schedule.then(|| {
+            tokio::spawn(nimwake_core::schedule::run(
+                Arc::clone(&registry),
+                addr.port(),
+            ))
+        });
+
         gateway.serve(await_shutdown(interrupt, terminate)).await;
         reloader.abort();
         reporter.abort();
         evictor.abort();
+        if let Some(scheduler) = scheduler {
+            scheduler.abort();
+        }
         // **socket 파일을 명시적으로 지운다.** (PRD §85)
         //
         // 전에는 `abort()`가 `ControlSocket`을 drop시키는 것에 기댔다. 그런데

@@ -21,6 +21,7 @@ pub mod limits;
 mod memory;
 pub mod registry;
 pub mod runtime;
+pub mod schedule;
 pub mod trace;
 
 pub use app::{AppHandle, AppSpec, AppStateName, AppStatus, RequestLease, StopReason};

@@ -3,6 +3,7 @@
 mod backoff;
 pub mod cidr;
 mod command;
+mod cron;
 mod effect;
 mod handle;
 mod lease;

@@ -60,6 +60,7 @@ What works today:
 - `nimwake status` over a unix socket, with `--json` for scripts
 - per-application peer allowlists — `allow = ["192.168.0.0/16"]`
 - host aliases — one process answers several hostnames, apex and `www` included
+- scheduled wake — `wake = "0 18 * * *"` (UTC) starts an application without a request
 - `X-Forwarded-For`, request-span instrumentation, a benchmark harness
 
 ```text

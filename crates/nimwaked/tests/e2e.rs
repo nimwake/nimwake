@@ -3029,3 +3029,206 @@ fn a_reload_racing_shutdown_leaves_no_process() {
         );
     }
 }
+
+/// 일정을 가진 app. (PRD §89)
+fn echo_scheduled(apps: &Apps, name: &str, port: u16, schedule: &str, extra: &str) {
+    let command = fixture("echo-server").display().to_string();
+    apps.manifest(
+        name,
+        &format!(
+            "name = \"{name}\"\n\
+             \n\
+             [server]\n\
+             host = \"{name}.localhost\"\n\
+             port = {port}\n\
+             \n\
+             [runtime]\n\
+             command = [{command:?}, \"{port}\"]\n\
+             working_dir = \".\"\n\
+             \n\
+             [schedule]\n\
+             wake = \"{schedule}\"\n\
+             {extra}\n\
+             \n\
+             [lifecycle]\n\
+             idle_timeout_seconds = 300\n\
+             startup_timeout_seconds = 10\n\
+             shutdown_timeout_seconds = 5\n\
+             max_pending_requests = 100\n",
+        ),
+    );
+}
+
+/// **요청 없이 깨어난다.** (PRD §89)
+///
+/// 이것이 §89의 전부다. 지금까지 app을 깨우는 길은 요청뿐이었다 — Core가
+/// 처음으로 먼저 움직이는 주체가 된다.
+///
+/// 매 분(`* * * * *`)을 걸어 둔다. 기다리는 시간이 테스트 시간이 되므로 가장
+/// 잦은 일정을 쓴다 — 최악 60초다.
+#[test]
+fn a_schedule_wakes_the_app_without_a_request() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo_scheduled(&apps, "nightly", port, "* * * * *", "");
+    let daemon = Daemon::start(&apps);
+
+    // **아무 요청도 보내지 않는다.** 깨어 있으면 일정이 깨운 것이다.
+    assert!(
+        !is_listening(port),
+        "기동 직후에는 잠들어 있어야 한다 — scale-to-zero",
+    );
+
+    // **로그를 먼저 기다린다.** port는 기동 중에 열리고 `scheduled wake`는
+    // acquire가 돌아온 뒤에 찍힌다 — port를 보고 로그를 단언하면 너무 이르다.
+    wait_for(
+        "the schedule to log the wake",
+        Duration::from_secs(120),
+        || {
+            daemon
+                .output()
+                .iter()
+                .any(|line| line.contains("scheduled wake"))
+        },
+    );
+
+    assert!(is_listening(port), "깨웠으면 app이 떠 있어야 한다");
+
+    // **두 번 깨우지 않는다.** 잠이 due보다 일찍 끝나면 같은 due를 다시 보고
+    // 두 번 깨울 수 있다 — 벽시계로 확인하는 이유다.
+    let woke = daemon
+        .output()
+        .iter()
+        .filter(|line| line.contains("scheduled wake"))
+        .count();
+    assert_eq!(woke, 1, "한 번만 깨워야 한다: {:?}", daemon.output());
+
+    drop(daemon);
+}
+
+/// **경로를 적으면 한 번 찝는다.** (PRD §89)
+///
+/// 웹 서버 모양의 app을 그냥 깨우면 서버가 뜨기만 하고 아무 일도 일어나지
+/// 않는다. `echo-server`는 받은 경로를 로그에 남기므로 그것으로 확인한다.
+#[test]
+fn a_schedule_with_a_path_sends_one_request() {
+    let apps = Apps::new();
+    let port = free_port();
+    echo_scheduled(
+        &apps,
+        "poked",
+        port,
+        "* * * * *",
+        "path = \"/cron/nightly\"",
+    );
+    let daemon = Daemon::start(&apps);
+
+    wait_for(
+        "the scheduled request to be logged",
+        Duration::from_secs(90),
+        || {
+            daemon
+                .output()
+                .iter()
+                .any(|line| line.contains("scheduled request"))
+        },
+    );
+
+    let logged = daemon.output();
+    let line = logged
+        .iter()
+        .find(|line| line.contains("scheduled request"))
+        .expect("the scheduled request is logged");
+    assert!(line.contains("/cron/nightly"), "경로를 남겨야 한다: {line}");
+    assert!(line.contains("200"), "상태 코드를 남겨야 한다: {line}");
+
+    drop(daemon);
+}
+
+/// **`keep_awake_seconds` 동안은 idle timeout이 돌지 않는다.** (PRD §89)
+///
+/// lease를 쥐는 것이 두 가지를 공짜로 해결한다 — idle timeout이 멈추고(§25–§26)
+/// §80 eviction이 고르지 않는다. 그 기제를 쓰는 것이지 새 보호 장치를 더하는
+/// 것이 아니다. 그것을 확인한다.
+///
+/// idle 1초 · keep_awake 8초. lease가 없으면 깨어난 뒤 1초에 잠든다.
+#[test]
+fn keep_awake_holds_a_lease_past_the_idle_timeout() {
+    let apps = Apps::new();
+    let port = free_port();
+    let command = fixture("echo-server").display().to_string();
+    apps.manifest(
+        "held",
+        &format!(
+            "name = \"held\"
+             
+             [server]
+             host = \"held.localhost\"
+             port = {port}
+             
+             [runtime]
+             command = [{command:?}, \"{port}\"]
+             working_dir = \".\"
+             
+             [schedule]
+             wake = \"* * * * *\"
+             keep_awake_seconds = 8
+             
+             [lifecycle]
+             idle_timeout_seconds = 1
+             startup_timeout_seconds = 10
+             shutdown_timeout_seconds = 5
+             max_pending_requests = 100
+",
+        ),
+    );
+    let daemon = Daemon::start(&apps);
+
+    wait_for(
+        "the schedule to log the wake",
+        Duration::from_secs(120),
+        || {
+            daemon
+                .output()
+                .iter()
+                .any(|line| line.contains("scheduled wake"))
+        },
+    );
+
+    // **idle 1초를 넉넉히 넘겨 본다.** lease가 없으면 여기서 이미 잠들어 있다.
+    std::thread::sleep(Duration::from_secs(4));
+    assert!(
+        is_listening(port),
+        "keep_awake 동안은 idle timeout이 돌지 않아야 한다",
+    );
+
+    // lease를 놓으면 평소의 idle timeout이 돈다. 다시 잠든다.
+    wait_for(
+        "the app to sleep after the lease is released",
+        Duration::from_secs(30),
+        || !is_listening(port),
+    );
+
+    drop(daemon);
+}
+
+/// **일정이 틀리면 daemon이 뜨지 않는다.** (PRD §89, §21)
+///
+/// 조용히 건너뛰면 "새벽에 돌 줄 알았는데 안 돌았다"를 며칠 뒤에 안다.
+#[test]
+fn a_malformed_schedule_refuses_to_start() {
+    for bad in [
+        "0 18 * *",
+        "60 * * * *",
+        "*/0 * * * *",
+        "@daily",
+        "0 3 1 * 1",
+    ] {
+        let apps = Apps::new();
+        let port = free_port();
+        echo_scheduled(&apps, "broken", port, bad, "");
+
+        let (code, output) = Daemon::run_expecting_failure(&apps);
+        assert_eq!(code, 78, "`wake = \"{bad}\"`는 기동을 막는다: {output}");
+    }
+}
